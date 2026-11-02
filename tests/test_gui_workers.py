@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -55,6 +56,29 @@ def test_button_cancels_busy_worker_without_worker_event_loop(application, monke
     process_until(application, lambda: not thread.isRunning())
     assert messages == ["cancel delivered"]
     worker.deleteLater(); thread.deleteLater(); application.processEvents()
+
+
+def test_import_progress_updates_widgets_on_gui_thread(application, monkeypatch, tmp_path):
+    on_gui_thread = []
+
+    class RecordingBar(gui.QProgressBar):
+        def setValue(self, value):
+            on_gui_thread.append(threading.current_thread() is threading.main_thread())
+            super().setValue(value)
+
+    def reporting_import(source, project, cancelled, progress):
+        progress(42, "halfway")
+        raise Cancelled("stopped after progress")
+
+    monkeypatch.setattr(gui, "QProgressBar", RecordingBar)
+    monkeypatch.setattr(gui, "import_project", reporting_import)
+    monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", staticmethod(lambda *args: ("source.iso", "")))
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", staticmethod(lambda *args: str(tmp_path / "project")))
+    monkeypatch.setattr(gui.QMessageBox, "information", staticmethod(lambda *args: None))
+    window = gui.MainWindow()
+    window.start_import()
+    process_until(application, lambda: window.thread is None)
+    assert on_gui_thread == [True]
 
 
 def test_window_close_waits_for_active_import(application, monkeypatch, tmp_path):

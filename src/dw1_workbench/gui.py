@@ -384,17 +384,28 @@ class Workspace(QWidget):
             worker = ModelWorker(self.catalogue, self._entry(executable), self._entry(model),
                                  self._entry(texture), resource_id)
             worker.moveToThread(thread); thread.started.connect(worker.run)
-            worker.progress.connect(lambda value, message: (dialog.setValue(value), dialog.setLabelText(message)))
+            # Worker signals must reach bound slots of GUI-thread objects: a lambda has no
+            # receiver, so PySide would run it, and its widget repaints, in the worker thread.
+            worker.progress.connect(self._model_progress_changed)
             dialog.canceled.connect(lambda: worker.request_cancel())
             worker.succeeded.connect(self._model_loaded)
-            worker.failed.connect(lambda message: self.model_status.setText(f"Static preview unsupported: {message}"))
-            worker.cancelled.connect(lambda message: self.model_status.setText(message))
+            worker.failed.connect(self._model_failed)
+            worker.cancelled.connect(self.model_status.setText)
             worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater)
             thread.finished.connect(thread.deleteLater); thread.finished.connect(self._model_finished)
             self.model_thread, self.model_worker, self.model_progress = thread, worker, dialog
             thread.start()
         except Exception as exc:
             QMessageBox.critical(self, "Model preview failed", str(exc))
+
+    @Slot(int, str)
+    def _model_progress_changed(self, value, message):
+        if self.model_progress:
+            self.model_progress.setValue(value); self.model_progress.setLabelText(message)
+
+    @Slot(str)
+    def _model_failed(self, message):
+        self.model_status.setText(f"Static preview unsupported: {message}")
 
     @Slot(object)
     def _model_loaded(self, result):
@@ -462,15 +473,32 @@ class Workspace(QWidget):
         dialog.setAutoClose(False); dialog.setValue(0); dialog.show()
         thread, worker = QThread(self), ExportWorker(self.catalogue, entry, destination)
         worker.moveToThread(thread); thread.started.connect(worker.run)
-        worker.progress.connect(lambda value, message: (dialog.setValue(value), dialog.setLabelText(message)))
+        worker.progress.connect(self._export_progress_changed)
         dialog.canceled.connect(lambda: worker.request_cancel())
-        worker.succeeded.connect(lambda path: self._export_message("Export complete", f"Exported to {path}"))
-        worker.failed.connect(lambda message: self._export_message("Export failed", message, critical=True))
-        worker.cancelled.connect(lambda message: self._export_message("Export cancelled", message))
+        worker.succeeded.connect(self._export_succeeded)
+        worker.failed.connect(self._export_failed)
+        worker.cancelled.connect(self._export_cancelled)
         worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater); thread.finished.connect(self._export_finished)
         self.export_thread, self.export_worker, self.export_progress = thread, worker, dialog
         thread.start()
+
+    @Slot(int, str)
+    def _export_progress_changed(self, value, message):
+        if self.export_progress:
+            self.export_progress.setValue(value); self.export_progress.setLabelText(message)
+
+    @Slot(str)
+    def _export_succeeded(self, path):
+        self._export_message("Export complete", f"Exported to {path}")
+
+    @Slot(str)
+    def _export_failed(self, message):
+        self._export_message("Export failed", message, critical=True)
+
+    @Slot(str)
+    def _export_cancelled(self, message):
+        self._export_message("Export cancelled", message)
 
     def _export_message(self, title, message, critical=False):
         window = self.window()
@@ -575,7 +603,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(welcome)
         self.thread = self.worker = None
         self._close_pending = False
-        self._import_page = None
+        self._import_page = self._import_bar = self._import_label = None
 
     def start_import(self):
         source, _ = QFileDialog.getOpenFileName(self, "Choose your Digimon World image", "", "Disc images (*.iso *.bin *.cue);;All files (*)")
@@ -586,10 +614,10 @@ class MainWindow(QMainWindow):
         label, bar, cancel = QLabel("Preparing import…"), QProgressBar(), QPushButton("Cancel")
         layout.addStretch(); layout.addWidget(label); layout.addWidget(bar); layout.addWidget(cancel); layout.addStretch()
         self.stack.addWidget(page); self.stack.setCurrentWidget(page)
-        self._import_page = page
+        self._import_page, self._import_bar, self._import_label = page, bar, label
         self.thread, self.worker = QThread(self), ImportWorker(Path(source), Path(project))
         self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run)
-        self.worker.progress.connect(lambda p, m: (bar.setValue(p), label.setText(m)))
+        self.worker.progress.connect(self._import_progress_changed)
         cancel.clicked.connect(lambda: self._request_import_cancel(cancel, label))
         self.worker.succeeded.connect(self.show_workspace)
         self.worker.failed.connect(self.import_failed); self.worker.cancelled.connect(self.import_cancelled)
@@ -604,6 +632,11 @@ class MainWindow(QMainWindow):
             button.setEnabled(False)
         if label:
             label.setText("Cancelling safely…")
+
+    @Slot(int, str)
+    def _import_progress_changed(self, value, message):
+        if self._import_bar:
+            self._import_bar.setValue(value); self._import_label.setText(message)
 
     @Slot(str, str)
     def import_failed(self, message, detail):
