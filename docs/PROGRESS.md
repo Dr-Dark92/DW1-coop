@@ -73,6 +73,6 @@ Maps and zones, checked from the same image on 2026-11-02:
 
 - a fresh import catalogued 244 map records (241 decoded, 3 without files) in 65 zones, 449 warp links, and 709 Digimon-placement links; resource count 1,422;
 - all 241 file-backed maps and 512 background images matched the converter's map export (details in [FORMATS.md](FORMATS.md#maps-and-zones));
-- the Maps and Zones tab was inspected on the desktop by the user, who could not find zones linked south of Green Gym. Cause: only the warp table was shown, and Green Gym's other routes are script-driven or inbound. Search, inbound links, exit directions, the decoded tile-trigger grid, and the zone relation map were added and exercised offscreen; the updated tab awaits a desktop recheck.
+- the Maps and Zones tab was inspected on the desktop by the user, who could not find zones linked south of Green Gym. Cause: only the warp table was shown, and Green Gym's other routes are script-driven or inbound. Search, inbound links, exit directions, the decoded tile-trigger grid, and the zone relation map were added, exercised offscreen, and then confirmed correct by the user on the desktop.
 
 This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, other MMD models, or animation. Automated coverage remains synthetic and contains no proprietary data; the converter comparison is a manual check kept outside Git.
