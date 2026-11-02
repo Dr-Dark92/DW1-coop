@@ -1,5 +1,16 @@
 # Handover
 
+## Maps and zones milestone (2026-11-02, branch `maps-zones`)
+
+Worked in a separate worktree at `/home/drdark/dev/DW1-coop-maps` (branched from `873829a`) while another session verified the remaining MMD models on `agumon-preview-verification`; expect doc merge conflicts between the two branches.
+
+- `src/dw1_workbench/maps.py`: USA map table, area names, toilets, doors; TFS backgrounds; MAP scene data; background rendering and export. `project.py` catalogues maps on import when the disc has `MAP/` files. `gui.py` replaces the Maps and Zones placeholder with a browser.
+- `tests/test_maps.py`: 16 synthetic tests (49 total pass).
+- Real data outside Git: extracted inputs in `/home/drdark/dev/DW1-coop-data/converter-input-maps/`, converter output and `compare_maps.py` in `/home/drdark/dev/DW1-coop-data/converter-run-maps/`, and a fresh project with maps at `/home/drdark/dev/DW1-coop-data/maps-validation/project`.
+- Result: all 241 file-backed maps and 512 backgrounds match the converter (see `docs/FORMATS.md#maps-and-zones`).
+
+Next: inspect the Maps and Zones tab on a desktop display; then candidates are sprite-object rendering, door models, an overlay of spawns/warps/Digimon on the background (needs the camera projection), and establishing floor-grid and palette semantics.
+
 ## Converter comparison (2026-11-02, resumed)
 
 Step 1 of the resume plan is complete. The pinned `DW1ModelConverter` (`17d1a19`) was built and run against `converter-input/`.

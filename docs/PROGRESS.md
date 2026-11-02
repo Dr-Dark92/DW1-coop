@@ -19,6 +19,9 @@
 - Cancellable background model loading and an orbit/zoom textured preview with wireframe and untextured modes.
 - Static Agumon (ID 3) verified against `DW1ModelConverter` `17d1a19` output and confirmed visually on a desktop display.
 - Worker progress and results delivered to the GUI thread through bound slots (fixes a Wayland segfault that offscreen tests did not show).
+- USA map table, TFS background, and MAP scene parsing; maps catalogued with area-name zones, scene/background files, warp links, and Digimon-placement links.
+- Maps and Zones browser: zone tree, background preview per palette with PNG + provenance export, scene data, followable warps, and floor grid.
+- All 241 file-backed maps verified against `DW1ModelConverter` `17d1a19` map output.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
@@ -31,6 +34,7 @@
 - Executable analysis: identity/header, character resource tables, and skeleton tables only.
 - MMD static geometry: one model (Agumon) verified; the other 177 are not yet compared and may be rejected if they use other primitive modes.
 - DW1 animation data: initial pose only.
+- Maps: sprite objects are parsed but not rendered; embedded map TIMs are located, not previewed; door models are not shown; the floor grid and palette time-of-day meanings are unverified.
 
 ## Not implemented
 
@@ -38,7 +42,7 @@
 - Model export (GLB/glTF with provenance).
 - Standalone TMD decoding.
 - DW1 animation keyframes and playback.
-- TFS/map/background/collision/script decoding.
+- Map scripts, 3D map geometry, and collision semantics.
 - Audio/video decoding.
 - Disassembly/decompilation integration.
 - Co-op gameplay, native runtime, or networking.
@@ -63,5 +67,11 @@ Static Agumon model, checked from the same image on 2026-11-02:
 
 - the workbench parse matched the glTF output of `DW1ModelConverter` `17d1a19` on skeleton, all 690 ordered triangle corners, material, initial pose, world-space assembly, and per-face palette texels (details in [FORMATS.md](FORMATS.md#static-agumon-verification));
 - the desktop preview (Wayland) was inspected by the user and confirmed correct and fully textured after fixing two GUI defects found there: an off-thread repaint segfault and 30 dropped zero-area-UV faces.
+
+Maps and zones, checked from the same image on 2026-11-02:
+
+- a fresh import catalogued 244 map records (241 decoded, 3 without files) in 65 zones, 449 warp links, and 709 Digimon-placement links; resource count 1,422;
+- all 241 file-backed maps and 512 background images matched the converter's map export (details in [FORMATS.md](FORMATS.md#maps-and-zones));
+- the Maps and Zones tab was exercised offscreen on that project (zone tree, background, palettes, scene data, warp navigation, floor grid, missing-file entries). It has not yet been inspected on a desktop display.
 
 This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, other MMD models, or animation. Automated coverage remains synthetic and contains no proprietary data; the converter comparison is a manual check kept outside Git.

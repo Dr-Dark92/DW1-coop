@@ -9,14 +9,17 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSplitter, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton,
+    QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .catalog import Catalogue, open_catalogue
 from .errors import Cancelled
 from .iso9660 import IsoEntry, safe_export
+from .maps import (MAX_MAP_FILE, MAX_TFS_FILE, export_background, floor_grid_image, parse_map,
+                   parse_map_table, parse_tfs, render_background)
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .model_view import StaticModelView
 from .project import import_project, layout_from_catalogue, source_state
@@ -196,7 +199,7 @@ class Workspace(QWidget):
         self.tabs.addTab(self._characters(), "Characters and Digimon")
         self.tabs.addTab(UnsupportedPage("Animations", "No DW1 animation decoder is verified in this milestone. Unsupported resources are retained in the disc catalogue."), "Animations")
         self.tabs.addTab(self._textures(), "Textures")
-        self.tabs.addTab(UnsupportedPage("Maps and Zones", "TFS backgrounds, geometry, collision, exits, and scripts are not decoded. A file listing is not a reconstructed scene."), "Maps and Zones")
+        self.tabs.addTab(self._maps(), "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
 
@@ -361,6 +364,183 @@ class Workspace(QWidget):
             QMessageBox.information(self, "Texture exported", f"Wrote {path} and provenance JSON.")
         except Exception as exc:
             QMessageBox.critical(self, "Texture export failed", str(exc))
+
+    def _maps(self):
+        page, layout = QWidget(), QVBoxLayout(); page.setLayout(layout)
+        maps = [row for row in self.rows if row["detected_format"] == "DW1 map table entry"]
+        self.map_rows = {row["id"]: row for row in maps}
+        self._map_entries = None
+        self._map_scene = self._map_tfs = None
+        if not maps:
+            layout.addWidget(QLabel("No verified map table is catalogued. Projects imported before map support "
+                                    "must be re-imported; 3D scene geometry, scripts, and gameplay are not decoded."))
+            layout.addStretch()
+            return page
+        info = QLabel("Maps from the USA executable map table, grouped into zones by their area name. Backgrounds, "
+                      "camera, spawns, warps, Digimon placements, sprites, and the floor grid are decoded and were "
+                      "verified against DW1ModelConverter output; scripts and 3D geometry are not decoded.")
+        info.setWordWrap(True); layout.addWidget(info)
+        self.map_tree = QTreeWidget(); self.map_tree.setHeaderLabels(["Zone / map", "Table index", "Status"])
+        zones = {}
+        for row in maps:
+            label = self.labels.get((row["id"], "area_name"))
+            zones.setdefault(label["value"] if label else "Unnamed area", []).append(row)
+        self._map_items = {}
+        for zone in sorted(zones):
+            parent = QTreeWidgetItem([f"{zone} ({len(zones[zone])})", "", ""])
+            self.map_tree.addTopLevelItem(parent)
+            for row in sorted(zones[zone], key=lambda item: item["offset"]):
+                _, index, name = row["original_path"].rsplit("/", 2)
+                item = QTreeWidgetItem([name, index, row["status"]])
+                item.setData(0, Qt.ItemDataRole.UserRole, row["id"])
+                parent.addChild(item)
+                self._map_items[row["id"]] = item
+        self.map_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.map_tree.currentItemChanged.connect(self._preview_map)
+        self.map_palette = QComboBox(); self.map_palette.currentIndexChanged.connect(self._render_map_background)
+        self.map_palette.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.map_background = QLabel("Select a map"); self.map_background.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Zero colour words are transparent; show them over a dark backdrop like the cleared PS1 screen.
+        self.map_background.setStyleSheet("background: #20242b; color: #d0d4da")
+        background_scroll = QScrollArea(); background_scroll.setWidget(self.map_background)
+        background_scroll.setWidgetResizable(True)
+        background_page = QWidget(); background_layout = QVBoxLayout(background_page)
+        palette_row = QHBoxLayout(); palette_row.addWidget(QLabel("Background palette")); palette_row.addWidget(self.map_palette)
+        palette_row.addStretch(); background_layout.addLayout(palette_row); background_layout.addWidget(background_scroll)
+        self.map_details = QPlainTextEdit(); self.map_details.setReadOnly(True)
+        self.map_warps = QListWidget(); self.map_warps.itemDoubleClicked.connect(self._follow_warp)
+        scene_page = QWidget(); scene_layout = QVBoxLayout(scene_page)
+        scene_layout.addWidget(QLabel("Warps (double-click to open the target map)")); scene_layout.addWidget(self.map_warps, 1)
+        scene_layout.addWidget(self.map_details, 3)
+        self.map_floor = QLabel(); self.map_floor.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        floor_page = QWidget(); floor_layout = QVBoxLayout(floor_page)
+        floor_note = QLabel("100×100 floor grid from the MAP file, one cell per pixel (raw byte values as grey). "
+                            "Its meaning is not yet verified; on inspected maps 0 matches walkable ground.")
+        floor_note.setWordWrap(True); floor_layout.addWidget(floor_note); floor_layout.addWidget(self.map_floor, 1)
+        self.map_preview_tabs = QTabWidget()
+        self.map_preview_tabs.addTab(background_page, "Background"); self.map_preview_tabs.addTab(scene_page, "Scene data")
+        self.map_preview_tabs.addTab(floor_page, "Floor grid")
+        split = QSplitter(); split.addWidget(self.map_tree); split.addWidget(self.map_preview_tabs)
+        split.setStretchFactor(1, 3); split.setSizes([360, 940])
+        export = QPushButton("Export background PNG + provenance metadata…")
+        export.clicked.connect(self._export_map_background)
+        layout.addWidget(split, 1); layout.addWidget(export)
+        return page
+
+    def _selected_map(self):
+        item = self.map_tree.currentItem()
+        row_id = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        if row_id is None:
+            raise ValueError("Select a map first.")
+        return self.map_rows[row_id]
+
+    def _map_entry(self, row):
+        if self._map_entries is None:
+            executable = next(candidate for candidate in self.rows
+                              if candidate["original_path"] == row["parent_path"] and candidate["offset"] is None)
+            self._map_entries = parse_map_table(self._read_row(executable, PREVIEW_LIMIT))
+        return self._map_entries[int(row["original_path"].rsplit("/", 2)[1])]
+
+    def _character_name(self, character_id):
+        prefix = f"#character/{character_id:03d}/"
+        row = next((row for row in self.rows if prefix in row["original_path"]), None)
+        if row is None:
+            return f"character {character_id}"
+        label = self.labels.get((row["id"], "display_name"))
+        return f"{label['value'] if label else row['original_path'].rsplit('/', 1)[1]} (ID {character_id})"
+
+    def _preview_map(self, *_):
+        self._map_scene = self._map_tfs = None
+        self.map_warps.clear(); self.map_palette.blockSignals(True); self.map_palette.clear()
+        self.map_palette.blockSignals(False)
+        try:
+            row = self._selected_map()
+        except ValueError:
+            return
+        try:
+            entry = self._map_entry(row)
+            scene_row, tfs_row = self._character_related(row, "scene"), self._character_related(row, "background")
+            if scene_row is None or tfs_row is None:
+                raise ValueError(f"{entry.map_path} / .TFS are absent from this disc; only the table entry exists.")
+            scene = parse_map(self._read_row(scene_row, MAX_MAP_FILE), entry)
+            tfs = parse_tfs(self._read_row(tfs_row, MAX_TFS_FILE))
+            self._map_scene, self._map_tfs = scene, tfs
+            self.map_palette.blockSignals(True)
+            self.map_palette.addItems([f"Palette {index}" for index in range(len(tfs.palettes))])
+            self.map_palette.blockSignals(False)
+            self._render_map_background()
+            floor = QPixmap.fromImage(ImageQt(floor_grid_image(scene)))
+            self.map_floor.setPixmap(floor.scaled(400, 400, Qt.AspectRatioMode.KeepAspectRatio,
+                                                  Qt.TransformationMode.FastTransformation))
+            entries = self._map_entries
+            for slot, warp in scene.used_warps:
+                target = entries[warp.map_index]
+                text = f"slot {slot} → {target.name or '(unnamed)'} [{target.area_name}], spawn {warp.spawn_index}"
+                item = QListWidgetItem(text); item.setData(Qt.ItemDataRole.UserRole, warp.map_index)
+                self.map_warps.addItem(item)
+            setup = scene.setup
+            lines = [
+                f"map: {entry.name} (table index {entry.index}, area {entry.area_id}: {entry.area_name})",
+                f"files: {entry.map_path}, {entry.tfs_path}",
+                f"flags: sound {entry.sound_id}, day/night {'yes' if entry.has_time_cycle else 'no'}, "
+                f"Digimon {'yes' if entry.has_digimon else 'no'}",
+                f"background: {setup.grid_width}×{setup.grid_height} tiles of 128×128, {len(tfs.palettes)} palette(s)",
+                f"camera: origin {setup.camera_origin}, target {setup.camera_target}, distance {setup.viewer_distance}",
+                *(f"light {i}: position {light.position}, colour {light.color}" for i, light in enumerate(setup.lights)),
+                f"liked area {setup.liked_area}, disliked area {setup.disliked_area}",
+                f"embedded images: {len(scene.image_offsets)} 8-bpp, {len(scene.object_image_offsets)} 4-bpp; "
+                f"sprite objects {len(scene.objects)}, instances {len(scene.instances)}",
+                f"toilet: {entry.toilet if entry.toilet else 'none'}",
+                f"doors: {', '.join(f'model {d.model_id} at {d.position}' for d in entry.doors) or 'none'}",
+                "spawn points:",
+                *(f"  {i}: position {spawn.position}, rotation {spawn.rotation}" for i, spawn in enumerate(scene.spawns)),
+                f"Digimon placements ({len(scene.digimon)}):",
+                *(f"  {self._character_name(d.character_id)} at {d.position}; HP {d.stats['hp']}/{d.stats['max_hp']}, "
+                  f"MP {d.stats['mp']}/{d.stats['max_mp']}, off {d.stats['offense']}, def {d.stats['defense']}, "
+                  f"spd {d.stats['speed']}, brn {d.stats['brains']}, bits {d.bits}, script {d.script_id}, "
+                  f"{len(d.waypoints)} waypoint(s)" for d in scene.digimon),
+                f"parser: {row['decoder']} {row['decoder_version']}; MAP {scene_row['decoder_version']}; "
+                f"TFS {tfs_row['decoder_version']}",
+                f"evidence: {row['mapping_evidence']}",
+            ]
+            self.map_details.setPlainText("\n".join(lines))
+        except Exception as exc:
+            self.map_background.setPixmap(QPixmap()); self.map_floor.setPixmap(QPixmap())
+            self.map_background.setText(f"Preview unavailable:\n{exc}")
+            self.map_details.setPlainText(str(exc))
+
+    def _render_map_background(self, *_):
+        if self._map_scene is None or self._map_tfs is None or self.map_palette.currentIndex() < 0:
+            return
+        image = render_background(self._map_tfs, self._map_scene.setup, self.map_palette.currentIndex())
+        self.map_background.setPixmap(QPixmap.fromImage(ImageQt(image)))
+
+    def _follow_warp(self, item):
+        target = next((row_id for row_id, row in self.map_rows.items()
+                       if int(row["original_path"].rsplit("/", 2)[1]) == item.data(Qt.ItemDataRole.UserRole)), None)
+        if target is not None:
+            self.map_tree.setCurrentItem(self._map_items[target])
+
+    def _export_map_background(self):
+        try:
+            row = self._selected_map()
+            if self._map_scene is None or self._map_tfs is None:
+                raise ValueError("This map has no decoded background.")
+            entry, palette = self._map_entry(row), self.map_palette.currentIndex()
+            path, _ = QFileDialog.getSaveFileName(self, "Export background", f"{entry.name}-palette{palette}.png",
+                                                  "PNG image (*.png)")
+            if not path: return
+            tfs_row, scene_row = self._character_related(row, "background"), self._character_related(row, "scene")
+            export_background(render_background(self._map_tfs, self._map_scene.setup, palette), Path(path), {
+                "map": entry.name, "table_index": entry.index, "area_name": entry.area_name, "palette_index": palette,
+                "palette_count": len(self._map_tfs.palettes),
+                "source_resource_id": tfs_row["id"], "source_sha256": tfs_row["content_hash"],
+                "tile_grid_source": self._resource_provenance(scene_row) | {"sha256": scene_row["content_hash"]},
+                "provenance": self._resource_provenance(tfs_row),
+            })
+            QMessageBox.information(self, "Background exported", f"Wrote {path} and provenance JSON.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Background export failed", str(exc))
 
     def _update_model_modes(self):
         self.model_view.set_modes(self.model_mode.currentIndex() == 0,

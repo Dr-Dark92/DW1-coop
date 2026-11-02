@@ -17,8 +17,9 @@ This is an asset-analysis foundation. It is **not** co-op gameplay, a native por
 - Verified USA resource-table associations for 180 IDs: internal/display names, same-index textures, and 178 structurally bounded MMD containers.
 - Character-resource browser with associated decoded texture preview and PNG + provenance export.
 - Bounded static MMD/TMD geometry parsing (textured Gouraud triangles and quads), USA skeleton tables, and the initial pose, shown in an orbitable textured preview. Verified for ID 3 (Agumon) against an independent converter and on a desktop display; other models are not yet verified. Model export and animation playback are not implemented.
+- Maps and Zones browser: the USA map table (244 named maps grouped into 65 area-name zones), TFS background preview with every palette and PNG + provenance export, and decoded scene data — camera, lights, spawn points, warps (followable between maps), Digimon placements with stats, sprite objects, and the 100×100 floor grid. All 241 file-backed maps match an independent converter.
 - Thread-safe import cancellation and streamed hashing/file export; partial exports are removed.
-- Honest unsupported states for model export, animations, general archives, maps, and scripts.
+- Honest unsupported states for model export, animations, general archives, map scripts and 3D map geometry, and scripts.
 
 See [docs/FORMATS.md](docs/FORMATS.md) for exact support boundaries and evidence.
 

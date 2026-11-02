@@ -48,7 +48,9 @@ The USA focus is corroborated by [dw_decomp](https://github.com/jype0/dw_decomp)
 | USA skeleton table | Partial | Per-ID bone count from the 52-byte parameter record and signed `(object, parent)` byte pairs reached through the per-ID pointer table at executable offset `0x8CE60`; parents must precede children. Verified for `AGUM`. |
 | Standalone TMD model | Unsupported | Not decoded or exported. |
 | DW1 animation data | Partial | Only the initial-transform prefix (scale, rotation, translation per bone) of the first non-empty animation record is read, to assemble the static pose. Keyframe instructions, clips, and playback are unsupported. |
-| TFS/backgrounds | Unsupported | No background or scene reconstruction. |
+| USA map table | Confirmed | 255 16-byte entries at executable offset `0x992D4` (name, image/object counts, flags, door/toilet/area-name indices); 70 area-name pointers at `0x991BC`, toilet rectangles at `0x92E10`, door placements at `0x92E60`. Entry `i` maps to `MAP/MAP{1 + i//15}/{name}.MAP/.TFS`. See [Maps and zones](#maps-and-zones). |
+| TFS background | Confirmed | Header, 1–16 palettes of 256 colours, and 128×128 8-bit tiles; assembled using the MAP tile grid. Every background of every file-backed map matches the converter. |
+| MAP scene data | Confirmed | Header offsets, setup (camera, three lights, liked/disliked areas, background tile grid), embedded TIM offsets, sprite objects and instances, 10 spawns, 10 warps, Digimon placements, and the 100×100 floor grid. Map scripts, sprite rendering, and 3D map geometry are not decoded. |
 | XA/STR/VAG | Unsupported | Extension detection only where applicable; no decode. |
 
 TIM structure and PS1 transparency semantics are based on [psx-spx file-format documentation](https://psx-spx.consoledev.net/cdromfileformats/). PNG alpha is an interchange approximation: zero color words map to alpha 0, STP-set words to alpha 128, and other words to alpha 255. The JSON sidecar records that policy so it is not mistaken for native eight-bit alpha.
@@ -71,9 +73,28 @@ Thirty `AGUM` triangles have zero-area UVs (all corners on one texel, or on one 
 
 This verifies one model. The other 177 MMDs are not yet compared, and any that use other primitive modes, flags, or scale exponents are rejected rather than approximated. Model export is not implemented.
 
+### Maps and zones
+
+The USA map table, `.MAP` scene files, and `.TFS` backgrounds were decoded from the layouts the pinned converter uses (no code copied) and compared with its map export for every map on the supplied disc:
+
+- 255 table entries: 244 named, 11 empty. Names may repeat across directories (`YAKA25` is entry 65 in `MAP5` and entry 232 in `MAP16`), so uniqueness is enforced per path.
+- 241 named entries have both files and were compared field by field: map name, area name, sound id, day/night and Digimon flags, toilet, doors, camera, lights, ambient values, liked/disliked areas, background grid, spawns, warps, 989 Digimon placements (every field, including unknowns), 9,177 sprite objects and their instances, and the floor grid. All matched.
+- 512 background images (every palette of every map), 219,807,744 pixels, matched at 5-bit precision.
+- Entries 50 (`YAKA01`), 61 (`YAKA21`), and 65 (`YAKA25`) have no files on the disc and are catalogued as table entries only. The `MGEN17` files are on the disc but no table entry references them.
+
+Grouping and semantics:
+
+- A **zone** is the set of maps sharing an area name (the location name selected by the entry's area-name index): 65 distinct names, from File City (40 maps) down to single rooms.
+- Background tiles are always referenced in sequence; the TFS header width/height disagree with the MAP grid on 13 maps, so the MAP grid is authoritative.
+- Background colours use the TIM conversion except that STP is ignored: only the zero colour word is transparent, matching the converter. Which palette corresponds to which time of day is not established.
+- Warps with a map index of 255 or more are unused slots. Field names for Digimon placements (stats, script id, moves, waypoints) follow the converter; `unk2`, `unk3`, and `unk5` are kept as unknown.
+- The floor grid's meaning is not established. On inspected maps value 0 coincides with walkable ground and 128 with blocked areas; it is shown raw.
+
 ## Resource association
 
 The catalogue contains 180 confirmed numeric character-resource records. Each is associated with its same-index ALLTIM texture; 178 are associated with a path-present, boundary-validated MMD container. Display names are stored as separate labels with executable offsets and evidence, not derived from appearance. This proves resource-table relationships, not playable-character semantics or animation labels. Model correctness is verified only for ID 3, as described above. Empty/unsupported categories state their limits explicitly.
+
+The catalogue also holds 244 map-table records with an `area_name` label each. Each file-backed map is associated with its MAP (`scene`) and TFS (`background`) files, with every distinct warp-target map (`warp`, 449 links), and with every character resource it places (`digimon_placement`, 709 links). Projects imported before map support must be re-imported to gain these records.
 
 ## Executable analysis/decompilation
 
