@@ -15,9 +15,10 @@ This is an asset-analysis foundation. It is **not** co-op gameplay, a native por
 - Standalone standard PlayStation TIM preview and PNG + JSON provenance export.
 - Confirmed USA `CHDAT/ALLTIM.TIM` fixed-slot inventory: 180 nine-sector TIM resources with offsets and hashes.
 - Verified USA resource-table associations for 180 IDs: internal/display names, same-index textures, and 178 structurally bounded MMD containers.
-- Character-resource browser with associated decoded texture preview and PNG + provenance export; model geometry and animation remain unsupported.
+- Character-resource browser with associated decoded texture preview and PNG + provenance export.
+- Bounded static MMD/TMD geometry parsing (textured Gouraud triangles and quads), USA skeleton tables, and the initial pose, shown in an orbitable textured preview. Verified for ID 3 (Agumon) against an independent converter and on a desktop display; other models are not yet verified. Model export and animation playback are not implemented.
 - Thread-safe import cancellation and streamed hashing/file export; partial exports are removed.
-- Honest unsupported states for model geometry, animations, general archives, maps, and scripts.
+- Honest unsupported states for model export, animations, general archives, maps, and scripts.
 
 See [docs/FORMATS.md](docs/FORMATS.md) for exact support boundaries and evidence.
 
@@ -67,7 +68,7 @@ The implementation was scoped after inspecting the public descriptions and sourc
 
 - [jype0/dw_decomp](https://github.com/jype0/dw_decomp) — USA disc extraction through `dumpsxiso`, executable decompilation workflow; MIT licensed.
 - [SydMontague/DW1-SydPatches](https://github.com/SydMontague/DW1-SydPatches) — USA-version extraction/rebuild and reverse-engineering context.
-- [Operation-Decoded/DW1ModelConverter](https://github.com/Operation-Decoded/DW1ModelConverter) — MIT-licensed character-table/MMD association and container research context.
+- [Operation-Decoded/DW1ModelConverter](https://github.com/Operation-Decoded/DW1ModelConverter) — MIT-licensed character-table/MMD association and container research context; its glTF output (revision `17d1a19`) was the independent reference for verifying the static Agumon model.
 - [psx-spx CD-ROM format](https://psx-spx.consoledev.net/cdromformat/) and [file formats](https://psx-spx.consoledev.net/cdromfileformats/) — sector, ISO 9660, PS-X EXE, and TIM structures.
 
 No source code from those projects is copied into this repository. Their project descriptions do not establish complete DW1 asset decoding, and this workbench does not claim it.

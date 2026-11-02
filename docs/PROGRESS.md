@@ -15,6 +15,10 @@
 - USA `CHDAT/ALLTIM.TIM` fixed-slot decoding into 180 catalogue children with exact provenance.
 - USA executable character-resource parsing: 180 stable IDs/internal names, 179 verified display-name labels, same-index ALLTIM associations, and 178 validated MMD paths/boundaries.
 - Characters and Digimon catalogue view with verified names/evidence, associated texture preview, and PNG + provenance export.
+- Bounded static MMD/TMD parser (modes `0x34`/`0x3c`), USA skeleton table, and initial-pose reading, with strict rejection of unsupported or malformed data.
+- Cancellable background model loading and an orbit/zoom textured preview with wireframe and untextured modes.
+- Static Agumon (ID 3) verified against `DW1ModelConverter` `17d1a19` output and confirmed visually on a desktop display.
+- Worker progress and results delivered to the GUI thread through bound slots (fixes a Wayland segfault that offscreen tests did not show).
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
@@ -24,13 +28,16 @@
 - ISO 9660: common primary-directory traversal only.
 - Release validation: product-code and executable-header evidence, not a published full-disc hash match.
 - TIM: standard standalone images only; no automatic embedded/container scan.
-- Executable analysis: identity/header only.
+- Executable analysis: identity/header, character resource tables, and skeleton tables only.
+- MMD static geometry: one model (Agumon) verified; the other 177 are not yet compared and may be rejected if they use other primitive modes.
+- DW1 animation data: initial pose only.
 
 ## Not implemented
 
 - General game archive unpacking beyond the fixed ALLTIM layout.
-- MMD/TMD geometry and animation decoding.
-- DW1 animation decoding.
+- Model export (GLB/glTF with provenance).
+- Standalone TMD decoding.
+- DW1 animation keyframes and playback.
 - TFS/map/background/collision/script decoding.
 - Audio/video decoding.
 - Disassembly/decompilation integration.
@@ -52,4 +59,9 @@ Validated read-only through its CUE on 2026-11-02:
 - source BIN SHA-256: `06084490ea0db34099b31495ccba4ec18fb0ff25c7683c508e9d2db93d4495f4`;
 - CUE SHA-256: `82b297b9b499fea9c7f361a497b933b7f971394148212eca03e4798ddc0c98d1`.
 
-This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, MMD geometry, animation, or manual visual rendering. Automated coverage remains synthetic and contains no proprietary data.
+Static Agumon model, checked from the same image on 2026-11-02:
+
+- the workbench parse matched the glTF output of `DW1ModelConverter` `17d1a19` on skeleton, all 690 ordered triangle corners, material, initial pose, world-space assembly, and per-face palette texels (details in [FORMATS.md](FORMATS.md#static-agumon-verification));
+- the desktop preview (Wayland) was inspected by the user and confirmed correct and fully textured after fixing two GUI defects found there: an off-thread repaint segfault and 30 dropped zero-area-UV faces.
+
+This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, other MMD models, or animation. Automated coverage remains synthetic and contains no proprietary data; the converter comparison is a manual check kept outside Git.

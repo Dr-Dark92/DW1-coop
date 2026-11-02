@@ -24,7 +24,7 @@ Desktop launch (Wayland) then exposed two GUI defects, both fixed with regressio
 
 Resume step 2 (visual inspection on a real display) is done: after both fixes the user inspected Agumon in the desktop GUI and confirmed it looks correct and fully textured.
 
-Not covered: full per-texel palette coverage (the converter's CLUT map also block-fills unassigned texels, so it is not an exact reference there). Model export remains disabled. Next: update `README.md`, `docs/FORMATS.md`, and `docs/PROGRESS.md` for the settled verification boundary, then decide on GLB/glTF export with provenance as a separate step.
+Not covered: full per-texel palette coverage (the converter's CLUT map also block-fills unassigned texels, so it is not an exact reference there). Model export remains disabled. `README.md`, `docs/FORMATS.md`, and `docs/PROGRESS.md` now describe the settled boundary (Agumon only). Next: decide on GLB/glTF export with provenance as a separate step, and/or extend the converter comparison to the other 177 MMDs.
 
 ## Paused static Agumon milestone (2026-11-02)
 
