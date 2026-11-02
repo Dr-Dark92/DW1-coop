@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
@@ -16,6 +18,8 @@ class IsoEntry:
     extent: int
     size: int
     is_dir: bool
+    offset: int = 0
+    extent_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -86,9 +90,14 @@ def read_inventory(reader: SectorReader, cancelled=lambda: False,
         visited.add(key)
         if len(visited) > 4096:
             raise DiscFormatError("Directory count exceeds safety limit (4096).")
-        blob = reader.read_extent(directory.extent, directory.size, 16 * 1024 * 1024)
+        if directory.size > 16 * 1024 * 1024:
+            raise DiscFormatError("Directory exceeds the safety limit (16 MiB).")
+        blob = b"".join(reader.iter_extent(directory.extent, directory.size,
+                                            cancelled=cancelled))
         pos = 0
         while pos < len(blob):
+            if cancelled():
+                raise Cancelled("Import cancelled while reading filesystem inventory.")
             if blob[pos] == 0:
                 pos = ((pos // 2048) + 1) * 2048
                 continue
@@ -138,9 +147,14 @@ def hash_entries(reader: SectorReader, entries: Iterable[IsoEntry], cancelled=la
     for index, entry in enumerate(files):
         if cancelled():
             raise Cancelled("Import cancelled while hashing disc files.")
-        data = reader.read_extent(entry.extent, entry.size)
-        fmt = detect_format(entry.path, data[:64])
-        output.append((entry, hashlib.sha256(data).hexdigest(), fmt))
+        digest = hashlib.sha256()
+        head = bytearray()
+        for chunk in reader.iter_extent(entry.extent, entry.size, cancelled=cancelled):
+            digest.update(chunk)
+            if len(head) < 64:
+                head.extend(chunk[:64 - len(head)])
+        fmt = detect_format(entry.path, bytes(head))
+        output.append((entry, digest.hexdigest(), fmt))
         if progress:
             progress(70 + int(29 * (index + 1) / max(len(files), 1)), f"Hashing {entry.path}")
     return output
@@ -159,7 +173,9 @@ def detect_format(path: str, head: bytes) -> str:
     return "unknown"
 
 
-def safe_export(reader: SectorReader, entry: IsoEntry, destination: Path, overwrite: bool = False) -> Path:
+def safe_export(reader: SectorReader, entry: IsoEntry, destination: Path, overwrite: bool = False,
+                cancelled=lambda: False, progress: Callable[[int, str], None] | None = None,
+                chunk_size: int = 1024 * 1024) -> Path:
     destination = destination.resolve()
     if destination.exists() and not overwrite:
         raise ValidationError(f"Export already exists: {destination}")
@@ -167,6 +183,25 @@ def safe_export(reader: SectorReader, entry: IsoEntry, destination: Path, overwr
     # Destination is selected as a complete file path; reject symlink parents.
     if any(part.is_symlink() for part in [destination.parent, *destination.parents]):
         raise ValidationError("Export path contains a symbolic-link directory.")
-    data = reader.read_extent(entry.extent, entry.size)
-    destination.write_bytes(data)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.partial")
+    written = 0
+    try:
+        with temporary.open("xb") as stream:
+            extent_size = entry.extent_size if entry.extent_size is not None else entry.size
+            for chunk in reader.iter_extent_range(entry.extent, extent_size, entry.offset, entry.size,
+                                                  chunk_size, cancelled):
+                stream.write(chunk)
+                written += len(chunk)
+                if progress:
+                    progress(int(written * 100 / max(entry.size, 1)), f"Exporting {entry.path}")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if cancelled():
+            raise Cancelled("Export cancelled.")
+        if destination.exists() and not overwrite:
+            raise ValidationError(f"Export already exists: {destination}")
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     return destination

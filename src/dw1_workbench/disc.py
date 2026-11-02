@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Iterator
 
 from .cue import parse_cue
 from .errors import Cancelled, DiscFormatError
 
 Progress = Callable[[int, str], None]
+DEFAULT_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -53,10 +54,58 @@ class SectorReader:
     def read_extent(self, lba: int, size: int, limit: int | None = None) -> bytes:
         if size < 0 or (limit is not None and size > limit):
             raise DiscFormatError(f"Extent size {size} exceeds the allowed limit.")
-        sectors = (size + 2047) // 2048
-        if lba < 0 or lba + sectors > self.layout.sector_count:
+        return b"".join(self.iter_extent(lba, size))
+
+    def read_extent_prefix(self, lba: int, size: int, limit: int) -> bytes:
+        """Read at most *limit* logical bytes without rejecting a larger extent."""
+        if limit < 0:
+            raise DiscFormatError("Preview limit cannot be negative.")
+        read_size = min(size, limit)
+        return b"".join(self.iter_extent(lba, read_size))
+
+    def read_extent_range(self, lba: int, extent_size: int, offset: int, size: int,
+                          cancelled: Callable[[], bool] = lambda: False) -> bytes:
+        return b"".join(self.iter_extent_range(lba, extent_size, offset, size,
+                                                cancelled=cancelled))
+
+    def iter_extent(self, lba: int, size: int, chunk_size: int = DEFAULT_CHUNK_SIZE,
+                    cancelled: Callable[[], bool] = lambda: False) -> Iterator[bytes]:
+        """Yield logical file data while hiding raw-sector headers and trailers."""
+        yield from self.iter_extent_range(lba, size, 0, size, chunk_size, cancelled)
+
+    def iter_extent_range(self, lba: int, extent_size: int, offset: int, size: int,
+                          chunk_size: int = DEFAULT_CHUNK_SIZE,
+                          cancelled: Callable[[], bool] = lambda: False) -> Iterator[bytes]:
+        """Yield a validated byte range within a logical ISO extent."""
+        if size < 0:
+            raise DiscFormatError("Extent size cannot be negative.")
+        if extent_size < 0 or offset < 0 or offset + size > extent_size:
+            raise DiscFormatError("Requested range is outside the filesystem extent.")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        extent_sectors = (extent_size + 2047) // 2048
+        if lba < 0 or lba + extent_sectors > self.layout.sector_count:
             raise DiscFormatError("Filesystem extent is outside the image.")
-        return b"".join(self.read_sector(lba + i) for i in range(sectors))[:size]
+        first_sector = offset // 2048
+        first_skip = offset % 2048
+        sectors = (first_skip + size + 2047) // 2048
+        remaining = size
+        buffered = bytearray()
+        for index in range(sectors):
+            if cancelled():
+                raise Cancelled("Operation cancelled while reading disc data.")
+            sector = self.read_sector(lba + first_sector + index)
+            start = first_skip if index == 0 else 0
+            take = min(remaining, 2048 - start)
+            buffered.extend(sector[start:start + take])
+            remaining -= take
+            while len(buffered) >= chunk_size:
+                yield bytes(buffered[:chunk_size])
+                del buffered[:chunk_size]
+        if cancelled():
+            raise Cancelled("Operation cancelled while reading disc data.")
+        if buffered:
+            yield bytes(buffered)
 
 
 def _raw_mode(path: Path, start_sector: int = 0) -> tuple[int, int, str] | None:
@@ -115,11 +164,16 @@ def sha256_file(path: Path, progress: Progress | None = None, cancelled=lambda: 
     digest = hashlib.sha256()
     total, done = path.stat().st_size, 0
     with path.open("rb") as stream:
-        while chunk := stream.read(4 * 1024 * 1024):
+        while True:
             if cancelled():
                 raise Cancelled("Import cancelled while hashing source image.")
+            chunk = stream.read(4 * 1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
             done += len(chunk)
             if progress:
                 progress(int(done * 100 / max(total, 1)), "Hashing source image")
+    if cancelled():
+        raise Cancelled("Import cancelled while hashing source image.")
     return digest.hexdigest()

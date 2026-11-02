@@ -13,7 +13,11 @@ This is an asset-analysis foundation. It is **not** co-op gameplay, a native por
 - ISO 9660 file inventory with sizes, extents, SHA-256, format detection, bounded hex viewing, and selected-file export.
 - Persistent project catalogue and reopen workflow; complete disc data is not copied.
 - Standalone standard PlayStation TIM preview and PNG + JSON provenance export.
-- Honest unsupported states for DW1-specific models, animations, archives, maps, and scripts.
+- Confirmed USA `CHDAT/ALLTIM.TIM` fixed-slot inventory: 180 nine-sector TIM resources with offsets and hashes.
+- Verified USA resource-table associations for 180 IDs: internal/display names, same-index textures, and 178 structurally bounded MMD containers.
+- Character-resource browser with associated decoded texture preview and PNG + provenance export; model geometry and animation remain unsupported.
+- Thread-safe import cancellation and streamed hashing/file export; partial exports are removed.
+- Honest unsupported states for model geometry, animations, general archives, maps, and scripts.
 
 See [docs/FORMATS.md](docs/FORMATS.md) for exact support boundaries and evidence.
 
@@ -46,11 +50,12 @@ All tests use synthetic fixtures. The automated suite does not contain or requir
 3. Wait for layout inspection, source hashing, release validation, inventory, and per-file hashing.
 4. Reopen later with **Open analysis project…**. If the original source is absent or its size/mtime changed, content reads are disabled to avoid silently using stale offsets.
 
-The source is opened read-only. Exports never overwrite existing files. Failed/cancelled imports retain their status and error log in the selected project directory.
+The source is opened read-only. Exports run in a cancellable background worker, never overwrite existing files, and use a temporary file that is removed on cancellation or error. Failed and cancelled imports are recorded as distinct states. Closing the application requests cancellation and waits for active workers; it never forcibly terminates a thread.
 
 ## Safety and privacy
 
 - Disc extents, directory records, texture dimensions, and preview sizes are bounded and validated.
+- Hashing and exports stream logical 2048-byte data across cooked or raw sectors instead of loading complete resources into memory. Hex preview reads only its 256 KiB prefix.
 - CUE references may not escape the CUE directory.
 - ISO names are treated as untrusted; extraction is selected-file-only.
 - The `.gitignore` excludes common disc images and analysis-project directories.
@@ -62,6 +67,7 @@ The implementation was scoped after inspecting the public descriptions and sourc
 
 - [jype0/dw_decomp](https://github.com/jype0/dw_decomp) — USA disc extraction through `dumpsxiso`, executable decompilation workflow; MIT licensed.
 - [SydMontague/DW1-SydPatches](https://github.com/SydMontague/DW1-SydPatches) — USA-version extraction/rebuild and reverse-engineering context.
+- [Operation-Decoded/DW1ModelConverter](https://github.com/Operation-Decoded/DW1ModelConverter) — MIT-licensed character-table/MMD association and container research context.
 - [psx-spx CD-ROM format](https://psx-spx.consoledev.net/cdromformat/) and [file formats](https://psx-spx.consoledev.net/cdromfileformats/) — sector, ISO 9660, PS-X EXE, and TIM structures.
 
 No source code from those projects is copied into this repository. Their project descriptions do not establish complete DW1 asset decoding, and this workbench does not claim it.

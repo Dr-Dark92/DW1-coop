@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS associations (
  source_id TEXT NOT NULL REFERENCES resources(id), target_id TEXT NOT NULL REFERENCES resources(id),
  kind TEXT NOT NULL, evidence TEXT, confidence TEXT, PRIMARY KEY(source_id,target_id,kind)
 );
+CREATE TABLE IF NOT EXISTS resource_labels (
+ resource_id TEXT NOT NULL REFERENCES resources(id), kind TEXT NOT NULL, value TEXT NOT NULL,
+ evidence TEXT, confidence TEXT, PRIMARY KEY(resource_id,kind)
+);
 CREATE TABLE IF NOT EXISTS logs (
  id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL
 );
@@ -67,11 +71,26 @@ class Catalogue:
 
     def replace_inventory(self, rows):
         with self.connect() as db:
+            db.execute("DELETE FROM resource_labels")
             db.execute("DELETE FROM associations")
             db.execute("DELETE FROM resources")
             db.executemany("""INSERT INTO resources
               (id,original_path,parent_path,offset,size,extent,detected_format,content_hash,status,category)
               VALUES (?,?,?,?,?,?,?,?,?,?)""", rows)
+
+    def add_resources(self, rows, associations=()):
+        with self.connect() as db:
+            db.executemany("""INSERT INTO resources
+              (id,original_path,parent_path,offset,size,extent,detected_format,content_hash,
+               decoder,decoder_version,status,category,mapping_evidence,confidence)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+            db.executemany("""INSERT INTO associations
+              (source_id,target_id,kind,evidence,confidence) VALUES (?,?,?,?,?)""", associations)
+
+    def update_resource_analysis(self, rows):
+        with self.connect() as db:
+            db.executemany("""UPDATE resources SET detected_format=?,decoder=?,decoder_version=?,
+              status=?,mapping_evidence=?,confidence=? WHERE id=?""", rows)
 
     def resources(self, category: str | None = None):
         with self.connect() as db:
@@ -79,6 +98,24 @@ class Catalogue:
             if category:
                 sql, args = sql + " WHERE category=?", (category,)
             return list(db.execute(sql + " ORDER BY original_path", args))
+
+    def associations(self):
+        with self.connect() as db:
+            return list(db.execute("SELECT * FROM associations ORDER BY source_id,target_id,kind"))
+
+    def add_labels(self, rows):
+        with self.connect() as db:
+            db.executemany("""INSERT OR REPLACE INTO resource_labels
+              (resource_id,kind,value,evidence,confidence) VALUES (?,?,?,?,?)""", rows)
+
+    def labels(self):
+        with self.connect() as db:
+            try:
+                return list(db.execute("SELECT * FROM resource_labels ORDER BY resource_id,kind"))
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    raise
+                return []
 
     def log(self, level: str, message: str):
         with self.connect() as db:

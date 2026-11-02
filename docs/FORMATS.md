@@ -34,23 +34,30 @@ The USA focus is corroborated by [dw_decomp](https://github.com/jype0/dw_decomp)
 
 ## Game archive unpacking
 
-No DW1-specific game archive is unpacked. Filename extensions and file listing are not treated as archive support.
+`CHDAT/ALLTIM.TIM` is split only by its verified fixed-slot rule. No general-purpose DW1 archive format is claimed. Filename extensions and file listing are not treated as archive support.
 
 ## Asset decoding
 
 | Format | Status | Notes |
 |---|---|---|
-| Standard PS1 TIM | Partial | 4/8-bit indexed and 16/24-bit direct-color standalone TIM files; palettes, VRAM coordinates, zero transparency, and STP indication retained. PNG plus JSON provenance export. Embedded scans and DW1 container splitting are not implemented. |
-| TMD / MMD | Unsupported | No model or model/archive association claims. |
+| Standard PS1 TIM | Partial | 4/8-bit indexed and 16/24-bit direct-color TIM data at resource start; palettes, VRAM coordinates, zero transparency, and STP indication retained. PNG plus JSON provenance export. Arbitrary embedded scans and containers other than ALLTIM are not implemented. |
+| USA `CHDAT/ALLTIM.TIM` | Confirmed | Exactly 180 fixed `0x4800`-byte (nine-sector) slots. Each slot begins with and structurally decodes as TIM; child offset, slot size, SHA-256, decoder version, and parent association are catalogued. |
+| USA character resource tables | Confirmed | 180 internal names at executable offset `0xA3B44`, indexed to `MMD{id//30}/{name}.MMD` and ALLTIM slot `id`; 179 non-empty display names from the 52-byte records at `0x9CEB4`. ID 114's empty display field is retained as unavailable. |
+| MMD container boundary | Partial | The leading TMD offset (`8`), embedded TMD id/flags/object count/table bound, and animation-data offset are validated. 178 supplied MMD files passed. Geometry primitives, UVs, skeleton/animation data, and rendering are unsupported. |
+| TMD model | Unsupported | Embedded/standalone geometry is not decoded or exported. |
 | DW1 animation data | Unsupported | No clip parsing or preview. |
 | TFS/backgrounds | Unsupported | No background or scene reconstruction. |
 | XA/STR/VAG | Unsupported | Extension detection only where applicable; no decode. |
 
 TIM structure and PS1 transparency semantics are based on [psx-spx file-format documentation](https://psx-spx.consoledev.net/cdromfileformats/). PNG alpha is an interchange approximation: zero color words map to alpha 0, STP-set words to alpha 128, and other words to alpha 255. The JSON sidecar records that policy so it is not mistaken for native eight-bit alpha.
 
+The ALLTIM slot rule is verified in both named upstream codebases: [`dw_decomp` reads `digiType * 9` for 9 sectors into a `0x4800` allocation](https://github.com/jype0/dw_decomp/blob/aaf69a4491cbf275ffd24df19fe78010151c10f2/src/main/model.c#L3287-L3303), while [DW1-SydPatches uses the same nine-sector rule](https://github.com/SydMontague/DW1-SydPatches/blob/b9671fad99513467dd7ae229ad2f13606f2852dc/src/Model.cpp#L332-L338). The user-provided USA file was `0x32a000` bytes (`180 × 0x4800`), and all 180 slots decoded structurally. This evidence applies only to that named container/layout; `ETCTIM.BIN`, `STDTIM.BIN`, and arbitrary concatenated TIM data remain unsupported as containers.
+
+The character association and MMD boundary were independently checked against `Operation-Decoded/DW1ModelConverter` revision `17d1a19` (MIT) and the supplied executable/disc. The upstream converter selects a resource table entry by numeric ID, forms the six `MMD0`–`MMD5` groups in blocks of 30, uses the same ID for ALLTIM, and reads an embedded standard TMD after the two-word MMD header. This workbench implements only those evidenced boundaries, not the converter's model output path.
+
 ## Resource association
 
-The schema supports directional associations, evidence, and confidence. No character/model/texture/animation or map-resource associations are seeded without verified data. Empty category views state this explicitly.
+The catalogue contains 180 confirmed numeric character-resource records. Each is associated with its same-index ALLTIM texture; 178 are associated with a path-present, boundary-validated MMD container. Display names are stored as separate labels with executable offsets and evidence, not derived from appearance. This proves resource-table relationships, not playable-character semantics, animation labels, or model correctness. Empty/unsupported categories state their limits explicitly.
 
 ## Executable analysis/decompilation
 
@@ -58,4 +65,4 @@ PS-X EXE magic and the boot executable are identified. Load fields, sections, di
 
 ## Research license notes
 
-`dw_decomp` is MIT licensed (copyright jype, 2026). No code was copied. DW1-SydPatches was used as research context only; no code or bundled data was incorporated. Links and attribution are retained here and in the README.
+`dw_decomp` is MIT licensed (copyright jype, 2026). `DW1ModelConverter` is MIT licensed. No code was copied. DW1-SydPatches was used as research context only; no code or bundled data was incorporated. Links and attribution are retained here and in the README.

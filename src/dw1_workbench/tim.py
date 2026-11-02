@@ -93,7 +93,8 @@ def decode_tim(data: bytes, palette_index: int = 0) -> TimImage:
 
 
 def export_png(tim: TimImage, destination: Path, source_id: str, source_hash: str,
-               palette_index: int = 0, overwrite: bool = False) -> tuple[Path, Path]:
+               palette_index: int = 0, overwrite: bool = False,
+               provenance: dict | None = None) -> tuple[Path, Path]:
     destination = destination.resolve()
     metadata_path = destination.with_suffix(destination.suffix + ".json")
     if not overwrite and (destination.exists() or metadata_path.exists()):
@@ -107,6 +108,7 @@ def export_png(tim: TimImage, destination: Path, source_id: str, source_hash: st
         "palette_count": tim.palette_count, "stp_semantics": "alpha 128 marks STP; zero word alpha 0",
         "image_vram": {"x": tim.image_x, "y": tim.image_y},
         "clut_vram": None if tim.clut_x is None else {"x": tim.clut_x, "y": tim.clut_y},
+        "provenance": provenance or {},
     }
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     return destination, metadata_path

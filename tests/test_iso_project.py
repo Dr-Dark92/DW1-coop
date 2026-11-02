@@ -42,12 +42,13 @@ def test_catalogue_persistence_reopen_and_changed_source(synthetic_iso, tmp_path
     assert not source_state(reopened)[0]
 
 
-def test_cancellation_records_failed_state(synthetic_iso, tmp_path):
+def test_cancellation_records_cancelled_state(synthetic_iso, tmp_path):
     project = tmp_path / "cancelled.dw1project"
     with pytest.raises(Cancelled):
         import_project(synthetic_iso, project, cancelled=lambda: True)
     catalogue = open_catalogue(project)
-    assert catalogue.meta()["import_status"] == "failed"
+    assert catalogue.meta()["import_status"] == "cancelled"
+    assert "cancel" in catalogue.meta()["cancellation"].lower()
 
 
 def test_export_no_overwrite(synthetic_iso, tmp_path):

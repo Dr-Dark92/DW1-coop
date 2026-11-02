@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import html
+import threading
 import traceback
 from pathlib import Path
 
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QStackedWidget,
+    QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .catalog import Catalogue, open_catalogue
+from .errors import Cancelled
 from .iso9660 import IsoEntry, safe_export
 from .project import import_project, layout_from_catalogue, source_state
 from .tim import decode_tim, export_png
@@ -26,25 +28,58 @@ class ImportWorker(QObject):
     progress = Signal(int, str)
     succeeded = Signal(object)
     failed = Signal(str, str)
+    cancelled = Signal(str)
     finished = Signal()
 
     def __init__(self, source: Path, project: Path):
         super().__init__()
-        self.source, self.project, self.cancelled = source, project, False
+        self.source, self.project = source, project
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        """Thread-safe; intentionally callable directly from the GUI thread."""
+        self.cancel_event.set()
 
     @Slot()
     def run(self):
         try:
-            result = import_project(self.source, self.project, lambda: self.cancelled, self.progress.emit)
+            result = import_project(self.source, self.project, self.cancel_event.is_set, self.progress.emit)
             self.succeeded.emit(result)
+        except Cancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
             self.failed.emit(str(exc), traceback.format_exc())
         finally:
             self.finished.emit()
 
+class ExportWorker(QObject):
+    progress = Signal(int, str)
+    succeeded = Signal(str)
+    failed = Signal(str)
+    cancelled = Signal(str)
+    finished = Signal()
+
+    def __init__(self, catalogue: Catalogue, entry: IsoEntry, destination: Path):
+        super().__init__()
+        self.catalogue, self.entry, self.destination = catalogue, entry, destination
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
+
     @Slot()
-    def cancel(self):
-        self.cancelled = True
+    def run(self):
+        try:
+            with layout_from_catalogue(self.catalogue).open() as reader:
+                result = safe_export(reader, self.entry, self.destination,
+                                     cancelled=self.cancel_event.is_set, progress=self.progress.emit)
+            self.succeeded.emit(str(result))
+        except Cancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
 
 
 class WelcomePage(QWidget):
@@ -86,14 +121,22 @@ class UnsupportedPage(QWidget):
 
 
 class Workspace(QWidget):
+    background_finished = Signal()
+
     def __init__(self, catalogue: Catalogue, parent=None):
         super().__init__(parent)
         self.catalogue = catalogue
         self.rows = catalogue.resources()
+        self.rows_by_id = {row["id"]: row for row in self.rows}
+        self.associations = catalogue.associations()
+        self.labels = {(row["resource_id"], row["kind"]): row for row in catalogue.labels()}
+        self.export_thread: QThread | None = None
+        self.export_worker: ExportWorker | None = None
+        self.export_progress: QProgressDialog | None = None
         self.tabs = QTabWidget()
         self.tabs.addTab(self._overview(), "Overview")
         self.tabs.addTab(self._disc_files(), "Disc Files")
-        self.tabs.addTab(UnsupportedPage("Characters and Digimon", "No verified character/model/animation associations have been imported. MMD decoding is not implemented."), "Characters and Digimon")
+        self.tabs.addTab(self._characters(), "Characters and Digimon")
         self.tabs.addTab(UnsupportedPage("Animations", "No DW1 animation decoder is verified in this milestone. Unsupported resources are retained in the disc catalogue."), "Animations")
         self.tabs.addTab(self._textures(), "Textures")
         self.tabs.addTab(UnsupportedPage("Maps and Zones", "TFS backgrounds, geometry, collision, exits, and scripts are not decoded. A file listing is not a reconstructed scene."), "Maps and Zones")
@@ -140,6 +183,109 @@ class Workspace(QWidget):
         layout.addLayout(buttons); layout.addWidget(self.file_table)
         return page
 
+    def _characters(self):
+        page, layout = QWidget(), QVBoxLayout(); page.setLayout(layout)
+        characters = [row for row in self.rows if row["detected_format"] == "DW1 character resource entry"]
+        self.character_rows = characters
+        if not characters:
+            layout.addWidget(QLabel("No verified character resource table is present. Models and animations remain unsupported."))
+            layout.addStretch()
+            return page
+        info = QLabel("Verified USA executable resource IDs and internal names, associated by index with ALLTIM texture slots. MMD boundaries are identified; geometry and animations are not decoded.")
+        info.setWordWrap(True); layout.addWidget(info)
+        self.character_table = QTableWidget(len(characters), 5)
+        self.character_table.setHorizontalHeaderLabels(["Resource ID", "Display name", "Internal name", "Model container", "Texture resource"])
+        for index, row in enumerate(characters):
+            resource_id = row["original_path"].split("/")[-2]
+            name = row["original_path"].split("/")[-1]
+            label = self.labels.get((row["id"], "display_name"))
+            related = {association["kind"]: self.rows_by_id[association["target_id"]]
+                       for association in self.associations
+                       if association["source_id"] == row["id"] and association["target_id"] in self.rows_by_id}
+            model = related.get("model_container")
+            texture = related.get("texture")
+            values = (resource_id, label["value"] if label else "not recorded", name,
+                      model["original_path"] if model else "unsupported / absent",
+                      texture["original_path"] if texture else "unavailable")
+            for column, value in enumerate(values):
+                self.character_table.setItem(index, column, QTableWidgetItem(str(value)))
+        self.character_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.character_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.character_preview = QLabel("Select a verified resource entry")
+        self.character_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.character_preview.setMinimumSize(320, 240)
+        self.character_details = QPlainTextEdit(); self.character_details.setReadOnly(True); self.character_details.setMaximumHeight(170)
+        self.character_table.itemSelectionChanged.connect(self._preview_character)
+        export = QPushButton("Export associated texture PNG + provenance metadata…")
+        export.clicked.connect(self._export_character_texture)
+        right = QWidget(); right_layout = QVBoxLayout(right)
+        right_layout.addWidget(self.character_preview); right_layout.addWidget(self.character_details)
+        split = QSplitter(); split.addWidget(self.character_table); split.addWidget(right)
+        layout.addWidget(split); layout.addWidget(export)
+        return page
+
+    def _selected_character(self):
+        index = self.character_table.currentRow()
+        if index < 0:
+            raise ValueError("Select a character resource entry first.")
+        return self.character_rows[index]
+
+    def _character_related(self, row, kind):
+        association = next((item for item in self.associations
+                            if item["source_id"] == row["id"] and item["kind"] == kind), None)
+        return self.rows_by_id.get(association["target_id"]) if association else None
+
+    @staticmethod
+    def _resource_provenance(row):
+        return {key: row[key] for key in ("original_path", "parent_path", "offset", "size",
+                                           "detected_format", "decoder", "decoder_version",
+                                           "mapping_evidence", "confidence")}
+
+    def _preview_character(self):
+        try:
+            character = self._selected_character()
+            texture = self._character_related(character, "texture")
+            model = self._character_related(character, "model_container")
+            label = self.labels.get((character["id"], "display_name"))
+            if texture is None:
+                raise ValueError("This entry has no verified texture association.")
+            tim = decode_tim(self._read_row(texture, PREVIEW_LIMIT))
+            pixmap = QPixmap.fromImage(ImageQt(tim.image))
+            self.character_preview.setPixmap(pixmap.scaled(self.character_preview.size(),
+                                                            Qt.AspectRatioMode.KeepAspectRatio,
+                                                            Qt.TransformationMode.SmoothTransformation))
+            details = [
+                f"source: {character['parent_path']}",
+                f"display name: {label['value'] if label else 'not recorded'}",
+                f"display-name evidence: {label['evidence'] if label else 'none'}",
+                f"table offset: 0x{character['offset']:x}",
+                f"entry size: {character['size']} bytes",
+                f"format: {character['detected_format']}",
+                f"parser: {character['decoder']} {character['decoder_version']}",
+                f"texture: {texture['original_path']} @ 0x{texture['offset']:x}, {texture['size']} bytes",
+                f"texture parser: {texture['decoder']} {texture['decoder_version']}",
+                f"model: {model['original_path'] if model else 'absent / unsupported'}",
+                f"evidence: {character['mapping_evidence']}",
+            ]
+            self.character_details.setPlainText("\n".join(details))
+        except Exception as exc:
+            self.character_preview.setText(f"Preview unavailable:\n{exc}")
+
+    def _export_character_texture(self):
+        try:
+            character = self._selected_character()
+            texture = self._character_related(character, "texture")
+            if texture is None:
+                raise ValueError("This entry has no verified texture association.")
+            tim = decode_tim(self._read_row(texture, PREVIEW_LIMIT))
+            name = character["original_path"].split("/")[-1]
+            path, _ = QFileDialog.getSaveFileName(self, "Export associated texture", f"{name}-{texture['offset']//0x4800:03d}.png", "PNG image (*.png)")
+            if not path: return
+            export_png(tim, Path(path), texture["id"], texture["content_hash"],
+                       provenance=self._resource_provenance(texture))
+            QMessageBox.information(self, "Texture exported", f"Wrote {path} and provenance JSON.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Texture export failed", str(exc))
+
     def _selected_row(self):
         index = self.file_table.currentRow()
         if index < 0:
@@ -147,29 +293,83 @@ class Workspace(QWidget):
         return self.rows[index]
 
     def _entry(self, row):
-        return IsoEntry(row["original_path"], row["extent"], row["size"], False)
+        extent_size = row["size"]
+        if row["offset"] is not None:
+            parent = next((candidate for candidate in self.rows
+                           if candidate["original_path"] == row["parent_path"] and candidate["offset"] is None), None)
+            if parent is None:
+                raise ValueError("Parent resource is missing from the catalogue.")
+            extent_size = parent["size"]
+        return IsoEntry(row["original_path"], row["extent"], row["size"], False,
+                        row["offset"] or 0, extent_size)
 
     def _read_row(self, row, limit=None):
         if limit is not None and row["size"] > limit:
             raise ValueError(f"File is {row['size']:,} bytes; preview limit is {limit:,} bytes.")
         with layout_from_catalogue(self.catalogue).open() as reader:
-            return reader.read_extent(row["extent"], row["size"], limit)
+            entry = self._entry(row)
+            return reader.read_extent_range(entry.extent, entry.extent_size, entry.offset, entry.size)
+
+    def _read_row_prefix(self, row, limit):
+        with layout_from_catalogue(self.catalogue).open() as reader:
+            entry = self._entry(row)
+            return reader.read_extent_range(entry.extent, entry.extent_size, entry.offset,
+                                            min(entry.size, limit))
 
     def _export_selected(self):
         try:
             row = self._selected_row()
             path, _ = QFileDialog.getSaveFileName(self, "Export disc file", Path(row["original_path"]).name)
             if not path: return
-            with layout_from_catalogue(self.catalogue).open() as reader:
-                safe_export(reader, self._entry(row), Path(path))
-            QMessageBox.information(self, "Export complete", f"Exported to {path}")
+            self._start_export(self._entry(row), Path(path))
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    def _start_export(self, entry: IsoEntry, destination: Path):
+        if self.export_thread and self.export_thread.isRunning():
+            raise ValueError("Another export is already running.")
+        if destination.exists():
+            raise ValueError(f"Export already exists: {destination}")
+        dialog = QProgressDialog(f"Exporting {entry.path}", "Cancel", 0, 100, self)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setAutoClose(False); dialog.setValue(0); dialog.show()
+        thread, worker = QThread(self), ExportWorker(self.catalogue, entry, destination)
+        worker.moveToThread(thread); thread.started.connect(worker.run)
+        worker.progress.connect(lambda value, message: (dialog.setValue(value), dialog.setLabelText(message)))
+        dialog.canceled.connect(lambda: worker.request_cancel())
+        worker.succeeded.connect(lambda path: self._export_message("Export complete", f"Exported to {path}"))
+        worker.failed.connect(lambda message: self._export_message("Export failed", message, critical=True))
+        worker.cancelled.connect(lambda message: self._export_message("Export cancelled", message))
+        worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater); thread.finished.connect(self._export_finished)
+        self.export_thread, self.export_worker, self.export_progress = thread, worker, dialog
+        thread.start()
+
+    def _export_message(self, title, message, critical=False):
+        window = self.window()
+        if isinstance(window, MainWindow) and window._close_pending:
+            return
+        function = QMessageBox.critical if critical else QMessageBox.information
+        function(self, title, message)
+
+    @Slot()
+    def _export_finished(self):
+        if self.export_progress:
+            self.export_progress.close(); self.export_progress.deleteLater()
+        self.export_progress = None; self.export_worker = None; self.export_thread = None
+        self.background_finished.emit()
+
+    def cancel_background(self):
+        if self.export_worker:
+            self.export_worker.request_cancel()
+
+    def has_background_work(self):
+        return bool(self.export_thread and self.export_thread.isRunning())
 
     def _hex_selected(self):
         try:
             row = self._selected_row()
-            data = self._read_row(row)[:HEX_LIMIT]
+            data = self._read_row_prefix(row, HEX_LIMIT)
             lines = []
             for offset in range(0, len(data), 16):
                 chunk = data[offset:offset+16]
@@ -183,9 +383,10 @@ class Workspace(QWidget):
 
     def _textures(self):
         page, layout = QWidget(), QVBoxLayout(); page.setLayout(layout)
-        textures = [r for r in self.rows if r["detected_format"] == "TIM"]
-        info = QLabel("Standalone TIM files detected by header. Indexed palettes and PS1 STP are preserved in preview/export metadata." if textures else
-                      "No standalone TIM files were identified. Embedded/container textures are not guessed or decoded.")
+        textures = [r for r in self.rows
+                    if r["detected_format"] in {"TIM", "DW1 ALLTIM TIM slot"}]
+        info = QLabel("TIM resources detected at file start plus confirmed ALLTIM fixed slots. Indexed palettes and PS1 STP are preserved in preview/export metadata." if textures else
+                      "No supported TIM resources were identified. Unknown embedded/container textures are not guessed or decoded.")
         layout.addWidget(info)
         self.texture_table = QTableWidget(len(textures), 2); self.texture_rows = textures
         self.texture_table.setHorizontalHeaderLabels(["Path", "Status"])
@@ -219,7 +420,8 @@ class Workspace(QWidget):
             row = self._selected_texture(); tim = decode_tim(self._read_row(row, PREVIEW_LIMIT))
             path, _ = QFileDialog.getSaveFileName(self, "Export PNG", Path(row["original_path"]).stem + ".png", "PNG image (*.png)")
             if not path: return
-            export_png(tim, Path(path), row["id"], row["content_hash"])
+            export_png(tim, Path(path), row["id"], row["content_hash"],
+                       provenance=self._resource_provenance(row))
             QMessageBox.information(self, "Texture exported", f"Wrote {path} and provenance JSON.")
         except Exception as exc:
             QMessageBox.critical(self, "Texture export failed", str(exc))
@@ -242,6 +444,8 @@ class MainWindow(QMainWindow):
         welcome = WelcomePage(); welcome.import_requested.connect(self.start_import); welcome.open_requested.connect(self.open_project)
         self.stack.addWidget(welcome)
         self.thread = self.worker = None
+        self._close_pending = False
+        self._import_page = None
 
     def start_import(self):
         source, _ = QFileDialog.getOpenFileName(self, "Choose your Digimon World image", "", "Disc images (*.iso *.bin *.cue);;All files (*)")
@@ -252,18 +456,42 @@ class MainWindow(QMainWindow):
         label, bar, cancel = QLabel("Preparing import…"), QProgressBar(), QPushButton("Cancel")
         layout.addStretch(); layout.addWidget(label); layout.addWidget(bar); layout.addWidget(cancel); layout.addStretch()
         self.stack.addWidget(page); self.stack.setCurrentWidget(page)
+        self._import_page = page
         self.thread, self.worker = QThread(self), ImportWorker(Path(source), Path(project))
         self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(lambda p, m: (bar.setValue(p), label.setText(m)))
-        cancel.clicked.connect(self.worker.cancel); self.worker.succeeded.connect(self.show_workspace)
-        self.worker.failed.connect(self.import_failed); self.worker.finished.connect(self.thread.quit)
-        self.thread.finished.connect(self.worker.deleteLater); self.thread.finished.connect(self.thread.deleteLater)
+        cancel.clicked.connect(lambda: self._request_import_cancel(cancel, label))
+        self.worker.succeeded.connect(self.show_workspace)
+        self.worker.failed.connect(self.import_failed); self.worker.cancelled.connect(self.import_cancelled)
+        self.worker.finished.connect(self.thread.quit); self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater); self.thread.finished.connect(self._import_thread_finished)
         self.thread.start()
+
+    def _request_import_cancel(self, button=None, label=None):
+        if self.worker:
+            self.worker.request_cancel()
+        if button:
+            button.setEnabled(False)
+        if label:
+            label.setText("Cancelling safely…")
 
     @Slot(str, str)
     def import_failed(self, message, detail):
+        if self._close_pending:
+            return
         QMessageBox.critical(self, "Import failed", message + "\n\nThe incomplete project records this failure and can be inspected or removed.")
         self.stack.setCurrentIndex(0)
+
+    @Slot(str)
+    def import_cancelled(self, message):
+        if not self._close_pending:
+            QMessageBox.information(self, "Import cancelled", message + "\n\nThe project records the import as cancelled.")
+            self.stack.setCurrentIndex(0)
+
+    @Slot()
+    def _import_thread_finished(self):
+        self.worker = None; self.thread = None
+        self._maybe_finish_close()
 
     def open_project(self):
         path = QFileDialog.getExistingDirectory(self, "Open analysis project")
@@ -273,4 +501,28 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def show_workspace(self, catalogue):
-        workspace = Workspace(catalogue, self); self.stack.addWidget(workspace); self.stack.setCurrentWidget(workspace)
+        workspace = Workspace(catalogue, self)
+        workspace.background_finished.connect(self._maybe_finish_close)
+        self.stack.addWidget(workspace); self.stack.setCurrentWidget(workspace)
+
+    def _active_workspaces(self):
+        return [self.stack.widget(index) for index in range(self.stack.count())
+                if isinstance(self.stack.widget(index), Workspace)]
+
+    def _has_active_work(self):
+        return bool(self.thread and self.thread.isRunning()) or any(page.has_background_work() for page in self._active_workspaces())
+
+    @Slot()
+    def _maybe_finish_close(self):
+        if self._close_pending and not self._has_active_work():
+            QTimer.singleShot(0, self.close)
+
+    def closeEvent(self, event: QCloseEvent):
+        if self._has_active_work():
+            self._close_pending = True
+            self._request_import_cancel()
+            for workspace in self._active_workspaces():
+                workspace.cancel_background()
+            event.ignore()
+            return
+        event.accept()

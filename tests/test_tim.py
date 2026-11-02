@@ -19,9 +19,11 @@ def test_known_tim_pixels_and_export(tmp_path):
     tim = decode_tim(make_4bit_tim())
     assert tim.image.size == (4, 1)
     assert list(tim.image.get_flattened_data()) == [(255, 0, 0, 255), (0, 255, 0, 128), (0, 0, 0, 0), (255, 0, 0, 255)]
-    png, metadata = export_png(tim, tmp_path / "texture.png", "disc:abc", "deadbeef")
+    png, metadata = export_png(tim, tmp_path / "texture.png", "disc:abc", "deadbeef",
+                               provenance={"original_path": "CHDAT/ALLTIM.TIM#003", "offset": 0xD800})
     assert png.is_file()
     assert json.loads(metadata.read_text())["source_resource_id"] == "disc:abc"
+    assert json.loads(metadata.read_text())["provenance"]["offset"] == 0xD800
 
 
 def test_malformed_tim_rejected():
