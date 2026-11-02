@@ -245,8 +245,7 @@ def parse_mmd_static(data: bytes, skeleton: tuple[SkeletonNode, ...],
             raise DiscFormatError(f"Skeleton node {index} references absent object {node.object_index}.")
     pose, animation_index = _parse_initial_pose(data, animation_offset, len(skeleton))
     return StaticModel(tuple(objects), skeleton, pose, animation_offset, animation_index,
-                       ("Static assembly uses only the initial transform prefix of animation record 0; "
-                        "animation instructions are not decoded.",))
+                       (f"The static pose is the initial transform of animation record {animation_index}.",))
 
 
 def validate_texture_materials(model: StaticModel, texture: TimImage) -> tuple[int, ...]:

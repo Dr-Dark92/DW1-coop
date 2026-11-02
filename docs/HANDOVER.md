@@ -1,5 +1,13 @@
 # Handover
 
+## Animations milestone (2026-11-02, branch `animations`)
+
+Branched from `agumon-preview-verification` (open as pull request #1). `src/dw1_workbench/animation.py` parses MMD animation tables and steps clips exactly like the decompiled game (`jype0/dw_decomp` `src/main/anim.c`; SydPatches double-steps the root remainder, the original does not). The model preview (`model_view.set_pose`, `gui.py` animation controls) plays clips at an assumed 20 ticks/s with optional root motion and texture copies; sound cues are counted, not played. `tests/test_animation.py` adds 16 synthetic tests (80 total pass).
+
+Converter comparison, outside Git in `/home/drdark/dev/DW1-coop-data/converter-run/`: `compare_animations.py` (`--float` runs the diagnostic real-valued stepper) and `compare_animations.log`. Result: all 4,843 clips of 178 models match (see `docs/FORMATS.md#animation-clips`).
+
+The user confirmed playback on the desktop. Next candidates are clip naming from evidence (game call sites start IDs 0, 1, 2, 3, 6, 7, 10–14 for the tamer), the per-type texture cycling, and GLB/glTF export with animations.
+
 ## Maps and zones milestone (2026-11-02, branch `maps-zones`)
 
 Worked in a separate worktree at `/home/drdark/dev/DW1-coop-maps` (branched from `873829a`) while another session verified the remaining MMD models on `agumon-preview-verification`. `maps-zones` was then merged into `agumon-preview-verification`.

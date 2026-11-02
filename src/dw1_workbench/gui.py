@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import html
+import math
 import threading
 import traceback
 from pathlib import Path
 
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QPixmap
+from PySide6.QtGui import QCloseEvent, QPixmap, QVector3D
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton,
@@ -16,13 +17,14 @@ from PySide6.QtWidgets import (
 )
 
 from .catalog import Catalogue, open_catalogue
-from .errors import Cancelled
+from .errors import Cancelled, DiscFormatError
 from .iso9660 import IsoEntry, safe_export
 from .maps import (EXIT_COLOURS, MAX_MAP_FILE, MAX_TFS_FILE, TRIGGER_COLOURS, export_background,
                    floor_grid_image, layout_zones, map_exits, map_links, parse_map, parse_map_table, parse_tfs,
                    render_background, trigger_summary, zone_links)
 from .relation_view import RelationView
-from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
+from .animation import TICKS_PER_SECOND, AnimationPlayer, SoundEvent, TextureEvent, parse_animations
+from .mmd import StaticPose, Vector3, parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .model_view import StaticModelView
 from .project import import_project, layout_from_catalogue, source_state
 from .tim import decode_tim, export_png
@@ -131,8 +133,13 @@ class ModelWorker(QObject):
             first = decode_tim(texture_data)
             used_palettes = validate_texture_materials(model, first)
             palettes = tuple(decode_tim(texture_data, index).image for index in range(first.palette_count))
+            self.progress.emit(90, "Reading animation clips")
+            try:
+                clips, clip_error = parse_animations(model_data, model.animation_offset, len(skeleton)), None
+            except DiscFormatError as exc:
+                clips, clip_error = [], str(exc)
             self.progress.emit(100, "Static model ready")
-            self.succeeded.emit((model, palettes, first.clut_y, used_palettes))
+            self.succeeded.emit((model, palettes, first.clut_y, used_palettes, first.bits_per_pixel, clips, clip_error))
         except Cancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
@@ -252,7 +259,12 @@ class Workspace(QWidget):
         self.tabs.addTab(self._overview(), "Overview")
         self.tabs.addTab(self._disc_files(), "Disc Files")
         self.tabs.addTab(self._characters(), "Characters and Digimon")
-        self.tabs.addTab(UnsupportedPage("Animations", "No DW1 animation decoder is verified in this milestone. Unsupported resources are retained in the disc catalogue."), "Animations")
+        self.tabs.addTab(UnsupportedPage("Animations", "Character animation clips are decoded from each MMD and played "
+                                         "per model: open Characters and Digimon, select an entry, and use Load model "
+                                         "and animations. Clips follow the game's frame-by-frame stepping and match an "
+                                         "independent converter for all 4,843 clips of the 178 models. Sound cues are "
+                                         "listed but not played; clip names are not established, so clips are shown by "
+                                         "index."), "Animations")
         self.tabs.addTab(self._textures(), "Textures")
         self.tabs.addTab(self._maps(), "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
@@ -306,7 +318,9 @@ class Workspace(QWidget):
             layout.addWidget(QLabel("No verified character resource table is present. Models and animations remain unsupported."))
             layout.addStretch()
             return page
-        info = QLabel("Verified USA executable resource IDs and internal names, associated by index with ALLTIM texture slots. MMD boundaries are identified; geometry and animations are not decoded.")
+        info = QLabel("Verified USA executable resource IDs and internal names, associated by index with ALLTIM texture "
+                      "slots. Static models (151 of 178 supported) and their animation clips can be loaded and played; "
+                      "both were verified against an independent converter.")
         info.setWordWrap(True); layout.addWidget(info)
         self.character_table = QTableWidget(len(characters), 5)
         self.character_table.setHorizontalHeaderLabels(["Resource ID", "Display name", "Internal name", "Model container", "Texture resource"])
@@ -338,7 +352,7 @@ class Workspace(QWidget):
         self.model_mode = QComboBox(); self.model_mode.addItems(["Textured", "Untextured"])
         self.model_wireframe = QCheckBox("Wireframe overlay")
         model_reset = QPushButton("Reset view")
-        model_load = QPushButton("Load verified static model")
+        model_load = QPushButton("Load model and animations")
         self.model_mode.currentIndexChanged.connect(self._update_model_modes)
         self.model_wireframe.toggled.connect(self._update_model_modes)
         model_reset.clicked.connect(self.model_view.reset_view)
@@ -347,14 +361,35 @@ class Workspace(QWidget):
         model_controls.addWidget(model_reset); model_controls.addStretch(); model_controls.addWidget(model_load)
         self.model_status = QLabel("Model geometry is loaded on request in a cancellable background worker.")
         self.model_status.setWordWrap(True)
-        model_layout.addLayout(model_controls); model_layout.addWidget(self.model_view); model_layout.addWidget(self.model_status)
+        anim_controls = QHBoxLayout()
+        self.anim_clip = QComboBox(); self.anim_clip.setEnabled(False)
+        self.anim_clip.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.anim_clip.currentIndexChanged.connect(self._select_clip)
+        self.anim_play = QPushButton("Play"); self.anim_play.clicked.connect(self._toggle_animation)
+        anim_step = QPushButton("Step"); anim_step.clicked.connect(self._step_animation)
+        anim_restart = QPushButton("Restart"); anim_restart.clicked.connect(self._restart_animation)
+        self.anim_root = QCheckBox("Apply root motion"); self.anim_root.toggled.connect(self._restart_animation)
+        for widget in (anim_step, anim_restart, self.anim_play, self.anim_root):
+            widget.setEnabled(False)
+        self._anim_widgets = (anim_step, anim_restart, self.anim_play, self.anim_root)
+        anim_controls.addWidget(QLabel("Animation")); anim_controls.addWidget(self.anim_clip)
+        anim_controls.addWidget(self.anim_play); anim_controls.addWidget(anim_step); anim_controls.addWidget(anim_restart)
+        anim_controls.addWidget(self.anim_root); anim_controls.addStretch()
+        self.anim_status = QLabel("Load a model to play its animation clips.")
+        self.anim_status.setWordWrap(True)
+        self.anim_timer = QTimer(self); self.anim_timer.setInterval(1000 // TICKS_PER_SECOND)
+        self.anim_timer.timeout.connect(self._step_animation)
+        self._anim_clips, self._anim_player = [], None
+        model_layout.addLayout(model_controls); model_layout.addWidget(self.model_view, 1)
+        model_layout.addLayout(anim_controls); model_layout.addWidget(self.anim_status)
+        model_layout.addWidget(self.model_status)
         texture_page = QWidget(); texture_layout = QVBoxLayout(texture_page)
         texture_layout.addWidget(self.character_preview); texture_layout.addWidget(self.character_details)
-        preview_tabs = QTabWidget(); preview_tabs.addTab(model_page, "Static model"); preview_tabs.addTab(texture_page, "Texture")
+        preview_tabs = QTabWidget(); preview_tabs.addTab(model_page, "Model and animation"); preview_tabs.addTab(texture_page, "Texture")
         right = QWidget(); right_layout = QVBoxLayout(right)
         right_layout.addWidget(preview_tabs)
         split = QSplitter(); split.addWidget(self.character_table); split.addWidget(right)
-        layout.addWidget(split); layout.addWidget(export)
+        layout.addWidget(split, 1); layout.addWidget(export)
         return page
 
     def _selected_character(self):
@@ -795,13 +830,113 @@ class Workspace(QWidget):
 
     @Slot(object)
     def _model_loaded(self, result):
-        model, images, clut_y, palettes = result
+        model, images, clut_y, palettes, bits_per_pixel, clips, clip_error = result
+        self.anim_timer.stop()
+        self._anim_images, self._anim_texels_per_unit = tuple(images), 16 // bits_per_pixel
         qimages = tuple(ImageQt(image).copy() for image in images)
         self.model_view.set_model(model, qimages, clut_y)
         self.model_status.setText(
             f"Experimental static preview — {len(model.objects)} objects, {model.vertex_count} vertices, "
             f"{model.primitive_count} primitives / {model.triangle_count} triangles; verified palettes "
             f"{', '.join(map(str, palettes))}. {model.warnings[0]}")
+        self._anim_clips = [clip for clip in clips if clip is not None]
+        self.anim_clip.blockSignals(True); self.anim_clip.clear()
+        for clip in self._anim_clips:
+            self.anim_clip.addItem(f"Clip {clip.index} — {clip.frame_count} frames"
+                                   f"{', loops' if clip.loops_forever else ''}", clip.index)
+        self.anim_clip.blockSignals(False)
+        enabled = bool(self._anim_clips)
+        self.anim_clip.setEnabled(enabled)
+        for widget in self._anim_widgets:
+            widget.setEnabled(enabled)
+        self._anim_player = None
+        if clip_error:
+            self.anim_status.setText(f"Animation clips unsupported: {clip_error}")
+        elif enabled:
+            self._select_clip(0)
+        else:
+            self.anim_status.setText("This model has no animation clips.")
+
+    def _select_clip(self, index):
+        if not 0 <= index < len(self._anim_clips):
+            return
+        self._anim_player = AnimationPlayer(self._anim_clips[index], len(self.model_view.model.skeleton))
+        self._restart_animation()
+
+    def _restart_animation(self, *_):
+        if self._anim_player is None:
+            return
+        self._anim_player.reset()
+        self._anim_events_seen, self._anim_offset = 0, [0.0, 0.0, 0.0]
+        self._anim_working = [image.copy() for image in self._anim_images]
+        self.model_view.set_palettes(tuple(ImageQt(image).copy() for image in self._anim_working))
+        self._show_animation_pose()
+
+    def _toggle_animation(self):
+        if self.anim_timer.isActive():
+            self.anim_timer.stop(); self.anim_play.setText("Play")
+        elif self._anim_player is not None:
+            if not self._anim_player.running:
+                self._restart_animation()
+            self.anim_timer.start(); self.anim_play.setText("Pause")
+
+    def _step_animation(self):
+        player = self._anim_player
+        if player is None:
+            return
+        if not player.running:
+            self.anim_timer.stop(); self.anim_play.setText("Play")
+            return
+        player.tick()
+        if self.anim_root.isChecked():
+            # applyRootMomentum rotates the root velocity by the root bone's matrix
+            root = player.pose(0)
+            matrix = StaticModelView._local_matrix(self._static_pose(root, translation=(0, 0, 0)))
+            moved = matrix.map(QVector3D(*player.root_velocity))
+            self._anim_offset = [self._anim_offset[0] + moved.x(), self._anim_offset[1] + moved.y(),
+                                 self._anim_offset[2] + moved.z()]
+        new_events = player.events[self._anim_events_seen:]
+        self._anim_events_seen = len(player.events)
+        copies = [event for event in new_events if isinstance(event, TextureEvent)]
+        for event in copies:
+            self._apply_texture_copy(event)
+        if copies:
+            self.model_view.set_palettes(tuple(ImageQt(image).copy() for image in self._anim_working))
+        self._show_animation_pose()
+
+    def _apply_texture_copy(self, event):
+        # The game moves a VRAM rectangle (16-bit units) inside the model's texture; at 4 bpp a unit is 4 texels.
+        unit = self._anim_texels_per_unit
+        left, top = event.source[0] * unit, event.source[1]
+        box = (left, top, left + event.size[0] * unit, top + event.size[1])
+        target = (event.destination[0] * unit, event.destination[1])
+        for image in self._anim_working:
+            width, height = image.size
+            if box[2] <= width and box[3] <= height and target[0] + box[2] - box[0] <= width \
+                    and target[1] + box[3] - box[1] <= height:
+                image.paste(image.crop(box), target)
+
+    @staticmethod
+    def _static_pose(pose, translation=None):
+        angle = 2 * math.pi / 4096
+        return StaticPose(Vector3(*(value / 4096 for value in pose.scale)),
+                          Vector3(*(value * angle for value in pose.rotation)),
+                          Vector3(*(float(value) for value in (translation or pose.translation))))
+
+    def _show_animation_pose(self):
+        player = self._anim_player
+        poses = [self._static_pose(player.pose(bone)) for bone in range(player.bone_count)]
+        poses[0] = self._static_pose(player.pose(0), translation=(0, 0, 0))
+        self.model_view.set_pose(poses, tuple(self._anim_offset))
+        sounds = sum(isinstance(event, SoundEvent) for event in player.events)
+        copies = sum(isinstance(event, TextureEvent) for event in player.events)
+        clip = player.clip
+        state = "finished" if not player.running else ("playing" if self.anim_timer.isActive() else "paused")
+        self.anim_status.setText(
+            f"Clip {clip.index}: frame {player.frame}/{clip.frame_count}, tick {player.ticks} "
+            f"({player.ticks / TICKS_PER_SECOND:.2f} s at an assumed {TICKS_PER_SECOND} ticks/s), {state}"
+            f"{'; loops forever' if clip.loops_forever else ''}. Events so far: {sounds} sound cue(s) (not played), "
+            f"{copies} texture copy(ies) applied. Stepping follows the game's integer momentum code.")
 
     @Slot()
     def _model_finished(self):

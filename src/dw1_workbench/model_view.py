@@ -52,9 +52,23 @@ class StaticModelView(QWidget):
 
     def set_model(self, model: StaticModel, palettes: tuple[QImage, ...], clut_y_base: int):
         self.model, self.palettes, self.clut_y_base = model, palettes, clut_y_base
+        if self._apply_pose(model.pose, (0.0, 0.0, 0.0), recentre=True):
+            self.reset_view()
+
+    def set_pose(self, poses, offset=(0.0, 0.0, 0.0)):
+        """Show the model in another pose; the camera keeps the centre fitted to the static pose."""
+        if self.model is not None and self._apply_pose(poses, offset, recentre=False):
+            self.update()
+
+    def set_palettes(self, palettes: tuple[QImage, ...]):
+        self.palettes = palettes
+        self.update()
+
+    def _apply_pose(self, poses, offset, recentre: bool) -> bool:
+        model = self.model
         world = []
         for index, node in enumerate(model.skeleton):
-            local = self._local_matrix(model.pose[index])
+            local = self._local_matrix(poses[index])
             world.append(local if node.parent_index is None else world[node.parent_index] * local)
         object_world = {}
         for index, node in enumerate(model.skeleton):
@@ -66,16 +80,18 @@ class StaticModelView(QWidget):
             # PS1 model space has screen-down Y. Flip only in the renderer so decoded
             # coordinates and exported provenance remain untouched.
             mapped = [matrix.map(QVector3D(vertex.x, vertex.y, vertex.z)) for vertex in obj.vertices]
-            vertices = [QVector3D(point.x(), -point.y(), point.z()) for point in mapped]
+            vertices = [QVector3D(point.x() + offset[0], -(point.y() + offset[1]), point.z() + offset[2])
+                        for point in mapped]
             points.extend(vertices)
             for face in obj.triangles:
                 triangles.append((tuple(vertices[i] for i in face.vertex_indices), face, object_index))
         if not points:
-            return
-        self._center = sum(points[1:], points[0]) / len(points)
-        self._radius = max((point - self._center).length() for point in points) or 1.0
+            return False
+        if recentre:
+            self._center = sum(points[1:], points[0]) / len(points)
+            self._radius = max((point - self._center).length() for point in points) or 1.0
         self._triangles = triangles
-        self.reset_view()
+        return True
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
