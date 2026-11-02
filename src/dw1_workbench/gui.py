@@ -9,7 +9,7 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
 from .catalog import Catalogue, open_catalogue
 from .errors import Cancelled
 from .iso9660 import IsoEntry, safe_export
+from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
+from .model_view import StaticModelView
 from .project import import_project, layout_from_catalogue, source_state
 from .tim import decode_tim, export_png
 
@@ -82,6 +84,58 @@ class ExportWorker(QObject):
             self.finished.emit()
 
 
+class ModelWorker(QObject):
+    progress = Signal(int, str)
+    succeeded = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal(str)
+    finished = Signal()
+
+    def __init__(self, catalogue: Catalogue, executable: IsoEntry, model: IsoEntry,
+                 texture: IsoEntry, resource_id: int):
+        super().__init__()
+        self.catalogue = catalogue
+        self.executable, self.model, self.texture = executable, model, texture
+        self.resource_id = resource_id
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
+
+    @Slot()
+    def run(self):
+        try:
+            with layout_from_catalogue(self.catalogue).open() as reader:
+                self.progress.emit(10, "Reading executable skeleton data")
+                executable = reader.read_extent_range(self.executable.extent, self.executable.extent_size,
+                                                      self.executable.offset, self.executable.size,
+                                                      cancelled=self.cancel_event.is_set)
+                self.progress.emit(35, "Reading model container")
+                model_data = reader.read_extent_range(self.model.extent, self.model.extent_size,
+                                                       self.model.offset, self.model.size,
+                                                       cancelled=self.cancel_event.is_set)
+                self.progress.emit(55, "Reading associated texture")
+                texture_data = reader.read_extent_range(self.texture.extent, self.texture.extent_size,
+                                                         self.texture.offset, self.texture.size,
+                                                         cancelled=self.cancel_event.is_set)
+            if self.cancel_event.is_set():
+                raise Cancelled("Model preview cancelled.")
+            self.progress.emit(70, "Validating geometry and materials")
+            skeleton = parse_usa_skeleton(executable, self.resource_id)
+            model = parse_mmd_static(model_data, skeleton, self.cancel_event.is_set)
+            first = decode_tim(texture_data)
+            used_palettes = validate_texture_materials(model, first)
+            palettes = tuple(decode_tim(texture_data, index).image for index in range(first.palette_count))
+            self.progress.emit(100, "Static model ready")
+            self.succeeded.emit((model, palettes, first.clut_y, used_palettes))
+        except Cancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class WelcomePage(QWidget):
     import_requested = Signal()
     open_requested = Signal()
@@ -133,6 +187,9 @@ class Workspace(QWidget):
         self.export_thread: QThread | None = None
         self.export_worker: ExportWorker | None = None
         self.export_progress: QProgressDialog | None = None
+        self.model_thread: QThread | None = None
+        self.model_worker: ModelWorker | None = None
+        self.model_progress: QProgressDialog | None = None
         self.tabs = QTabWidget()
         self.tabs.addTab(self._overview(), "Overview")
         self.tabs.addTab(self._disc_files(), "Disc Files")
@@ -217,8 +274,27 @@ class Workspace(QWidget):
         self.character_table.itemSelectionChanged.connect(self._preview_character)
         export = QPushButton("Export associated texture PNG + provenance metadata…")
         export.clicked.connect(self._export_character_texture)
+        model_page = QWidget(); model_layout = QVBoxLayout(model_page)
+        self.model_view = StaticModelView()
+        model_controls = QHBoxLayout()
+        self.model_mode = QComboBox(); self.model_mode.addItems(["Textured", "Untextured"])
+        self.model_wireframe = QCheckBox("Wireframe overlay")
+        model_reset = QPushButton("Reset view")
+        model_load = QPushButton("Load verified static model")
+        self.model_mode.currentIndexChanged.connect(self._update_model_modes)
+        self.model_wireframe.toggled.connect(self._update_model_modes)
+        model_reset.clicked.connect(self.model_view.reset_view)
+        model_load.clicked.connect(self._load_character_model)
+        model_controls.addWidget(self.model_mode); model_controls.addWidget(self.model_wireframe)
+        model_controls.addWidget(model_reset); model_controls.addStretch(); model_controls.addWidget(model_load)
+        self.model_status = QLabel("Model geometry is loaded on request in a cancellable background worker.")
+        self.model_status.setWordWrap(True)
+        model_layout.addLayout(model_controls); model_layout.addWidget(self.model_view); model_layout.addWidget(self.model_status)
+        texture_page = QWidget(); texture_layout = QVBoxLayout(texture_page)
+        texture_layout.addWidget(self.character_preview); texture_layout.addWidget(self.character_details)
+        preview_tabs = QTabWidget(); preview_tabs.addTab(model_page, "Static model"); preview_tabs.addTab(texture_page, "Texture")
         right = QWidget(); right_layout = QVBoxLayout(right)
-        right_layout.addWidget(self.character_preview); right_layout.addWidget(self.character_details)
+        right_layout.addWidget(preview_tabs)
         split = QSplitter(); split.addWidget(self.character_table); split.addWidget(right)
         layout.addWidget(split); layout.addWidget(export)
         return page
@@ -285,6 +361,57 @@ class Workspace(QWidget):
             QMessageBox.information(self, "Texture exported", f"Wrote {path} and provenance JSON.")
         except Exception as exc:
             QMessageBox.critical(self, "Texture export failed", str(exc))
+
+    def _update_model_modes(self):
+        self.model_view.set_modes(self.model_mode.currentIndex() == 0,
+                                  self.model_wireframe.isChecked())
+
+    def _load_character_model(self):
+        try:
+            if self.model_thread and self.model_thread.isRunning():
+                raise ValueError("A model preview is already loading.")
+            character = self._selected_character()
+            model = self._character_related(character, "model_container")
+            texture = self._character_related(character, "texture")
+            executable = next((row for row in self.rows
+                               if row["original_path"] == character["parent_path"] and row["offset"] is None), None)
+            if model is None or texture is None or executable is None:
+                raise ValueError("This resource lacks a verified model, texture, or executable association.")
+            resource_id = int(character["original_path"].split("/")[-2])
+            dialog = QProgressDialog("Loading static model", "Cancel", 0, 100, self)
+            dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
+            thread = QThread(self)
+            worker = ModelWorker(self.catalogue, self._entry(executable), self._entry(model),
+                                 self._entry(texture), resource_id)
+            worker.moveToThread(thread); thread.started.connect(worker.run)
+            worker.progress.connect(lambda value, message: (dialog.setValue(value), dialog.setLabelText(message)))
+            dialog.canceled.connect(lambda: worker.request_cancel())
+            worker.succeeded.connect(self._model_loaded)
+            worker.failed.connect(lambda message: self.model_status.setText(f"Static preview unsupported: {message}"))
+            worker.cancelled.connect(lambda message: self.model_status.setText(message))
+            worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater); thread.finished.connect(self._model_finished)
+            self.model_thread, self.model_worker, self.model_progress = thread, worker, dialog
+            thread.start()
+        except Exception as exc:
+            QMessageBox.critical(self, "Model preview failed", str(exc))
+
+    @Slot(object)
+    def _model_loaded(self, result):
+        model, images, clut_y, palettes = result
+        qimages = tuple(ImageQt(image).copy() for image in images)
+        self.model_view.set_model(model, qimages, clut_y)
+        self.model_status.setText(
+            f"Experimental static preview — {len(model.objects)} objects, {model.vertex_count} vertices, "
+            f"{model.primitive_count} primitives / {model.triangle_count} triangles; verified palettes "
+            f"{', '.join(map(str, palettes))}. {model.warnings[0]}")
+
+    @Slot()
+    def _model_finished(self):
+        if self.model_progress:
+            self.model_progress.close(); self.model_progress.deleteLater()
+        self.model_progress = None; self.model_worker = None; self.model_thread = None
+        self.background_finished.emit()
 
     def _selected_row(self):
         index = self.file_table.currentRow()
@@ -362,9 +489,12 @@ class Workspace(QWidget):
     def cancel_background(self):
         if self.export_worker:
             self.export_worker.request_cancel()
+        if self.model_worker:
+            self.model_worker.request_cancel()
 
     def has_background_work(self):
-        return bool(self.export_thread and self.export_thread.isRunning())
+        return bool((self.export_thread and self.export_thread.isRunning()) or
+                    (self.model_thread and self.model_thread.isRunning()))
 
     def _hex_selected(self):
         try:

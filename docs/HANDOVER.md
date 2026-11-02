@@ -1,5 +1,93 @@
 # Handover
 
+## Paused static Agumon milestone (2026-11-02)
+
+The user requested a pause after the bounded parser, background GUI loader, and experimental renderer were implemented, but before independent converter comparison and final documentation were completed. The work is intentionally committed as a reviewable work in progress. It must not yet be described as a fully verified textured-model milestone, and model export remains disabled.
+
+### Preserved external data
+
+The former temporary validation project and useful exports were copied out of `/tmp` to:
+
+```text
+/home/drdark/dev/DW1-coop-data/asset-validation-v3/
+```
+
+That directory contains the catalogue, prior texture export, source-verified `AGUM.MMD`, a source-verified `SLUS_010.32`, and experimental preview screenshots. The model SHA-256 matches its catalogue entry:
+
+```text
+60d5e920b6cf621da8d2f67f703a2fe75f384000cbcdefd9398c76c1477c7c7d
+```
+
+A minimal input tree for the independent upstream converter is outside Git at:
+
+```text
+/home/drdark/dev/DW1-coop-data/converter-input/
+```
+
+It contains proprietary data and must never be committed. The copied `CHDAT/ALLTIM.TIM` SHA-256 is `b7233629dd4d3fa9fa23118cf7ffa8b2a6fe1a2988b8f9e1c377533ed8aa5ee2`.
+
+Catalogue reopen succeeded from the durable location. ID 3 was rechecked as display name `Agumon`, internal key `AGUM`, model `CHDAT/MMD0/AGUM.MMD`, and texture `CHDAT/ALLTIM.TIM#003`. The streamed model export hash equals the catalogue hash.
+
+### Implemented work in progress
+
+- `src/dw1_workbench/mmd.py` adds bounded parsing for the relative-pointer MMD/TMD layout used by AGUM: object table, signed 16-bit vertices, 12-bit fixed-point normals, modes `0x34` and `0x3c`, packet lengths, vertex/normal indices, UVs, texture page, color mode, blend mode, and CLUT coordinates.
+- It rejects unsupported modes/flags, nonzero object scale exponents, malformed ranges/counts/packet sizes, invalid skeleton parents, out-of-range indices, mismatched texture pages/color modes/CLUTs, and out-of-bounds UVs.
+- It parses the USA executable skeleton table and only the bounded initial-transform prefix of the first available MMD animation record. It does not parse instructions or play animation.
+- `src/dw1_workbench/model_view.py` provides a PySide6/Qt raster preview with orbit, zoom, reset, textured/untextured rendering, and wireframe overlay. It adds no dependency beyond PySide6. Source coordinates stay unchanged; PS1 screen-down Y is inverted only in the rendering layer.
+- `gui.py` loads executable, MMD, and TIM data in a cancellable background worker. Cancellation uses a direct `threading.Event` callback rather than a queued worker slot. Closing the workspace includes this worker in the existing safe shutdown path.
+- Model export is deliberately absent.
+- `tests/test_mmd.py` covers a synthetic valid triangle, stable winding, initial transform, invalid indices, unsupported packets, and invalid skeleton parents.
+
+### Real Agumon observations
+
+The current parser reports:
+
+- 22 skeleton nodes;
+- 16 TMD objects;
+- 390 vertices;
+- 412 source primitives: 134 triangles (`0x34`) and 278 quads (`0x3c`);
+- 690 rendered triangles after deterministic quad splitting;
+- all primitive flags are zero and all object scale exponents are zero;
+- texture page 5, which matches TIM image X `320 / 64`;
+- 4-bpp material mode, matching the associated TIM;
+- CLUT Y 488, 489, and 490, selecting verified palette indices 0, 1, and 2 from the TIM whose CLUT starts at Y 488;
+- UV bounds X 0..255 and Y 0..123, within the 256×128 texture;
+- no out-of-range vertex or normal indices.
+
+The winding and quad split match pinned `DW1ModelConverter` revision `17d1a19`: `(2,1,0)` and, for quads, `(1,2,3)`. Its skeleton and initial-pose interpretation also match the current implementation. A manually inspected external screenshot after the renderer-only Y inversion is recognizably upright Agumon with assembled head, torso, limbs, claws, legs, and tail. This is encouraging visual evidence, but independent converter output has not yet been compared side by side, so the GUI labels the preview experimental.
+
+### Validation state at pause
+
+```bash
+QT_QPA_PLATFORM=offscreen PYTHONPATH=src /home/drdark/.venv/bin/python -m pytest -q
+```
+
+Final pause-point result: `30 passed in 0.29s`.
+
+The offscreen real-data worker completed and produced the counts above. Manual orbit/zoom interaction on a desktop display has not been tested. Offscreen rendering alone is not considered proof of final visual correctness.
+
+The pinned upstream converter source remains at `/tmp/DW1ModelConverter-research` (`17d1a19`). Its CMake configuration completed in `/tmp/DW1ModelConverter-build` after downloading open-source dependencies, but the executable had not been built or run when the pause was requested.
+
+### Resume commands and next task
+
+From the repository:
+
+```bash
+cmake --build /tmp/DW1ModelConverter-build -j2
+mkdir -p /home/drdark/dev/DW1-coop-data/converter-run
+cd /home/drdark/dev/DW1-coop-data/converter-run
+/tmp/DW1ModelConverter-build/DW1ModelConverter /home/drdark/dev/DW1-coop-data/converter-input
+```
+
+On resume:
+
+1. run the pinned converter and compare its AGUM glTF object, vertex, primitive, UV, material, palette, skeleton, and initial-pose results with this parser;
+2. inspect converter output and workbench preview side by side on a real display, including winding, object placement, texture orientation, and all three used palettes;
+3. fix any concrete discrepancies and add regression coverage;
+4. update `README.md`, `docs/FORMATS.md`, and `docs/PROGRESS.md` only after the verification boundary is settled;
+5. keep model export disabled unless that comparison confirms geometry/material correctness; if confirmed, implement GLB/glTF plus provenance separately;
+6. do not implement animation playback, gameplay, networking, or co-op in this milestone.
+
 ## Completed in this pass
 
 - Replaced queued worker-slot cancellation with `threading.Event`; import cancellation now works while the worker is busy.
