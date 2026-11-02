@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+# Never track disc images or analysis projects.
+*.iso
+*.bin
+*.cue
+*.img
+*.chd
+*.dw1project/

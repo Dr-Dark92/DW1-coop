@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dw1-coop-workbench"
+version = "0.1.0"
+description = "A provenance-first Digimon World 1 disc analysis workbench"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+# Essentials contains QtCore/QtGui/QtWidgets without Qt WebEngine; this app has no browser.
+dependencies = ["PySide6-Essentials>=6.8,<7", "Pillow>=11,<13"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+dw1-workbench = "dw1_workbench.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
