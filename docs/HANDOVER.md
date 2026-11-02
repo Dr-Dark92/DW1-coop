@@ -1,5 +1,18 @@
 # Handover
 
+## Maps and zones milestone (2026-11-02, branch `maps-zones`)
+
+Worked in a separate worktree at `/home/drdark/dev/DW1-coop-maps` (branched from `873829a`) while another session verified the remaining MMD models on `agumon-preview-verification`. `maps-zones` was then merged into `agumon-preview-verification`.
+
+- `src/dw1_workbench/maps.py`: USA map table, area names, toilets, doors; TFS backgrounds; MAP scene data; background rendering and export. `project.py` catalogues maps on import when the disc has `MAP/` files. `gui.py` replaces the Maps and Zones placeholder with a browser.
+- `tests/test_maps.py`: synthetic map tests (see test count below).
+- Real data outside Git: extracted inputs in `/home/drdark/dev/DW1-coop-data/converter-input-maps/`, converter output and `compare_maps.py` in `/home/drdark/dev/DW1-coop-data/converter-run-maps/`, and a fresh project with maps at `/home/drdark/dev/DW1-coop-data/maps-validation/project`.
+- Result: all 241 file-backed maps and 512 backgrounds match the converter (see `docs/FORMATS.md#maps-and-zones`).
+
+First desktop check: the user could not find zones linked south of Green Gym. The warp list showed only Green Gym's one walk-through exit; its other routes are script-driven (step-script tile 51 on its east edge) or inbound from File City. Added: tree search, "linked from" inbound list, exit direction and walk-through vs table-only per warp, the floor grid decoded as the tile-trigger map (SydPatches evidence) with a colour legend, and a Relation map tab (`relation_view.py`, worker in `gui.py`). 64 tests pass.
+
+The user rechecked search, inbound links, and the relation map on the desktop and confirmed them correct. Next candidates are decoding map scripts (the missing transitions), sprite-object rendering, door models, and an overlay of spawns/exits/Digimon on the background (needs the camera projection).
+
 ## All-model converter comparison (2026-11-02)
 
 All 178 USA MMDs were extracted from the catalogue (SHA-256 equal to catalogue hashes) into `/home/drdark/dev/DW1-coop-data/converter-input/CHDAT/MMD{0..5}/` and converted by the pinned `DW1ModelConverter` (`17d1a19`), which wrote 178 glTF files and skipped IDs 62/114 (no MMD). Scripts and results live outside Git in `/home/drdark/dev/DW1-coop-data/converter-run/`: `compare_all.py` (writes `results.json`), `overlap_check.py`, and `degenerate_check.py`.

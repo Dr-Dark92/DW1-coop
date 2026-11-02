@@ -19,6 +19,10 @@
 - Cancellable background model loading and an orbit/zoom textured preview with wireframe and untextured modes.
 - Static Agumon (ID 3) verified against `DW1ModelConverter` `17d1a19` output and confirmed visually on a desktop display.
 - Worker progress and results delivered to the GUI thread through bound slots (fixes a Wayland segfault that offscreen tests did not show).
+- USA map table, TFS background, and MAP scene parsing; maps catalogued with area-name zones, scene/background files, warp links, and Digimon-placement links.
+- Maps and Zones browser: searchable zone tree, background preview per palette with PNG + provenance export, scene data, followable outbound warps (walk-through exit and direction, or script/table-only) and inbound "linked from" maps, and a colour-coded tile-trigger grid.
+- Zone relation map: 65 zones linked by warps, laid out by exit direction, with pan/zoom and open-in-browser, built in a cancellable background worker.
+- All 241 file-backed maps verified against `DW1ModelConverter` `17d1a19` map output.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
@@ -28,9 +32,10 @@
 - ISO 9660: common primary-directory traversal only.
 - Release validation: product-code and executable-header evidence, not a published full-disc hash match.
 - TIM: standard standalone images only; no automatic embedded/container scan.
-- Executable analysis: identity/header, character resource tables, and skeleton tables only.
+- Executable analysis: identity/header, character resource tables, skeleton tables, and the map table only.
 - MMD static geometry: 151 of 178 models accepted and matching the reference converter; 27 rejected for unsupported primitive types (translucent, flat-shaded, untextured, unlit) or invalid normal indices.
 - DW1 animation data: initial pose only.
+- Maps: sprite objects are parsed but not rendered; embedded map TIMs are located, not previewed; door models are not shown; palette time-of-day meaning is unverified; script-driven transitions are missing from the relation map until map scripts are decoded.
 
 ## Not implemented
 
@@ -38,7 +43,7 @@
 - Model export (GLB/glTF with provenance).
 - Standalone TMD decoding.
 - DW1 animation keyframes and playback.
-- TFS/map/background/collision/script decoding.
+- Map scripts (needed for script-driven transitions) and 3D map geometry.
 - Audio/video decoding.
 - Disassembly/decompilation integration.
 - Co-op gameplay, native runtime, or networking.
@@ -71,4 +76,10 @@ All MMD models, compared the same way on 2026-11-02:
 - 27 rejected for primitive types outside the supported subset or invalid normal indices (details in [FORMATS.md](FORMATS.md#all-model-comparison));
 - only Agumon was inspected visually on a desktop display.
 
-This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, rejected models, or animation. Automated coverage remains synthetic and contains no proprietary data; the converter comparison is a manual check kept outside Git.
+Maps and zones, checked from the same image on 2026-11-02:
+
+- a fresh import catalogued 244 map records (241 decoded, 3 without files) in 65 zones, 449 warp links, and 709 Digimon-placement links; resource count 1,422;
+- all 241 file-backed maps and 512 background images matched the converter's map export (details in [FORMATS.md](FORMATS.md#maps-and-zones));
+- the Maps and Zones tab was inspected on the desktop by the user, who could not find zones linked south of Green Gym. Cause: only the warp table was shown, and Green Gym's other routes are script-driven or inbound. Search, inbound links, exit directions, the decoded tile-trigger grid, and the zone relation map were added, exercised offscreen, and then confirmed correct by the user on the desktop.
+
+This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, rejected models, map scripts, or animation. Automated coverage remains synthetic and contains no proprietary data; the converter comparisons are manual checks kept outside Git.

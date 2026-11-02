@@ -14,10 +14,73 @@ from .characters import (DECODER_VERSION as CHARACTER_DECODER_VERSION,
 from .disc import inspect_image, sha256_file
 from .errors import Cancelled
 from .iso9660 import hash_entries, identify_release, read_inventory
+from .maps import (MAP_DECODER_VERSION, MAX_MAP_FILE, TABLE_DECODER_VERSION as MAP_TABLE_DECODER_VERSION,
+                   TFS_DECODER_VERSION, EMPTY_TILE, entry_hash as map_entry_hash, parse_map,
+                   parse_map_table, tfs_layout)
+
+MAP_TABLE_EVIDENCE = ("USA executable 255x16-byte map table at 0x992d4 with area-name pointers at 0x991bc; "
+                      "upstream exporter reads entry i from MAP{1 + i//15}/{name}.MAP/.TFS. "
+                      "All 241 file-backed entries matched DW1ModelConverter 17d1a19 output.")
 
 
 def resource_id(path: str, content_hash: str) -> str:
     return "disc:" + hashlib.sha256((path + "\0" + content_hash).encode()).hexdigest()[:24]
+
+
+def _import_maps(catalogue, layout, executable_path, executable_entry, entries_by_path, disc_ids,
+                 character_ids, cancelled):
+    """Catalogue the map table, validate each MAP/TFS pair, and link warps and placements."""
+    with layout.open() as reader:
+        executable = reader.read_extent(executable_entry.extent, executable_entry.size, 2 * 1024 * 1024)
+        entries = parse_map_table(executable)
+        map_ids = {entry.index: resource_id(f"{executable_path}#map/{entry.index:03d}", map_entry_hash(entry))
+                   for entry in entries if entry.name}
+        rows, associations, labels, updates = [], [], [], []
+        scene_count = 0
+        for entry in entries:
+            if not entry.name:
+                continue
+            if cancelled():
+                raise Cancelled("Import cancelled while validating maps.")
+            map_id = map_ids[entry.index]
+            map_file, tfs_file = entries_by_path.get(entry.map_path), entries_by_path.get(entry.tfs_path)
+            status = "identified"
+            if map_file is not None and tfs_file is not None:
+                scene = parse_map(reader.read_extent(map_file.extent, map_file.size, MAX_MAP_FILE), entry)
+                palette_count, tile_count = tfs_layout(reader.read_extent_prefix(tfs_file.extent, tfs_file.size, 8),
+                                                       tfs_file.size)
+                if tile_count != sum(tile != EMPTY_TILE for tile in scene.setup.tiles):
+                    raise ValueError(f"{entry.tfs_path} tile count does not match {entry.map_path}.")
+                status = "decoded"
+                scene_count += 1
+                associations += [(map_id, disc_ids[entry.map_path], "scene", MAP_TABLE_EVIDENCE, "confirmed"),
+                                 (map_id, disc_ids[entry.tfs_path], "background", MAP_TABLE_EVIDENCE, "confirmed")]
+                updates += [("DW1 MAP scene", "dw1-workbench MAP scene", MAP_DECODER_VERSION, "decoded",
+                             "Header, setup, sprite objects, elements, and floor grid validated.", "confirmed",
+                             disc_ids[entry.map_path]),
+                            ("DW1 TFS background", "dw1-workbench TFS", TFS_DECODER_VERSION, "decoded",
+                             f"{palette_count} palette(s), {tile_count} 128x128 tiles; matches its map grid.",
+                             "confirmed", disc_ids[entry.tfs_path])]
+                for target in sorted({warp.map_index for _, warp in scene.used_warps}):
+                    if target in map_ids:
+                        associations.append((map_id, map_ids[target], "warp", MAP_TABLE_EVIDENCE, "confirmed"))
+                for character in sorted({digimon.character_id for digimon in scene.digimon}):
+                    if character in character_ids:
+                        associations.append((map_id, character_ids[character], "digimon_placement",
+                                             MAP_TABLE_EVIDENCE, "confirmed"))
+            rows.append((map_id, f"{executable_path}#map/{entry.index:03d}/{entry.name}", executable_path,
+                         entry.offset, 16, executable_entry.extent, "DW1 map table entry", map_entry_hash(entry),
+                         "dw1-workbench map table", MAP_TABLE_DECODER_VERSION, status, "maps",
+                         MAP_TABLE_EVIDENCE if status == "decoded" else
+                         MAP_TABLE_EVIDENCE + " This entry's MAP/TFS files are absent from the disc.", "confirmed"))
+            associations.append((disc_ids[executable_path], map_id, "contains", MAP_TABLE_EVIDENCE, "confirmed"))
+            labels.append((map_id, "area_name", entry.area_name,
+                           f"USA executable area-name pointer {entry.area_id} -> 0x{entry.area_name_offset:x}; "
+                           "28-byte space-padded field.", "confirmed"))
+    catalogue.add_resources(rows, associations)
+    catalogue.update_resource_analysis(updates)
+    catalogue.add_labels(labels)
+    return len(rows), scene_count
 
 
 def import_project(source: Path, project_dir: Path, cancelled=lambda: False,
@@ -30,7 +93,8 @@ def import_project(source: Path, project_dir: Path, cancelled=lambda: False,
     catalogue.set_meta(import_status="in_progress", source_path=str(source.resolve()),
                        tool_version=__version__, parser_versions={"iso9660": 1, "cue": 1, "tim": 1,
                                                                   "alltim": 1, "characters": 2,
-                                                                  "mmd_boundary": 1},
+                                                                  "mmd_boundary": 1, "map_table": 1,
+                                                                  "map_scene": 1, "tfs": 1},
                        started_at=datetime.now(timezone.utc).isoformat())
     try:
         layout = inspect_image(source)
@@ -84,6 +148,7 @@ def import_project(source: Path, project_dir: Path, cancelled=lambda: False,
             alltim_count = len(child_rows)
         character_count = 0
         mmd_count = 0
+        character_ids = {}
         executable_entry = entries_by_path.get(release.executable)
         if executable_entry is not None and len(texture_ids) == 180:
             with layout.open() as reader:
@@ -120,6 +185,7 @@ def import_project(source: Path, project_dir: Path, cancelled=lambda: False,
                                        "identified", "characters", evidence, "confirmed"))
                 character_associations.append((disc_ids[release.executable], character_id,
                                                "contains", evidence, "confirmed"))
+                character_ids[character.resource_id] = character_id
                 if character.display_name is not None:
                     character_labels.append((character_id, "display_name", character.display_name,
                                              f"USA executable DigimonPara record at 0x{character.display_name_offset:x}; "
@@ -133,6 +199,10 @@ def import_project(source: Path, project_dir: Path, cancelled=lambda: False,
             catalogue.add_labels(character_labels)
             character_count = len(character_rows)
             mmd_count = len(mmd_structures)
+        map_count = scene_count = 0
+        if executable_entry is not None and any(path.startswith("MAP/") for path in entries_by_path):
+            map_count, scene_count = _import_maps(catalogue, layout, release.executable, executable_entry,
+                                                  entries_by_path, disc_ids, character_ids, cancelled)
         stat = layout.data_file.stat()
         catalogue.set_meta(
             import_status="complete", source_sha256=source_hash, source_size=stat.st_size,
@@ -144,9 +214,9 @@ def import_project(source: Path, project_dir: Path, cancelled=lambda: False,
             sector_count=layout.sector_count, release=release.release,
             executable=release.executable, release_evidence=release.confidence,
             completed_at=datetime.now(timezone.utc).isoformat(), file_count=len(rows),
-            resource_count=len(rows) + alltim_count + character_count,
+            resource_count=len(rows) + alltim_count + character_count + map_count,
             alltim_slot_count=alltim_count, character_count=character_count,
-            mmd_boundary_count=mmd_count)
+            mmd_boundary_count=mmd_count, map_count=map_count, map_scene_count=scene_count)
         catalogue.log("info", f"Imported {len(rows)} files; {release.release} ({release.confidence}).")
         if progress:
             progress(100, "Import complete")

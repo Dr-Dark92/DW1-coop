@@ -9,14 +9,19 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSplitter, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton,
+    QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .catalog import Catalogue, open_catalogue
 from .errors import Cancelled
 from .iso9660 import IsoEntry, safe_export
+from .maps import (EXIT_COLOURS, MAX_MAP_FILE, MAX_TFS_FILE, TRIGGER_COLOURS, export_background,
+                   floor_grid_image, layout_zones, map_exits, map_links, parse_map, parse_map_table, parse_tfs,
+                   render_background, trigger_summary, zone_links)
+from .relation_view import RelationView
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .model_view import StaticModelView
 from .project import import_project, layout_from_catalogue, source_state
@@ -136,6 +141,56 @@ class ModelWorker(QObject):
             self.finished.emit()
 
 
+class RelationWorker(QObject):
+    """Reads every catalogued MAP file and builds the zone relation graph and its layout."""
+    progress = Signal(int, str)
+    succeeded = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal(str)
+    finished = Signal()
+
+    def __init__(self, catalogue: Catalogue, executable: IsoEntry, maps: dict[int, IsoEntry]):
+        super().__init__()
+        self.catalogue, self.executable, self.maps = catalogue, executable, maps
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
+
+    @Slot()
+    def run(self):
+        try:
+            with layout_from_catalogue(self.catalogue).open() as reader:
+                self.progress.emit(2, "Reading the map table")
+                entries = parse_map_table(reader.read_extent_range(
+                    self.executable.extent, self.executable.extent_size, self.executable.offset,
+                    self.executable.size, cancelled=self.cancel_event.is_set))
+                scenes = {}
+                for done, (index, entry) in enumerate(sorted(self.maps.items())):
+                    if self.cancel_event.is_set():
+                        raise Cancelled("Relation map cancelled.")
+                    data = reader.read_extent_range(entry.extent, entry.extent_size, entry.offset, entry.size,
+                                                    cancelled=self.cancel_event.is_set)
+                    scenes[index] = parse_map(data, entries[index])
+                    self.progress.emit(5 + 85 * (done + 1) // len(self.maps), f"Reading {entries[index].name}")
+            self.progress.emit(92, "Laying out zones")
+            links = map_links(entries, scenes)
+            zones = zone_links(entries, links)
+            linked = sorted({zone for link in zones for zone in (link.source, link.target)})
+            counts = {}
+            for entry in entries:
+                if entry.name:
+                    counts[entry.area_name] = counts.get(entry.area_name, 0) + 1
+            self.progress.emit(100, "Relation map ready")
+            self.succeeded.emit((counts, zones, layout_zones(linked, zones), links))
+        except Cancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class WelcomePage(QWidget):
     import_requested = Signal()
     open_requested = Signal()
@@ -190,13 +245,16 @@ class Workspace(QWidget):
         self.model_thread: QThread | None = None
         self.model_worker: ModelWorker | None = None
         self.model_progress: QProgressDialog | None = None
+        self.relation_thread: QThread | None = None
+        self.relation_worker: RelationWorker | None = None
+        self.relation_progress: QProgressDialog | None = None
         self.tabs = QTabWidget()
         self.tabs.addTab(self._overview(), "Overview")
         self.tabs.addTab(self._disc_files(), "Disc Files")
         self.tabs.addTab(self._characters(), "Characters and Digimon")
         self.tabs.addTab(UnsupportedPage("Animations", "No DW1 animation decoder is verified in this milestone. Unsupported resources are retained in the disc catalogue."), "Animations")
         self.tabs.addTab(self._textures(), "Textures")
-        self.tabs.addTab(UnsupportedPage("Maps and Zones", "TFS backgrounds, geometry, collision, exits, and scripts are not decoded. A file listing is not a reconstructed scene."), "Maps and Zones")
+        self.tabs.addTab(self._maps(), "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
 
@@ -362,6 +420,334 @@ class Workspace(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Texture export failed", str(exc))
 
+    def _maps(self):
+        page, layout = QWidget(), QVBoxLayout(); page.setLayout(layout)
+        maps = [row for row in self.rows if row["detected_format"] == "DW1 map table entry"]
+        self.map_rows = {row["id"]: row for row in maps}
+        self._map_entries = None
+        self._map_scene = self._map_tfs = None
+        if not maps:
+            layout.addWidget(QLabel("No verified map table is catalogued. Projects imported before map support "
+                                    "must be re-imported; 3D scene geometry, scripts, and gameplay are not decoded."))
+            layout.addStretch()
+            return page
+        info = QLabel("Maps from the USA executable map table, grouped into zones by their area name. Backgrounds, "
+                      "camera, spawns, warps, Digimon placements, sprites, and the floor grid are decoded and were "
+                      "verified against DW1ModelConverter output; scripts and 3D geometry are not decoded.")
+        info.setWordWrap(True); layout.addWidget(info)
+        self.map_search = QLineEdit(); self.map_search.setPlaceholderText("Find a zone or map (e.g. Green Gym, TRAI00)")
+        self.map_search.setClearButtonEnabled(True); self.map_search.textChanged.connect(self._filter_maps)
+        self.map_tree = QTreeWidget(); self.map_tree.setHeaderLabels(["Zone / map", "Table index", "Status"])
+        zones = {}
+        for row in maps:
+            label = self.labels.get((row["id"], "area_name"))
+            zones.setdefault(label["value"] if label else "Unnamed area", []).append(row)
+        self._map_items, self._zone_items = {}, {}
+        for zone in sorted(zones):
+            parent = QTreeWidgetItem([f"{zone} ({len(zones[zone])})", "", ""])
+            parent.setData(0, Qt.ItemDataRole.UserRole + 1, zone)
+            self.map_tree.addTopLevelItem(parent); self._zone_items[zone] = parent
+            for row in sorted(zones[zone], key=lambda item: item["offset"]):
+                _, index, name = row["original_path"].rsplit("/", 2)
+                item = QTreeWidgetItem([name, index, row["status"]])
+                item.setData(0, Qt.ItemDataRole.UserRole, row["id"])
+                parent.addChild(item)
+                self._map_items[row["id"]] = item
+        self.map_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.map_tree.currentItemChanged.connect(self._preview_map)
+        self.map_palette = QComboBox(); self.map_palette.currentIndexChanged.connect(self._render_map_background)
+        self.map_palette.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.map_background = QLabel("Select a map"); self.map_background.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Zero colour words are transparent; show them over a dark backdrop like the cleared PS1 screen.
+        self.map_background.setStyleSheet("background: #20242b; color: #d0d4da")
+        background_scroll = QScrollArea(); background_scroll.setWidget(self.map_background)
+        background_scroll.setWidgetResizable(True)
+        background_page = QWidget(); background_layout = QVBoxLayout(background_page)
+        palette_row = QHBoxLayout(); palette_row.addWidget(QLabel("Background palette")); palette_row.addWidget(self.map_palette)
+        palette_row.addStretch(); background_layout.addLayout(palette_row); background_layout.addWidget(background_scroll)
+        self.map_details = QPlainTextEdit(); self.map_details.setReadOnly(True)
+        self.map_warps = QListWidget(); self.map_warps.itemDoubleClicked.connect(self._follow_warp)
+        self.map_inbound = QListWidget(); self.map_inbound.itemDoubleClicked.connect(self._follow_warp)
+        self.map_inbound.setSortingEnabled(True)
+        scene_page = QWidget(); scene_layout = QVBoxLayout(scene_page)
+        links_row = QHBoxLayout()
+        for title, widget in (("Warps out of this map (double-click to open)", self.map_warps),
+                              ("Linked from (maps whose warps lead here)", self.map_inbound)):
+            column = QVBoxLayout(); column.addWidget(QLabel(title)); column.addWidget(widget); links_row.addLayout(column)
+        scene_layout.addLayout(links_row, 2); scene_layout.addWidget(self.map_details, 3)
+        self.map_floor = QLabel(); self.map_floor.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        floor_page = QWidget(); floor_layout = QVBoxLayout(floor_page)
+        swatch = lambda colour: f"<span style='background: rgb{colour}'>&nbsp;&nbsp;&nbsp;&nbsp;</span>"
+        legend = " ".join(f"{swatch(colour)} {html.escape(kind)}" for kind, colour in TRIGGER_COLOURS.items()
+                          if kind != "unknown")
+        exits = " ".join(f"{swatch(colour)} {slot}" for slot, colour in enumerate(EXIT_COLOURS))
+        floor_note = QLabel("100×100 floor grid, one cell per pixel; top is the far edge (north). Values follow the "
+                            "game's tile-trigger rules (DW1-SydPatches): 0 walkable, 128 blocked, 50–79 step-on "
+                            "script, 80–109 interact script, 110–119 exit through warp slot 0–9, 120 toilet.<br>"
+                            f"{legend}<br>exit slots: {exits}")
+        floor_note.setWordWrap(True); floor_note.setTextFormat(Qt.TextFormat.RichText)
+        floor_layout.addWidget(floor_note); floor_layout.addWidget(self.map_floor, 1)
+        self.map_preview_tabs = QTabWidget()
+        self.map_preview_tabs.addTab(background_page, "Background"); self.map_preview_tabs.addTab(scene_page, "Scene data")
+        self.map_preview_tabs.addTab(floor_page, "Floor grid")
+        tree_panel = QWidget(); tree_layout = QVBoxLayout(tree_panel); tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.addWidget(self.map_search); tree_layout.addWidget(self.map_tree)
+        split = QSplitter(); split.addWidget(tree_panel); split.addWidget(self.map_preview_tabs)
+        split.setStretchFactor(1, 3); split.setSizes([360, 940])
+        export = QPushButton("Export background PNG + provenance metadata…")
+        export.clicked.connect(self._export_map_background)
+        browser = QWidget(); browser_layout = QVBoxLayout(browser); browser_layout.setContentsMargins(0, 0, 0, 0)
+        browser_layout.addWidget(split, 1); browser_layout.addWidget(export)
+        self.maps_tabs = QTabWidget()
+        self.maps_tabs.addTab(browser, "Browser"); self.maps_tabs.addTab(self._relation_page(), "Relation map")
+        self.maps_tabs.currentChanged.connect(self._maps_tab_changed)
+        layout.addWidget(self.maps_tabs, 1)
+        return page
+
+    def _relation_page(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        controls = QHBoxLayout()
+        self.relation_scripted = QCheckBox("Show warp-table links without exit tiles (dashed)")
+        self.relation_scripted.setChecked(True)
+        self.relation_scripted.toggled.connect(lambda visible: self.relation_view.set_script_links_visible(visible))
+        open_zone = QPushButton("Open selected zone in browser")
+        open_zone.clicked.connect(lambda: self._open_zone(self.relation_view.selected_zone()))
+        rebuild = QPushButton("Rebuild")
+        rebuild.clicked.connect(self._build_relations)
+        self.relation_view = RelationView()
+        fit = QPushButton("Fit all"); fit.clicked.connect(self.relation_view.fit_all)
+        controls.addWidget(self.relation_scripted); controls.addStretch(); controls.addWidget(fit)
+        controls.addWidget(open_zone); controls.addWidget(rebuild)
+        self.relation_status = QLabel("Zones are linked by the warps between their maps. Solid green lines are "
+                                      "walk-through exits (thicker = more exits) and are laid out by exit direction; "
+                                      "dashed lines are warp-table links with no exit tiles, used by map scripts or "
+                                      "unused. Script-only transitions are not decoded, so some zones have no links. "
+                                      "Wheel to zoom, drag to pan, hover a line for details, double-click a zone to open it.")
+        self.relation_status.setWordWrap(True)
+        layout.addLayout(controls); layout.addWidget(self.relation_view, 1); layout.addWidget(self.relation_status)
+        self._relations_built = False
+        return page
+
+    def _maps_tab_changed(self, index):
+        if index == 1 and not self._relations_built:
+            self._build_relations()
+
+    def _build_relations(self):
+        try:
+            if self.relation_thread and self.relation_thread.isRunning():
+                raise ValueError("The relation map is already loading.")
+            executable = next(row for row in self.rows
+                              if row["detected_format"] == "PS-X EXE" and row["offset"] is None)
+            maps = {}
+            for row in self.map_rows.values():
+                scene_row = self._character_related(row, "scene")
+                if scene_row is not None:
+                    maps[int(row["original_path"].rsplit("/", 2)[1])] = self._entry(scene_row)
+            dialog = QProgressDialog("Building relation map", "Cancel", 0, 100, self)
+            dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
+            thread = QThread(self)
+            worker = RelationWorker(self.catalogue, self._entry(executable), maps)
+            worker.moveToThread(thread); thread.started.connect(worker.run)
+            worker.progress.connect(self._relation_progress_changed)
+            dialog.canceled.connect(lambda: worker.request_cancel())
+            worker.succeeded.connect(self._relations_loaded)
+            worker.failed.connect(self._relations_failed)
+            worker.cancelled.connect(self.relation_status.setText)
+            worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater); thread.finished.connect(self._relations_finished)
+            self.relation_thread, self.relation_worker, self.relation_progress = thread, worker, dialog
+            thread.start()
+        except Exception as exc:
+            QMessageBox.critical(self, "Relation map failed", str(exc))
+
+    @Slot(int, str)
+    def _relation_progress_changed(self, value, message):
+        if self.relation_progress:
+            self.relation_progress.setValue(value); self.relation_progress.setLabelText(message)
+
+    @Slot(object)
+    def _relations_loaded(self, result):
+        counts, zones, positions, links = result
+        self.relation_view.show_relations(counts, zones, positions, self._open_zone)
+        self.relation_view.set_script_links_visible(self.relation_scripted.isChecked())
+        self._relations_built = True
+        walk = sum(link.walk_through for link in links)
+        unlinked = len(counts) - len(positions)
+        self.relation_status.setText(
+            f"{len(counts)} zones, {len(zones)} zone links from {len(links)} map warps ({walk} walk-through exits, "
+            f"{len(links) - walk} without exit tiles). {unlinked} zones have no decoded warp links and are entered "
+            "through map scripts, which are not decoded. Layout is approximate: exit directions guide placement. "
+            "Wheel to zoom, drag to pan, hover a line for details, double-click a zone to open it.")
+
+    @Slot(str)
+    def _relations_failed(self, message):
+        self.relation_status.setText(f"Relation map unavailable: {message}")
+
+    @Slot()
+    def _relations_finished(self):
+        if self.relation_progress:
+            self.relation_progress.close(); self.relation_progress.deleteLater()
+        self.relation_progress = None; self.relation_worker = None; self.relation_thread = None
+        self.background_finished.emit()
+
+    def _open_zone(self, zone):
+        parent = self._zone_items.get(zone) if zone else None
+        if parent is None:
+            return
+        self.map_search.clear(); self.maps_tabs.setCurrentIndex(0)
+        parent.setExpanded(True); self.map_tree.setCurrentItem(parent.child(0) if parent.childCount() else parent)
+        self.map_tree.scrollToItem(parent, QTreeWidget.ScrollHint.PositionAtTop)
+
+    def _filter_maps(self, text):
+        needle = text.strip().lower()
+        for zone, parent in self._zone_items.items():
+            zone_match = needle in zone.lower()
+            any_child = False
+            for index in range(parent.childCount()):
+                child = parent.child(index)
+                show = not needle or zone_match or needle in child.text(0).lower()
+                child.setHidden(not show); any_child |= show
+            parent.setHidden(bool(needle) and not any_child)
+            parent.setExpanded(bool(needle) and any_child)
+
+    def _selected_map(self):
+        item = self.map_tree.currentItem()
+        row_id = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        if row_id is None:
+            raise ValueError("Select a map first.")
+        return self.map_rows[row_id]
+
+    def _map_entry(self, row):
+        if self._map_entries is None:
+            executable = next(candidate for candidate in self.rows
+                              if candidate["original_path"] == row["parent_path"] and candidate["offset"] is None)
+            self._map_entries = parse_map_table(self._read_row(executable, PREVIEW_LIMIT))
+        return self._map_entries[int(row["original_path"].rsplit("/", 2)[1])]
+
+    def _character_name(self, character_id):
+        prefix = f"#character/{character_id:03d}/"
+        row = next((row for row in self.rows if prefix in row["original_path"]), None)
+        if row is None:
+            return f"character {character_id}"
+        label = self.labels.get((row["id"], "display_name"))
+        return f"{label['value'] if label else row['original_path'].rsplit('/', 1)[1]} (ID {character_id})"
+
+    def _preview_map(self, *_):
+        self._map_scene = self._map_tfs = None
+        self.map_warps.clear(); self.map_inbound.clear(); self.map_palette.blockSignals(True); self.map_palette.clear()
+        self.map_palette.blockSignals(False)
+        try:
+            row = self._selected_map()
+        except ValueError:
+            return
+        for association in self.associations:
+            if association["kind"] == "warp" and association["target_id"] == row["id"]:
+                source = self.map_rows.get(association["source_id"])
+                if source is None:
+                    continue
+                _, index, name = source["original_path"].rsplit("/", 2)
+                zone = self.labels.get((source["id"], "area_name"))
+                item = QListWidgetItem(f"{name} [{zone['value'] if zone else 'unnamed'}]")
+                item.setData(Qt.ItemDataRole.UserRole, int(index)); self.map_inbound.addItem(item)
+        if not self.map_inbound.count():
+            self.map_inbound.addItem("No warp-table links lead here; it is entered through map scripts or not at all.")
+        try:
+            entry = self._map_entry(row)
+            scene_row, tfs_row = self._character_related(row, "scene"), self._character_related(row, "background")
+            if scene_row is None or tfs_row is None:
+                raise ValueError(f"{entry.map_path} / .TFS are absent from this disc; only the table entry exists.")
+            scene = parse_map(self._read_row(scene_row, MAX_MAP_FILE), entry)
+            tfs = parse_tfs(self._read_row(tfs_row, MAX_TFS_FILE))
+            self._map_scene, self._map_tfs = scene, tfs
+            self.map_palette.blockSignals(True)
+            self.map_palette.addItems([f"Palette {index}" for index in range(len(tfs.palettes))])
+            self.map_palette.blockSignals(False)
+            self._render_map_background()
+            floor = QPixmap.fromImage(ImageQt(floor_grid_image(scene)))
+            self.map_floor.setPixmap(floor.scaled(400, 400, Qt.AspectRatioMode.KeepAspectRatio,
+                                                  Qt.TransformationMode.FastTransformation))
+            entries = self._map_entries
+            for warp_exit in map_exits(scene):
+                target = entries[warp_exit.warp.map_index]
+                how = (f"walk-through exit, {warp_exit.direction} ({warp_exit.cell_count} tiles)"
+                       if warp_exit.walk_through else "no exit tiles: map script or unused")
+                text = (f"slot {warp_exit.slot} → {target.name or '(unnamed)'} [{target.area_name}], "
+                        f"spawn {warp_exit.warp.spawn_index} — {how}")
+                item = QListWidgetItem(text); item.setData(Qt.ItemDataRole.UserRole, warp_exit.warp.map_index)
+                self.map_warps.addItem(item)
+            if not self.map_warps.count():
+                self.map_warps.addItem("No warp-table exits; transitions from this map are scripted.")
+            triggers = trigger_summary(scene)
+            setup = scene.setup
+            lines = [
+                f"map: {entry.name} (table index {entry.index}, area {entry.area_id}: {entry.area_name})",
+                f"files: {entry.map_path}, {entry.tfs_path}",
+                f"flags: sound {entry.sound_id}, day/night {'yes' if entry.has_time_cycle else 'no'}, "
+                f"Digimon {'yes' if entry.has_digimon else 'no'}",
+                f"background: {setup.grid_width}×{setup.grid_height} tiles of 128×128, {len(tfs.palettes)} palette(s)",
+                f"camera: origin {setup.camera_origin}, target {setup.camera_target}, distance {setup.viewer_distance}",
+                *(f"light {i}: position {light.position}, colour {light.color}" for i, light in enumerate(setup.lights)),
+                f"liked area {setup.liked_area}, disliked area {setup.disliked_area}",
+                f"embedded images: {len(scene.image_offsets)} 8-bpp, {len(scene.object_image_offsets)} 4-bpp; "
+                f"sprite objects {len(scene.objects)}, instances {len(scene.instances)}",
+                f"toilet: {entry.toilet if entry.toilet else 'none'}",
+                f"doors: {', '.join(f'model {d.model_id} at {d.position}' for d in entry.doors) or 'none'}",
+                "floor-grid triggers (value: tiles):",
+                *(f"  {kind}: " + ", ".join(f"{value}: {count}" for value, count in sorted(values.items()))
+                  for kind, values in sorted(triggers.items())),
+                "spawn points:",
+                *(f"  {i}: position {spawn.position}, rotation {spawn.rotation}" for i, spawn in enumerate(scene.spawns)),
+                f"Digimon placements ({len(scene.digimon)}):",
+                *(f"  {self._character_name(d.character_id)} at {d.position}; HP {d.stats['hp']}/{d.stats['max_hp']}, "
+                  f"MP {d.stats['mp']}/{d.stats['max_mp']}, off {d.stats['offense']}, def {d.stats['defense']}, "
+                  f"spd {d.stats['speed']}, brn {d.stats['brains']}, bits {d.bits}, script {d.script_id}, "
+                  f"{len(d.waypoints)} waypoint(s)" for d in scene.digimon),
+                f"parser: {row['decoder']} {row['decoder_version']}; MAP {scene_row['decoder_version']}; "
+                f"TFS {tfs_row['decoder_version']}",
+                f"evidence: {row['mapping_evidence']}",
+            ]
+            self.map_details.setPlainText("\n".join(lines))
+        except Exception as exc:
+            self.map_background.setPixmap(QPixmap()); self.map_floor.setPixmap(QPixmap())
+            self.map_background.setText(f"Preview unavailable:\n{exc}")
+            self.map_details.setPlainText(str(exc))
+
+    def _render_map_background(self, *_):
+        if self._map_scene is None or self._map_tfs is None or self.map_palette.currentIndex() < 0:
+            return
+        image = render_background(self._map_tfs, self._map_scene.setup, self.map_palette.currentIndex())
+        self.map_background.setPixmap(QPixmap.fromImage(ImageQt(image)))
+
+    def _follow_warp(self, item):
+        index = item.data(Qt.ItemDataRole.UserRole)
+        target = next((row_id for row_id, row in self.map_rows.items()
+                       if int(row["original_path"].rsplit("/", 2)[1]) == index), None) if index is not None else None
+        if target is not None:
+            if self._map_items[target].isHidden() or self._map_items[target].parent().isHidden():
+                self.map_search.clear()
+            self.map_tree.setCurrentItem(self._map_items[target])
+
+    def _export_map_background(self):
+        try:
+            row = self._selected_map()
+            if self._map_scene is None or self._map_tfs is None:
+                raise ValueError("This map has no decoded background.")
+            entry, palette = self._map_entry(row), self.map_palette.currentIndex()
+            path, _ = QFileDialog.getSaveFileName(self, "Export background", f"{entry.name}-palette{palette}.png",
+                                                  "PNG image (*.png)")
+            if not path: return
+            tfs_row, scene_row = self._character_related(row, "background"), self._character_related(row, "scene")
+            export_background(render_background(self._map_tfs, self._map_scene.setup, palette), Path(path), {
+                "map": entry.name, "table_index": entry.index, "area_name": entry.area_name, "palette_index": palette,
+                "palette_count": len(self._map_tfs.palettes),
+                "source_resource_id": tfs_row["id"], "source_sha256": tfs_row["content_hash"],
+                "tile_grid_source": self._resource_provenance(scene_row) | {"sha256": scene_row["content_hash"]},
+                "provenance": self._resource_provenance(tfs_row),
+            })
+            QMessageBox.information(self, "Background exported", f"Wrote {path} and provenance JSON.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Background export failed", str(exc))
+
     def _update_model_modes(self):
         self.model_view.set_modes(self.model_mode.currentIndex() == 0,
                                   self.model_wireframe.isChecked())
@@ -519,10 +905,13 @@ class Workspace(QWidget):
             self.export_worker.request_cancel()
         if self.model_worker:
             self.model_worker.request_cancel()
+        if self.relation_worker:
+            self.relation_worker.request_cancel()
 
     def has_background_work(self):
         return bool((self.export_thread and self.export_thread.isRunning()) or
-                    (self.model_thread and self.model_thread.isRunning()))
+                    (self.model_thread and self.model_thread.isRunning()) or
+                    (self.relation_thread and self.relation_thread.isRunning()))
 
     def _hex_selected(self):
         try:
