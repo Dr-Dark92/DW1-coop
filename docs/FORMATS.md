@@ -44,8 +44,8 @@ The USA focus is corroborated by [dw_decomp](https://github.com/jype0/dw_decomp)
 | USA `CHDAT/ALLTIM.TIM` | Confirmed | Exactly 180 fixed `0x4800`-byte (nine-sector) slots. Each slot begins with and structurally decodes as TIM; child offset, slot size, SHA-256, decoder version, and parent association are catalogued. |
 | USA character resource tables | Confirmed | 180 internal names at executable offset `0xA3B44`, indexed to `MMD{id//30}/{name}.MMD` and ALLTIM slot `id`; 179 non-empty display names from the 52-byte records at `0x9CEB4`. ID 114's empty display field is retained as unavailable. |
 | MMD container boundary | Partial | The leading TMD offset (`8`), embedded TMD id/flags/object count/table bound, and animation-data offset are validated. 178 supplied MMD files passed. |
-| Embedded MMD/TMD static geometry | Partial | Relative-pointer TMD (id `0x41`, flags 0): object table, signed 16-bit vertices, 12-bit fixed-point normals (4096 = 1.0), and primitive modes `0x34` (textured Gouraud triangle) and `0x3c` (textured Gouraud quad) with flags 0 and object scale exponent 0. Packet lengths, indices, texture page, colour mode, CLUT, and UV bounds are validated; anything else is rejected. Verified for ID 3 `AGUM` only (see below). Rendered in a static preview; not exported. |
-| USA skeleton table | Partial | Per-ID bone count from the 52-byte parameter record and signed `(object, parent)` byte pairs reached through the per-ID pointer table at executable offset `0x8CE60`; parents must precede children. Verified for `AGUM`. |
+| Embedded MMD/TMD static geometry | Partial | Relative-pointer TMD (id `0x41`, flags 0): object table, signed 16-bit vertices, 12-bit fixed-point normals (4096 = 1.0), and primitive modes `0x34` (textured Gouraud triangle) and `0x3c` (textured Gouraud quad) with flags 0 and object scale exponent 0. Packet lengths, indices, texture page, colour mode, CLUT, and UV bounds are validated; anything else is rejected. 151 of the 178 USA models are accepted and match the reference converter; the other 27 use primitive types outside this subset and are rejected (see below). Rendered in a static preview; not exported. |
+| USA skeleton table | Partial | Per-ID bone count from the 52-byte parameter record and signed `(object, parent)` byte pairs reached through the per-ID pointer table at executable offset `0x8CE60`; parents must precede children. Matches the reference converter for all 151 accepted models. |
 | Standalone TMD model | Unsupported | Not decoded or exported. |
 | DW1 animation data | Partial | Only the initial-transform prefix (scale, rotation, translation per bone) of the first non-empty animation record is read, to assemble the static pose. Keyframe instructions, clips, and playback are unsupported. |
 | TFS/backgrounds | Unsupported | No background or scene reconstruction. |
@@ -69,11 +69,43 @@ The static parse of ID 3 (`CHDAT/MMD0/AGUM.MMD`, SHA-256 `60d5e920…7c7d`, text
 
 Thirty `AGUM` triangles have zero-area UVs (all corners on one texel, or on one texel row or column). The PS1 fills these from the referenced texels; the preview does the same rather than dropping them. The preview was then inspected on a desktop display and confirmed visually correct. It inverts PS1 screen-down Y only when rendering; decoded coordinates are unchanged.
 
-This verifies one model. The other 177 MMDs are not yet compared, and any that use other primitive modes, flags, or scale exponents are rejected rather than approximated. Model export is not implemented.
+### All-model comparison
+
+The same comparison was then run for every USA MMD (178 files, all hash-verified against the catalogue; IDs 62 and 114 have no MMD). Per model it checks parser acceptance, node parents and mesh mapping, every ordered triangle corner, material grouping (the converter groups a mesh's faces by double-sided, blend mode, and translucency, so corners are compared per group in that order), the initial pose, world-space assembly, and the centroid texel of every face.
+
+| Outcome | Models |
+|---|---|
+| Accepted; geometry, skeleton, materials, pose, assembly, and all centroid texels match | 135 |
+| Accepted; geometry, skeleton, materials, pose, and assembly match; some centroid texels differ for converter-side reasons (below) | 16 |
+| Rejected: a primitive type outside the supported subset | 26 |
+| Rejected: out-of-range normal indices | 1 |
+
+Across the 151 accepted models (93,686 triangles) there were no geometry, skeleton, material, or pose differences, and the largest world-space difference was 0.00014 units.
+
+180 of the 93,686 centroid texel samples differ, in 16 models. Every one is explained by how the converter builds its single combined texture, which assigns one palette per texel:
+
+- 13 models (`BETA`, `PUNI`, `ELEC`, `GIRO`, `YURA`, `PALM`, `MODO`, `ARUR`, `TKKA`, `EBET`, `EELE`, `EGIR`, `EPAL`): the differing samples belong to zero-area-UV faces, for which the converter's palette map has no reliable entry of the face's own and is filled from neighbouring texels or from animation texture copies (its copy crop is inclusive, so a `height` 24 copy also writes row 24).
+- 3 models (`NUME`, `GERE`, `ENUM`): the differing samples lie inside regions that animation texture-copy instructions overwrite in the converter's palette map.
+
+The workbench samples each face under its own CLUT directly from the TIM, as the PS1 GPU does, so these are not workbench errors. Animated texture copies are not applied by the static preview.
+
+Rejected models, by the first unsupported primitive found (mode meanings follow the converter's own mode table):
+
+| Mode, flags | Primitive | Models |
+|---|---|---|
+| `0x3e`, `0x00` | Gouraud textured quad, translucent | 17: `DEVI`, `GABU`, `KABU`, `KUWA`, `HKAB`, `GGDR`, `YANM`, `GOBR`, `PSYC`, `SNDY`, `GOLE`, `TENT`, `EGOB`, `EDEV`, `EGAB`, `EKAB`, `EKUW` |
+| `0x36`, `0x00` | Gouraud textured triangle, translucent | 3: `POYO`, `BLMR`, `OTAM` |
+| `0x2c`, `0x00` | Flat textured quad | 3: `TOYA`, `HAGU`, `BRIK` |
+| `0x2e`, `0x00` | Flat textured quad, translucent | 1: `CLEA` |
+| `0x38`, `0x00` | Gouraud untextured quad | 1: `TONO` |
+| `0x2d`, `0x01` | Flat textured quad, unlit | 1: `HYOG` |
+| — | 75 faces with out-of-range normal indices (the converter substitutes a fallback normal) | 1: `TANE` |
+
+Rejected models stay unsupported rather than approximated; adding these primitive types needs its own evidence and tests. The comparison scripts are kept outside Git with the proprietary inputs. Model export is not implemented.
 
 ## Resource association
 
-The catalogue contains 180 confirmed numeric character-resource records. Each is associated with its same-index ALLTIM texture; 178 are associated with a path-present, boundary-validated MMD container. Display names are stored as separate labels with executable offsets and evidence, not derived from appearance. This proves resource-table relationships, not playable-character semantics or animation labels. Model correctness is verified only for ID 3, as described above. Empty/unsupported categories state their limits explicitly.
+The catalogue contains 180 confirmed numeric character-resource records. Each is associated with its same-index ALLTIM texture; 178 are associated with a path-present, boundary-validated MMD container. Display names are stored as separate labels with executable offsets and evidence, not derived from appearance. This proves resource-table relationships, not playable-character semantics or animation labels. Static model correctness is compared for the 151 models the parser accepts, as described above. Empty/unsupported categories state their limits explicitly.
 
 ## Executable analysis/decompilation
 

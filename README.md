@@ -16,7 +16,7 @@ This is an asset-analysis foundation. It is **not** co-op gameplay, a native por
 - Confirmed USA `CHDAT/ALLTIM.TIM` fixed-slot inventory: 180 nine-sector TIM resources with offsets and hashes.
 - Verified USA resource-table associations for 180 IDs: internal/display names, same-index textures, and 178 structurally bounded MMD containers.
 - Character-resource browser with associated decoded texture preview and PNG + provenance export.
-- Bounded static MMD/TMD geometry parsing (textured Gouraud triangles and quads), USA skeleton tables, and the initial pose, shown in an orbitable textured preview. Verified for ID 3 (Agumon) against an independent converter and on a desktop display; other models are not yet verified. Model export and animation playback are not implemented.
+- Bounded static MMD/TMD geometry parsing (textured Gouraud triangles and quads), USA skeleton tables, and the initial pose, shown in an orbitable textured preview. 151 of the 178 USA models are accepted and match an independent converter; the other 27 use unsupported primitive types and are rejected. Agumon was also checked visually on a desktop display. Model export and animation playback are not implemented.
 - Thread-safe import cancellation and streamed hashing/file export; partial exports are removed.
 - Honest unsupported states for model export, animations, general archives, maps, and scripts.
 

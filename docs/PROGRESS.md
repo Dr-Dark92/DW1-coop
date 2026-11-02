@@ -29,7 +29,7 @@
 - Release validation: product-code and executable-header evidence, not a published full-disc hash match.
 - TIM: standard standalone images only; no automatic embedded/container scan.
 - Executable analysis: identity/header, character resource tables, and skeleton tables only.
-- MMD static geometry: one model (Agumon) verified; the other 177 are not yet compared and may be rejected if they use other primitive modes.
+- MMD static geometry: 151 of 178 models accepted and matching the reference converter; 27 rejected for unsupported primitive types (translucent, flat-shaded, untextured, unlit) or invalid normal indices.
 - DW1 animation data: initial pose only.
 
 ## Not implemented
@@ -64,4 +64,11 @@ Static Agumon model, checked from the same image on 2026-11-02:
 - the workbench parse matched the glTF output of `DW1ModelConverter` `17d1a19` on skeleton, all 690 ordered triangle corners, material, initial pose, world-space assembly, and per-face palette texels (details in [FORMATS.md](FORMATS.md#static-agumon-verification));
 - the desktop preview (Wayland) was inspected by the user and confirmed correct and fully textured after fixing two GUI defects found there: an off-thread repaint segfault and 30 dropped zero-area-UV faces.
 
-This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, other MMD models, or animation. Automated coverage remains synthetic and contains no proprietary data; the converter comparison is a manual check kept outside Git.
+All MMD models, compared the same way on 2026-11-02:
+
+- 178 MMD files extracted with catalogue-hash equality and converted by the pinned converter;
+- 151 accepted by the parser; all match on skeleton, ordered corners, materials, initial pose, and world-space assembly (largest difference 0.00014 units); 135 also match every centroid texel, and the 180 differing samples in the other 16 are explained by the converter's single-palette texture map;
+- 27 rejected for primitive types outside the supported subset or invalid normal indices (details in [FORMATS.md](FORMATS.md#all-model-comparison));
+- only Agumon was inspected visually on a desktop display.
+
+This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, rejected models, or animation. Automated coverage remains synthetic and contains no proprietary data; the converter comparison is a manual check kept outside Git.
