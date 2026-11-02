@@ -13,7 +13,19 @@ DISPLAY_ENTRY_SIZE = 52
 DISPLAY_NAME_SIZE = 20
 ENTRY_SIZE = 8
 ENTRY_COUNT = 180
-DECODER_VERSION = "slus-character-table-v2"
+DECODER_VERSION = "slus-character-table-v3"
+# DigimonPara (jype0/dw_decomp include/dw/params.h): name[20], boneCount, radius, height, type, level, ...
+LEVEL_FIELD = 29
+MOVES_FIELD = 35  # uint8_t moves[16]: technique IDs; 0xff is empty
+MOVE_COUNT = 16
+# MOVE_NAMES (dw_decomp config/us/symbols.txt 0x80126054): 122 pointers to technique names.
+MOVE_NAMES_OFFSET = 0x80126054 - 0x80090000
+MOVE_NAME_COUNT = 122
+LOAD_ADDRESS = 0x80090000
+# Level enum names from DW1-SydPatches src/extern/dw1.hpp; 0 is UNDEFINED (humans, NPCs, a few Digimon).
+STAGES = {1: "Fresh", 2: "In-Training", 3: "Rookie", 4: "Champion", 5: "Ultimate"}
+# dw_decomp NUM_PARTNER_DIGIMON: resource IDs below this are the partner range (ID 0 is the player character).
+PARTNER_COUNT = 66
 MMD_INSPECTOR_VERSION = "mmd-boundary-v1"
 _NAME = re.compile(r"^[A-Za-z0-9_]{1,7}$")
 
@@ -28,6 +40,16 @@ class CharacterEntry:
     texture_slot: int
     display_name: str | None
     display_name_offset: int
+    level: int = 0
+    moves: tuple[int, ...] = ()
+
+    @property
+    def stage(self) -> str | None:
+        return STAGES.get(self.level)
+
+    @property
+    def in_partner_range(self) -> bool:
+        return 0 < self.resource_id < PARTNER_COUNT
 
 
 @dataclass(frozen=True)
@@ -72,9 +94,37 @@ def parse_character_table(executable: bytes) -> list[CharacterEntry]:
         if display_name and not display_name.isprintable():
             raise DiscFormatError(f"Character display name {resource_id} is invalid.")
         model_path = f"CHDAT/MMD{resource_id // 30}/{name}.MMD"
+        level = executable[display_offset + LEVEL_FIELD]
+        if level > max(STAGES):
+            raise DiscFormatError(f"Character {resource_id} has unknown level {level}.")
+        moves = tuple(executable[display_offset + MOVES_FIELD:display_offset + MOVES_FIELD + MOVE_COUNT])
         entries.append(CharacterEntry(resource_id, name, offset, raw, model_path, resource_id,
-                                      display_name or None, display_offset))
+                                      display_name or None, display_offset, level, moves))
     return entries
+
+
+def parse_move_names(executable: bytes) -> list[str | None]:
+    """Technique names from the USA executable's MOVE_NAMES pointer table; None for empty entries."""
+    end = MOVE_NAMES_OFFSET + MOVE_NAME_COUNT * 4
+    if len(executable) < end or not executable.startswith(b"PS-X EXE"):
+        raise DiscFormatError("USA executable is truncated or lacks its PS-X EXE header.")
+    names = []
+    for index, pointer in enumerate(struct.unpack_from(f"<{MOVE_NAME_COUNT}I", executable, MOVE_NAMES_OFFSET)):
+        offset = pointer - LOAD_ADDRESS
+        if offset <= 0:  # points at the executable header: an unused slot
+            names.append(None)
+            continue
+        if offset >= len(executable) or b"\0" not in executable[offset:offset + 64]:
+            raise DiscFormatError(f"Technique name {index} points outside the executable.")
+        raw = executable[offset:executable.index(b"\0", offset)]
+        try:
+            name = raw.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise DiscFormatError(f"Technique name {index} is not ASCII.") from exc
+        if not name.isprintable():
+            raise DiscFormatError(f"Technique name {index} is not printable.")
+        names.append(name)
+    return names
 
 
 def inspect_mmd(data: bytes, total_size: int | None = None) -> MmdStructure:

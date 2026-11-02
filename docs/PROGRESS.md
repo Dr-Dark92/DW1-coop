@@ -25,6 +25,9 @@
 - All 241 file-backed maps verified against `DW1ModelConverter` `17d1a19` map output.
 - Animation clips: bounded parser and an exact frame stepper following the decompiled game code; playback with clip selection, play/pause/step/restart, optional root motion, and animated texture copies in the model preview.
 - All 4,843 clips of the 178 USA MMDs verified against `DW1ModelConverter` `17d1a19` glTF animations.
+- Animations tab: Digimon list with search, evolution-stage and partner-range filters, a per-clip table, and the shared model/animation player (also used by Characters and Digimon); unsupported geometry still lists clips. Confirmed on the desktop by the user.
+- Animation clip names from the game's own use of each animation ID (Digimon and player sets, with confidence and evidence) and technique names for clips 46+ via each Digimon's move list; 94% of USA clips named.
+- Evolution stage parsed from the executable's level byte and catalogued as a `stage` label; the GUI falls back to the executable for older projects.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 

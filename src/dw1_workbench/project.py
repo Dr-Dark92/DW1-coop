@@ -9,7 +9,7 @@ from . import __version__
 from .alltim import DECODER_VERSION as ALLTIM_DECODER_VERSION, decode_alltim
 from .catalog import Catalogue
 from .characters import (DECODER_VERSION as CHARACTER_DECODER_VERSION,
-                         MMD_INSPECTOR_VERSION, entry_hash, inspect_mmd,
+                         LEVEL_FIELD, MMD_INSPECTOR_VERSION, entry_hash, inspect_mmd,
                          parse_character_table)
 from .disc import inspect_image, sha256_file
 from .errors import Cancelled
@@ -92,7 +92,7 @@ def import_project(source: Path, project_dir: Path, cancelled=lambda: False,
     catalogue.initialize()
     catalogue.set_meta(import_status="in_progress", source_path=str(source.resolve()),
                        tool_version=__version__, parser_versions={"iso9660": 1, "cue": 1, "tim": 1,
-                                                                  "alltim": 1, "characters": 2,
+                                                                  "alltim": 1, "characters": 3,
                                                                   "mmd_boundary": 1, "map_table": 1,
                                                                   "map_scene": 1, "tfs": 1},
                        started_at=datetime.now(timezone.utc).isoformat())
@@ -190,6 +190,11 @@ def import_project(source: Path, project_dir: Path, cancelled=lambda: False,
                     character_labels.append((character_id, "display_name", character.display_name,
                                              f"USA executable DigimonPara record at 0x{character.display_name_offset:x}; "
                                              "20-byte NUL-padded display-name field.", "confirmed"))
+                if character.stage is not None:
+                    character_labels.append((character_id, "stage", character.stage,
+                                             f"USA executable DigimonPara level byte at "
+                                             f"0x{character.display_name_offset + LEVEL_FIELD:x} = {character.level}; "
+                                             "Level enum names from DW1-SydPatches.", "confirmed"))
                 character_associations.append((character_id, texture_ids[character.texture_slot],
                                                "texture", evidence, "confirmed"))
                 if character.model_path in mmd_structures:

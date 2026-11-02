@@ -106,3 +106,21 @@ def test_window_close_waits_for_active_import(application, monkeypatch, tmp_path
     assert worker.cancel_event.is_set()
     process_until(application, lambda: window.thread is None)
     process_until(application, lambda: not window.isVisible())
+
+
+def test_model_selection_waits_until_previous_load_is_finished(application, tmp_path):
+    # The previous load's thread has stopped running but _model_finished has not been delivered yet;
+    # a new selection must be queued, not started, or the earlier thread would be orphaned.
+    from dw1_workbench.animation_view import ModelAnimationPanel
+    from dw1_workbench.catalog import Catalogue
+
+    catalogue = Catalogue(tmp_path / "project"); catalogue.initialize()
+    workspace = gui.Workspace(catalogue)
+    stopped = QThread()
+    workspace.model_thread, workspace.model_worker = stopped, None
+    panel = ModelAnimationPanel()
+    workspace._load_character_model({"id": "selected"}, panel, show_dialog=False)
+    assert workspace.model_thread is stopped
+    assert workspace._pending_model == ({"id": "selected"}, panel)
+    workspace.cancel_background()
+    assert workspace._pending_model is None

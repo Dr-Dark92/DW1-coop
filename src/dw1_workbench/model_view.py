@@ -55,6 +55,10 @@ class StaticModelView(QWidget):
         if self._apply_pose(model.pose, (0.0, 0.0, 0.0), recentre=True):
             self.reset_view()
 
+    def clear(self):
+        self.model, self._triangles = None, []
+        self.update()
+
     def set_pose(self, poses, offset=(0.0, 0.0, 0.0)):
         """Show the model in another pose; the camera keeps the centre fitted to the static pose."""
         if self.model is not None and self._apply_pose(poses, offset, recentre=False):
@@ -148,7 +152,7 @@ class StaticModelView(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#20242b"))
         if not self._triangles:
-            painter.setPen(QColor("#d0d4da")); painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Load a verified static model")
+            painter.setPen(QColor("#d0d4da")); painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No model preview loaded")
             return
         yaw, pitch = math.radians(self.yaw), math.radians(self.pitch)
         cy, sy, cp, sp = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)

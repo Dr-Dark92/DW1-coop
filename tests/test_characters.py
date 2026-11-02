@@ -4,8 +4,8 @@ import struct
 
 import pytest
 
-from dw1_workbench.characters import (DISPLAY_ENTRY_SIZE, DISPLAY_TABLE_OFFSET, ENTRY_COUNT, ENTRY_SIZE, NAME_TABLE_OFFSET,
-                                       inspect_mmd, parse_character_table)
+from dw1_workbench.characters import (DISPLAY_ENTRY_SIZE, DISPLAY_TABLE_OFFSET, ENTRY_COUNT, ENTRY_SIZE, LEVEL_FIELD,
+                                       NAME_TABLE_OFFSET, inspect_mmd, parse_character_table)
 from dw1_workbench.errors import DiscFormatError
 
 
@@ -64,3 +64,19 @@ def test_mmd_boundary_inspection_and_malformed_offsets():
         inspect_mmd(struct.pack("<IIIII", 8, 0x300, 0x41, 0, 3), total_size=0x200)
     with pytest.raises(DiscFormatError, match="object table"):
         inspect_mmd(struct.pack("<IIIII", 8, 0x40, 0x41, 0, 3), total_size=0x200)
+
+
+def test_character_stage_comes_from_the_digimonpara_level_byte():
+    data = character_executable()
+    for resource_id, level in ((1, 1), (2, 2), (3, 3), (5, 4), (12, 5), (70, 3)):
+        data[DISPLAY_TABLE_OFFSET + resource_id * DISPLAY_ENTRY_SIZE + LEVEL_FIELD] = level
+    entries = parse_character_table(bytes(data))
+    assert [entries[i].stage for i in (0, 1, 2, 3, 5, 12)] == [None, "Fresh", "In-Training", "Rookie", "Champion", "Ultimate"]
+    assert entries[3].in_partner_range and not entries[0].in_partner_range and not entries[70].in_partner_range
+
+
+def test_character_table_rejects_an_unknown_level():
+    data = character_executable()
+    data[DISPLAY_TABLE_OFFSET + 9 * DISPLAY_ENTRY_SIZE + LEVEL_FIELD] = 6
+    with pytest.raises(DiscFormatError, match="unknown level 6"):
+        parse_character_table(bytes(data))

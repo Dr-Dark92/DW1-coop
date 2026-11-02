@@ -42,7 +42,7 @@ The USA focus is corroborated by [dw_decomp](https://github.com/jype0/dw_decomp)
 |---|---|---|
 | Standard PS1 TIM | Partial | 4/8-bit indexed and 16/24-bit direct-color TIM data at resource start; palettes, VRAM coordinates, zero transparency, and STP indication retained. PNG plus JSON provenance export. Arbitrary embedded scans and containers other than ALLTIM are not implemented. |
 | USA `CHDAT/ALLTIM.TIM` | Confirmed | Exactly 180 fixed `0x4800`-byte (nine-sector) slots. Each slot begins with and structurally decodes as TIM; child offset, slot size, SHA-256, decoder version, and parent association are catalogued. |
-| USA character resource tables | Confirmed | 180 internal names at executable offset `0xA3B44`, indexed to `MMD{id//30}/{name}.MMD` and ALLTIM slot `id`; 179 non-empty display names from the 52-byte records at `0x9CEB4`. ID 114's empty display field is retained as unavailable. |
+| USA character resource tables | Confirmed | 180 internal names at executable offset `0xA3B44`, indexed to `MMD{id//30}/{name}.MMD` and ALLTIM slot `id`; 179 non-empty display names from the 52-byte records at `0x9CEB4`. ID 114's empty display field is retained as unavailable. Evolution stage from each record's `level` byte (offset 29 of the `DigimonPara` layout in dw_decomp `include/dw/params.h`; names from the SydPatches `Level` enum): 5 Fresh, 4 In-Training, 39 Rookie, 84 Champion, 36 Ultimate, 12 with no stage (humans, NPCs, WereGarurumon, `tAKA`). IDs 1–65 are the partner range (`NUM_PARTNER_DIGIMON` = 66): 4 Fresh, 4 In-Training, 9 Rookie, 30 Champion (including Numemon, Sukamon, Nanimon), 17 Ultimate. |
 | MMD container boundary | Partial | The leading TMD offset (`8`), embedded TMD id/flags/object count/table bound, and animation-data offset are validated. 178 supplied MMD files passed. |
 | Embedded MMD/TMD static geometry | Partial | Relative-pointer TMD (id `0x41`, flags 0): object table, signed 16-bit vertices, 12-bit fixed-point normals (4096 = 1.0), and primitive modes `0x34` (textured Gouraud triangle) and `0x3c` (textured Gouraud quad) with flags 0 and object scale exponent 0. Packet lengths, indices, texture page, colour mode, CLUT, and UV bounds are validated; anything else is rejected. 151 of the 178 USA models are accepted and match the reference converter; the other 27 use primitive types outside this subset and are rejected (see below). Rendered in a static preview; not exported. |
 | USA skeleton table | Partial | Per-ID bone count from the 52-byte parameter record and signed `(object, parent)` byte pairs reached through the per-ID pointer table at executable offset `0x8CE60`; parents must precede children. Matches the reference converter for all 151 accepted models. |
@@ -145,6 +145,73 @@ Verification against `DW1ModelConverter` `17d1a19` on the supplied disc, all 178
 - comparisons stop where an endless loop first jumps back, because the converter continues linearly past an endless loop's end instead of repeating it.
 
 Not established: the playback rate (20 frames per second is the converter's time base), clip names or purposes (clips are shown by index), and sound playback (cues are listed, not played). The game also cycles texture frames for a few Digimon outside the animation data (`animateEntityTexture`); the preview does not.
+
+### Animation clip names
+
+The game stores no clip names; each animation ID's meaning comes from where the game code starts it ([dw_decomp](https://github.com/jype0/dw_decomp/tree/aaf69a4491cbf275ffd24df19fe78010151c10f2/src) call sites, cross-checked with DW1-SydPatches). *Confirmed* means the call sites leave one clear meaning; *likely* means the ID is shared by several situations and the name describes them. The table lives in `src/dw1_workbench/clip_names.py` and is the mapping to use for future work.
+
+**Techniques (IDs 46 and up).** Animation `46 + i` plays technique `moves[i]` of the Digimon's `DigimonPara` record (offset 35, 16 bytes, `0xff` empty; SydPatches `entityGetTechFromAnim`). Names come from the executable's `MOVE_NAMES` table (122 pointers at `0x80126054`, dw_decomp `config/us/symbols.txt`), kept verbatim including the game's "Inifinity Burn"; the last pointer is unused. Agumon's 46–53 are Spit Fire, Fire Tower, Magma Bomb, Heat Laser, Red Inferno, Sonic Jab, Muscle Charge, Pepper Breath. SydPatches remaps H-Kabuterimon's animation 60 as a fix to the original game; the workbench keeps the unmodified mapping. Two models have a technique-range clip with no move behind it (`MGSD` 58, `MUGE` 53); those stay unnamed.
+
+**Digimon (all resource IDs except 0):**
+
+| ID | Name | Confidence | Evidence (game functions) |
+|---|---|---|---|
+| 0 | Idle | confirmed | partnerTickIdle, setPartnerIdle (healthy), NPCEntityTickLookingAtTamer; default reset |
+| 1 | Idle (unwell) | confirmed | setPartnerIdle when sleepy, tired, injured or sick |
+| 2 | Walk | confirmed | setPartnerSlowWalking (healthy), NPCEntityTickTrackingTamer, walking to food/toilet |
+| 3 | Walk (unwell) | confirmed | setPartnerSlowWalking when sleepy, tired, injured or sick |
+| 4 | Run | confirmed | partnerTickWalking catching up, NPCEntityTickTrackingTamer3, tickPartnerToilet |
+| 5 | Happy | confirmed | updateConditionAnimation: happiness >= 31 |
+| 7 | Unhappy mood | confirmed | updateConditionAnimation: happiness < -30 |
+| 8 | Eat | confirmed | partnerTickFeedItem (item removed at frame 11, then consumed), partnerTickEatShit |
+| 9 | Sleep | confirmed | partnerTickSleep |
+| 10 | Poop | confirmed | tickPartnerToilet, tickWildPoop |
+| 11 | Reaction (after eating, before sleeping, after evolving) | likely | partnerHandleFoodFeed, partnerTickSleep, EVL_tickEvoSequence end, DOOA_tickRebirth |
+| 12 | Reaction (evolution climax, MP training, after wild poop, dissolving) | likely | EVL_tickEvoSequence, TRN2_tickMpTraining, tickWildPoop, DOOA_tickDissolve |
+| 13 | Refuse item | confirmed | partnerTickFeedItem: item put away without being consumed |
+| 14 | Injured or sick | confirmed | updateConditionAnimation: condition injured/sick |
+| 15 | Hungry | confirmed | updateConditionAnimation: condition hungry |
+| 16 | Needs toilet | confirmed | updateConditionAnimation: condition poopy |
+| 17 | Sleepy | confirmed | updateConditionAnimation: condition sleepy |
+| 18 | Tired | confirmed | updateConditionAnimation: condition tired; end of training sessions |
+| 19 | Unhappy condition | confirmed | updateConditionAnimation: condition unhappy; BTL_tickSenileState |
+| 22 | Brains training | likely | TRN_tickBrainsTraining |
+| 27 | HP training | likely | TRN_tickHpTraining, TRN2_tickHpTraining |
+| 28 | Curling aim | likely | KAR_beginAiming; also DOOA_tickRebirth |
+| 29 | Curling throw | likely | KAR_beginThrow |
+| 30 | Curling result | likely | KAR_tickMatchState, KAR_moveMatchCamera |
+| 31 | Curling throw (second) | likely | KAR_beginThrow |
+| 32 | Curling result (second) | likely | KAR_tickMatchState, KAR_moveMatchCamera |
+| 33 | Battle stance | confirmed | loadBattleData, BTL_handlePartnerMoveCommand, battle start |
+| 34 | Stunned | confirmed | BTL_tickStunState, STD_tickStunState, VS__tickDigimonStun |
+| 35 | Recover from flattened | likely | BTL_tickEnemyAI when the flattened status ends; also curling aiming and camera chases; the game zeroes sideways root motion for this ID |
+| 36 | Retreat / flee | likely | BTL_handleBattleIntro (bystanders flee), after revive in battle; the game zeroes sideways root motion |
+| 37 | Block | confirmed | BTL_tickAttackHits sets FIGHTER_FLAG_BLOCKING; defense training |
+| 40 | Hit from the front | confirmed | BTL_handleHitReaction: attacker within 90 degrees of facing |
+| 41 | Hit from behind | confirmed | BTL_handleHitReaction: attacker behind |
+| 42 | Victory | confirmed | BTL_handleVictorySequence, STD_tickChampionScene |
+| 43 | Faint | confirmed | BTL_faintDigimon, STD_faintDigimon |
+| 44 | Revive | confirmed | handleRestore at 0 HP, DOOA_tickDissolve, battle revive |
+
+**Player character (resource ID 0, its own animation set):**
+
+| ID | Name | Confidence | Evidence (game functions) |
+|---|---|---|---|
+| 0 | Idle | confirmed | tamerTickIdle, tamerTickWalkingState |
+| 1 | Battle stance | confirmed | loadBattleData, tamerTickBattle |
+| 2 | Walk | confirmed | tamerTickWalkingState |
+| 3 | Run | confirmed | tamerTickWalkingState |
+| 5 | Hold out item | likely | partnerTickFeedItem (tamer offers the item) |
+| 6 | Throw item | confirmed | startThrowingItem |
+| 7 | Praise or scold | likely | tamerTickPraiseScold |
+| 8 | Put partner to sleep | likely | partnerTickSleep (tamer) |
+| 10 | Training | likely | tamerTickTraining, tamerTickBattle |
+| 12 | Pick up item | confirmed | tamerTickPickupItem |
+| 14 | Battle command | likely | handleCommands |
+| 38 | Praise | likely | tamerTickPraiseScold |
+| 39 | Scold | likely | tamerTickPraiseScold |
+
+Coverage on the USA disc: 4,543 of 4,843 clips are named (3,760 confirmed, 783 likely). The rest are mostly IDs 21 and 23–26, which no game function starts by number; they are presumably used by map or event scripts, which are not decoded, and stay unnamed rather than guessed.
 
 ## Resource association
 

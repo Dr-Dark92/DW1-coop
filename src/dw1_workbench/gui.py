@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import html
-import math
+import struct
 import threading
 import traceback
 from pathlib import Path
 
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QPixmap, QVector3D
+from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton,
@@ -17,15 +17,17 @@ from PySide6.QtWidgets import (
 )
 
 from .catalog import Catalogue, open_catalogue
+from .characters import PARTNER_COUNT, STAGES, parse_character_table, parse_move_names
+from .clip_names import clip_name
 from .errors import Cancelled, DiscFormatError
 from .iso9660 import IsoEntry, safe_export
 from .maps import (EXIT_COLOURS, MAX_MAP_FILE, MAX_TFS_FILE, TRIGGER_COLOURS, export_background,
                    floor_grid_image, layout_zones, map_exits, map_links, parse_map, parse_map_table, parse_tfs,
                    render_background, trigger_summary, zone_links)
 from .relation_view import RelationView
-from .animation import TICKS_PER_SECOND, AnimationPlayer, SoundEvent, TextureEvent, parse_animations
-from .mmd import StaticPose, Vector3, parse_mmd_static, parse_usa_skeleton, validate_texture_materials
-from .model_view import StaticModelView
+from .animation import parse_animations
+from .animation_view import ModelAnimationPanel, ModelLoad
+from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .project import import_project, layout_from_catalogue, source_state
 from .tim import decode_tim, export_png
 
@@ -99,11 +101,11 @@ class ModelWorker(QObject):
     finished = Signal()
 
     def __init__(self, catalogue: Catalogue, executable: IsoEntry, model: IsoEntry,
-                 texture: IsoEntry, resource_id: int):
+                 texture: IsoEntry, resource_id: int, label: str = ""):
         super().__init__()
         self.catalogue = catalogue
         self.executable, self.model, self.texture = executable, model, texture
-        self.resource_id = resource_id
+        self.resource_id, self.label = resource_id, label
         self.cancel_event = threading.Event()
 
     def request_cancel(self):
@@ -129,17 +131,32 @@ class ModelWorker(QObject):
                 raise Cancelled("Model preview cancelled.")
             self.progress.emit(70, "Validating geometry and materials")
             skeleton = parse_usa_skeleton(executable, self.resource_id)
-            model = parse_mmd_static(model_data, skeleton, self.cancel_event.is_set)
             first = decode_tim(texture_data)
-            used_palettes = validate_texture_materials(model, first)
             palettes = tuple(decode_tim(texture_data, index).image for index in range(first.palette_count))
+            try:
+                model = parse_mmd_static(model_data, skeleton, self.cancel_event.is_set)
+                used_palettes, geometry_error = validate_texture_materials(model, first), None
+            except DiscFormatError as exc:
+                # Clips do not depend on geometry, so they are still listed for unsupported models.
+                model, used_palettes, geometry_error = None, (), str(exc)
             self.progress.emit(90, "Reading animation clips")
             try:
-                clips, clip_error = parse_animations(model_data, model.animation_offset, len(skeleton)), None
+                if len(model_data) < 8:
+                    raise DiscFormatError("MMD header is truncated.")
+                animation_offset = struct.unpack_from("<I", model_data, 4)[0]
+                clips, clip_error = tuple(parse_animations(model_data, animation_offset, len(skeleton))), None
             except DiscFormatError as exc:
-                clips, clip_error = [], str(exc)
-            self.progress.emit(100, "Static model ready")
-            self.succeeded.emit((model, palettes, first.clut_y, used_palettes, first.bits_per_pixel, clips, clip_error))
+                clips, clip_error = (), str(exc)
+            try:
+                character = parse_character_table(executable)[self.resource_id]
+                move_names = parse_move_names(executable)
+                names = {clip.index: name for clip in clips if clip is not None
+                         if (name := clip_name(clip.index, self.resource_id, character.moves, move_names))}
+            except DiscFormatError:
+                names = {}
+            self.progress.emit(100, "Model ready")
+            self.succeeded.emit(ModelLoad(self.label, model, geometry_error, palettes, first.clut_y, used_palettes,
+                                          first.bits_per_pixel, len(skeleton), clips, clip_error, names))
         except Cancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
@@ -252,6 +269,9 @@ class Workspace(QWidget):
         self.model_thread: QThread | None = None
         self.model_worker: ModelWorker | None = None
         self.model_progress: QProgressDialog | None = None
+        self._model_panel = None
+        self._pending_model = None  # (character, panel) to load once the running load stops
+        self._closing = False
         self.relation_thread: QThread | None = None
         self.relation_worker: RelationWorker | None = None
         self.relation_progress: QProgressDialog | None = None
@@ -259,12 +279,7 @@ class Workspace(QWidget):
         self.tabs.addTab(self._overview(), "Overview")
         self.tabs.addTab(self._disc_files(), "Disc Files")
         self.tabs.addTab(self._characters(), "Characters and Digimon")
-        self.tabs.addTab(UnsupportedPage("Animations", "Character animation clips are decoded from each MMD and played "
-                                         "per model: open Characters and Digimon, select an entry, and use Load model "
-                                         "and animations. Clips follow the game's frame-by-frame stepping and match an "
-                                         "independent converter for all 4,843 clips of the 178 models. Sound cues are "
-                                         "listed but not played; clip names are not established, so clips are shown by "
-                                         "index."), "Animations")
+        self.tabs.addTab(self._animations(), "Animations")
         self.tabs.addTab(self._textures(), "Textures")
         self.tabs.addTab(self._maps(), "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
@@ -310,6 +325,89 @@ class Workspace(QWidget):
         layout.addLayout(buttons); layout.addWidget(self.file_table)
         return page
 
+    def _animations(self):
+        page, layout = QWidget(), QVBoxLayout(); page.setLayout(layout)
+        animated = [row for row in self.rows if row["detected_format"] == "DW1 character resource entry"
+                    and self._character_related(row, "model_container") is not None]
+        if not animated:
+            layout.addWidget(QLabel("No verified character models are catalogued, so there are no animation clips to show."))
+            layout.addStretch()
+            return page
+        info = QLabel("Animation clips decoded from each Digimon's MMD and played with the game's frame-by-frame "
+                      "stepping; all 4,843 clips of the 178 models match an independent converter. Select a Digimon "
+                      "to load it, then pick a clip. Clip names come from how the game code uses each animation ID "
+                      "(hover a row for the evidence); technique clips use the game's technique names. Sound cues are "
+                      "counted, not played. Models whose geometry is unsupported list their clips only.")
+        info.setWordWrap(True); layout.addWidget(info)
+        self.animation_search = QLineEdit(); self.animation_search.setPlaceholderText("Find a Digimon (e.g. Agumon, AGUM)")
+        self.animation_search.setClearButtonEnabled(True); self.animation_search.textChanged.connect(self._filter_animation_models)
+        self.animation_stage = QComboBox()
+        self.animation_stage.addItems(["All stages", *STAGES.values(), "No stage"])
+        self.animation_stage.currentIndexChanged.connect(self._filter_animation_models)
+        self.animation_partner = QCheckBox("Partner range only (IDs 1–65)")
+        self.animation_partner.setToolTip("Resource IDs below dw_decomp's NUM_PARTNER_DIGIMON (66); ID 0 is the player character.")
+        self.animation_partner.toggled.connect(self._filter_animation_models)
+        self.animation_models = QTableWidget(len(animated), 4)
+        self.animation_models.setHorizontalHeaderLabels(["ID", "Display name", "Internal name", "Stage"])
+        self.animation_models.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.animation_models.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.animation_models.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.animation_models.verticalHeader().setVisible(False)
+        header = self.animation_models.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._animation_rows = animated
+        stages = self._character_stages()
+        for index, row in enumerate(animated):
+            label = self.labels.get((row["id"], "display_name"))
+            values = (row["original_path"].split("/")[-2], label["value"] if label else "not recorded",
+                      row["original_path"].split("/")[-1], stages.get(row["id"]) or "—")
+            for column, value in enumerate(values):
+                self.animation_models.setItem(index, column, QTableWidgetItem(value))
+        self.animation_models.currentCellChanged.connect(self._animation_model_selected)
+        self.animation_panel = ModelAnimationPanel(clip_table=True)
+        self.animation_panel.model_status.setText("Select a Digimon to load its model and animation clips.")
+        left = QWidget(); left_layout = QVBoxLayout(left); left_layout.setContentsMargins(0, 0, 0, 0)
+        filters = QHBoxLayout(); filters.addWidget(self.animation_stage); filters.addWidget(self.animation_partner)
+        left_layout.addWidget(self.animation_search); left_layout.addLayout(filters)
+        left_layout.addWidget(self.animation_models)
+        split = QSplitter(); split.addWidget(left); split.addWidget(self.animation_panel)
+        split.setStretchFactor(1, 3); split.setSizes([420, 880])
+        layout.addWidget(split, 1)
+        return page
+
+    def _animation_model_selected(self, row, *_):
+        if 0 <= row < len(self._animation_rows):
+            self._load_character_model(self._animation_rows[row], self.animation_panel, show_dialog=False)
+
+    def _filter_animation_models(self, *_):
+        needle = self.animation_search.text().strip().lower()
+        stage = self.animation_stage.currentText()
+        partner_only = self.animation_partner.isChecked()
+        for index in range(self.animation_models.rowCount()):
+            cells = [self.animation_models.item(index, column).text() for column in range(4)]
+            visible = (not needle or any(needle in cell.lower() for cell in cells[:3]))
+            visible &= stage == "All stages" or cells[3] == stage or (stage == "No stage" and cells[3] == "—")
+            visible &= not partner_only or 0 < int(cells[0]) < PARTNER_COUNT
+            self.animation_models.setRowHidden(index, not visible)
+
+    def _character_stages(self):
+        """Stage per character row: catalogue label, or the executable's level byte for older projects."""
+        if getattr(self, "_stages", None) is None:
+            rows = [row for row in self.rows if row["detected_format"] == "DW1 character resource entry"]
+            self._stages = {row["id"]: label["value"] for row in rows
+                            if (label := self.labels.get((row["id"], "stage")))}
+            if rows and not self._stages:
+                try:
+                    executable = next(r for r in self.rows if r["original_path"] == rows[0]["parent_path"]
+                                      and r["offset"] is None)
+                    entries = {entry.resource_id: entry for entry in
+                               parse_character_table(self._read_row(executable, PREVIEW_LIMIT))}
+                    self._stages = {row["id"]: entries[int(row["original_path"].split("/")[-2])].stage for row in rows}
+                except Exception:
+                    self._stages = {}
+        return self._stages
+
     def _characters(self):
         page, layout = QWidget(), QVBoxLayout(); page.setLayout(layout)
         characters = [row for row in self.rows if row["detected_format"] == "DW1 character resource entry"]
@@ -322,8 +420,10 @@ class Workspace(QWidget):
                       "slots. Static models (151 of 178 supported) and their animation clips can be loaded and played; "
                       "both were verified against an independent converter.")
         info.setWordWrap(True); layout.addWidget(info)
-        self.character_table = QTableWidget(len(characters), 5)
-        self.character_table.setHorizontalHeaderLabels(["Resource ID", "Display name", "Internal name", "Model container", "Texture resource"])
+        self.character_table = QTableWidget(len(characters), 6)
+        self.character_table.setHorizontalHeaderLabels(["Resource ID", "Display name", "Internal name", "Stage",
+                                                        "Model container", "Texture resource"])
+        stages = self._character_stages()
         for index, row in enumerate(characters):
             resource_id = row["original_path"].split("/")[-2]
             name = row["original_path"].split("/")[-1]
@@ -333,12 +433,12 @@ class Workspace(QWidget):
                        if association["source_id"] == row["id"] and association["target_id"] in self.rows_by_id}
             model = related.get("model_container")
             texture = related.get("texture")
-            values = (resource_id, label["value"] if label else "not recorded", name,
+            values = (resource_id, label["value"] if label else "not recorded", name, stages.get(row["id"]) or "—",
                       model["original_path"] if model else "unsupported / absent",
                       texture["original_path"] if texture else "unavailable")
             for column, value in enumerate(values):
                 self.character_table.setItem(index, column, QTableWidgetItem(str(value)))
-        self.character_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.character_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.character_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.character_preview = QLabel("Select a verified resource entry")
         self.character_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.character_preview.setMinimumSize(320, 240)
@@ -346,43 +446,9 @@ class Workspace(QWidget):
         self.character_table.itemSelectionChanged.connect(self._preview_character)
         export = QPushButton("Export associated texture PNG + provenance metadata…")
         export.clicked.connect(self._export_character_texture)
-        model_page = QWidget(); model_layout = QVBoxLayout(model_page)
-        self.model_view = StaticModelView()
-        model_controls = QHBoxLayout()
-        self.model_mode = QComboBox(); self.model_mode.addItems(["Textured", "Untextured"])
-        self.model_wireframe = QCheckBox("Wireframe overlay")
-        model_reset = QPushButton("Reset view")
-        model_load = QPushButton("Load model and animations")
-        self.model_mode.currentIndexChanged.connect(self._update_model_modes)
-        self.model_wireframe.toggled.connect(self._update_model_modes)
-        model_reset.clicked.connect(self.model_view.reset_view)
-        model_load.clicked.connect(self._load_character_model)
-        model_controls.addWidget(self.model_mode); model_controls.addWidget(self.model_wireframe)
-        model_controls.addWidget(model_reset); model_controls.addStretch(); model_controls.addWidget(model_load)
-        self.model_status = QLabel("Model geometry is loaded on request in a cancellable background worker.")
-        self.model_status.setWordWrap(True)
-        anim_controls = QHBoxLayout()
-        self.anim_clip = QComboBox(); self.anim_clip.setEnabled(False)
-        self.anim_clip.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.anim_clip.currentIndexChanged.connect(self._select_clip)
-        self.anim_play = QPushButton("Play"); self.anim_play.clicked.connect(self._toggle_animation)
-        anim_step = QPushButton("Step"); anim_step.clicked.connect(self._step_animation)
-        anim_restart = QPushButton("Restart"); anim_restart.clicked.connect(self._restart_animation)
-        self.anim_root = QCheckBox("Apply root motion"); self.anim_root.toggled.connect(self._restart_animation)
-        for widget in (anim_step, anim_restart, self.anim_play, self.anim_root):
-            widget.setEnabled(False)
-        self._anim_widgets = (anim_step, anim_restart, self.anim_play, self.anim_root)
-        anim_controls.addWidget(QLabel("Animation")); anim_controls.addWidget(self.anim_clip)
-        anim_controls.addWidget(self.anim_play); anim_controls.addWidget(anim_step); anim_controls.addWidget(anim_restart)
-        anim_controls.addWidget(self.anim_root); anim_controls.addStretch()
-        self.anim_status = QLabel("Load a model to play its animation clips.")
-        self.anim_status.setWordWrap(True)
-        self.anim_timer = QTimer(self); self.anim_timer.setInterval(1000 // TICKS_PER_SECOND)
-        self.anim_timer.timeout.connect(self._step_animation)
-        self._anim_clips, self._anim_player = [], None
-        model_layout.addLayout(model_controls); model_layout.addWidget(self.model_view, 1)
-        model_layout.addLayout(anim_controls); model_layout.addWidget(self.anim_status)
-        model_layout.addWidget(self.model_status)
+        model_page = ModelAnimationPanel("Load model and animations")
+        model_page.load_requested.connect(self._load_character_model)
+        self.character_panel = model_page
         texture_page = QWidget(); texture_layout = QVBoxLayout(texture_page)
         texture_layout.addWidget(self.character_preview); texture_layout.addWidget(self.character_details)
         preview_tabs = QTabWidget(); preview_tabs.addTab(model_page, "Model and animation"); preview_tabs.addTab(texture_page, "Texture")
@@ -783,15 +849,25 @@ class Workspace(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Background export failed", str(exc))
 
-    def _update_model_modes(self):
-        self.model_view.set_modes(self.model_mode.currentIndex() == 0,
-                                  self.model_wireframe.isChecked())
+    def _character_label(self, character):
+        label = self.labels.get((character["id"], "display_name"))
+        name = character["original_path"].split("/")[-1]
+        return f"{label['value']} ({name})" if label else name
 
-    def _load_character_model(self):
+    def _load_character_model(self, character=None, panel=None, show_dialog=True):
         try:
-            if self.model_thread and self.model_thread.isRunning():
-                raise ValueError("A model preview is already loading.")
-            character = self._selected_character()
+            # Busy until _model_finished has run: the thread stops running slightly before that slot is
+            # delivered, and starting a second load in that gap would orphan the first thread.
+            if self.model_thread is not None:
+                if show_dialog:
+                    raise ValueError("A model preview is already loading.")
+                # Browsing: drop the running load and start the newest selection once it has stopped.
+                self._pending_model = (character, panel)
+                if self.model_worker is not None:
+                    self.model_worker.request_cancel()
+                return
+            character = character or self._selected_character()
+            panel = panel or self.character_panel
             model = self._character_related(character, "model_container")
             texture = self._character_related(character, "texture")
             executable = next((row for row in self.rows
@@ -799,25 +875,35 @@ class Workspace(QWidget):
             if model is None or texture is None or executable is None:
                 raise ValueError("This resource lacks a verified model, texture, or executable association.")
             resource_id = int(character["original_path"].split("/")[-2])
-            dialog = QProgressDialog("Loading static model", "Cancel", 0, 100, self)
-            dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
+            label = self._character_label(character)
+            dialog = None
+            if show_dialog:
+                dialog = QProgressDialog("Loading model and animations", "Cancel", 0, 100, self)
+                dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
+            else:
+                panel.show_message(f"Loading {label}…")
             thread = QThread(self)
             worker = ModelWorker(self.catalogue, self._entry(executable), self._entry(model),
-                                 self._entry(texture), resource_id)
+                                 self._entry(texture), resource_id, label)
             worker.moveToThread(thread); thread.started.connect(worker.run)
             # Worker signals must reach bound slots of GUI-thread objects: a lambda has no
             # receiver, so PySide would run it, and its widget repaints, in the worker thread.
             worker.progress.connect(self._model_progress_changed)
-            dialog.canceled.connect(lambda: worker.request_cancel())
-            worker.succeeded.connect(self._model_loaded)
+            if dialog is not None:
+                dialog.canceled.connect(lambda: worker.request_cancel())
+            worker.succeeded.connect(panel.show_load)
             worker.failed.connect(self._model_failed)
-            worker.cancelled.connect(self.model_status.setText)
+            worker.cancelled.connect(panel.show_message)
             worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater)
             thread.finished.connect(thread.deleteLater); thread.finished.connect(self._model_finished)
             self.model_thread, self.model_worker, self.model_progress = thread, worker, dialog
+            self._model_panel = panel
             thread.start()
         except Exception as exc:
-            QMessageBox.critical(self, "Model preview failed", str(exc))
+            if show_dialog:
+                QMessageBox.critical(self, "Model preview failed", str(exc))
+            else:
+                (panel or self.character_panel).show_message(f"Model preview unavailable: {exc}")
 
     @Slot(int, str)
     def _model_progress_changed(self, value, message):
@@ -826,123 +912,16 @@ class Workspace(QWidget):
 
     @Slot(str)
     def _model_failed(self, message):
-        self.model_status.setText(f"Static preview unsupported: {message}")
-
-    @Slot(object)
-    def _model_loaded(self, result):
-        model, images, clut_y, palettes, bits_per_pixel, clips, clip_error = result
-        self.anim_timer.stop()
-        self._anim_images, self._anim_texels_per_unit = tuple(images), 16 // bits_per_pixel
-        qimages = tuple(ImageQt(image).copy() for image in images)
-        self.model_view.set_model(model, qimages, clut_y)
-        self.model_status.setText(
-            f"Experimental static preview — {len(model.objects)} objects, {model.vertex_count} vertices, "
-            f"{model.primitive_count} primitives / {model.triangle_count} triangles; verified palettes "
-            f"{', '.join(map(str, palettes))}. {model.warnings[0]}")
-        self._anim_clips = [clip for clip in clips if clip is not None]
-        self.anim_clip.blockSignals(True); self.anim_clip.clear()
-        for clip in self._anim_clips:
-            self.anim_clip.addItem(f"Clip {clip.index} — {clip.frame_count} frames"
-                                   f"{', loops' if clip.loops_forever else ''}", clip.index)
-        self.anim_clip.blockSignals(False)
-        enabled = bool(self._anim_clips)
-        self.anim_clip.setEnabled(enabled)
-        for widget in self._anim_widgets:
-            widget.setEnabled(enabled)
-        self._anim_player = None
-        if clip_error:
-            self.anim_status.setText(f"Animation clips unsupported: {clip_error}")
-        elif enabled:
-            self._select_clip(0)
-        else:
-            self.anim_status.setText("This model has no animation clips.")
-
-    def _select_clip(self, index):
-        if not 0 <= index < len(self._anim_clips):
-            return
-        self._anim_player = AnimationPlayer(self._anim_clips[index], len(self.model_view.model.skeleton))
-        self._restart_animation()
-
-    def _restart_animation(self, *_):
-        if self._anim_player is None:
-            return
-        self._anim_player.reset()
-        self._anim_events_seen, self._anim_offset = 0, [0.0, 0.0, 0.0]
-        self._anim_working = [image.copy() for image in self._anim_images]
-        self.model_view.set_palettes(tuple(ImageQt(image).copy() for image in self._anim_working))
-        self._show_animation_pose()
-
-    def _toggle_animation(self):
-        if self.anim_timer.isActive():
-            self.anim_timer.stop(); self.anim_play.setText("Play")
-        elif self._anim_player is not None:
-            if not self._anim_player.running:
-                self._restart_animation()
-            self.anim_timer.start(); self.anim_play.setText("Pause")
-
-    def _step_animation(self):
-        player = self._anim_player
-        if player is None:
-            return
-        if not player.running:
-            self.anim_timer.stop(); self.anim_play.setText("Play")
-            return
-        player.tick()
-        if self.anim_root.isChecked():
-            # applyRootMomentum rotates the root velocity by the root bone's matrix
-            root = player.pose(0)
-            matrix = StaticModelView._local_matrix(self._static_pose(root, translation=(0, 0, 0)))
-            moved = matrix.map(QVector3D(*player.root_velocity))
-            self._anim_offset = [self._anim_offset[0] + moved.x(), self._anim_offset[1] + moved.y(),
-                                 self._anim_offset[2] + moved.z()]
-        new_events = player.events[self._anim_events_seen:]
-        self._anim_events_seen = len(player.events)
-        copies = [event for event in new_events if isinstance(event, TextureEvent)]
-        for event in copies:
-            self._apply_texture_copy(event)
-        if copies:
-            self.model_view.set_palettes(tuple(ImageQt(image).copy() for image in self._anim_working))
-        self._show_animation_pose()
-
-    def _apply_texture_copy(self, event):
-        # The game moves a VRAM rectangle (16-bit units) inside the model's texture; at 4 bpp a unit is 4 texels.
-        unit = self._anim_texels_per_unit
-        left, top = event.source[0] * unit, event.source[1]
-        box = (left, top, left + event.size[0] * unit, top + event.size[1])
-        target = (event.destination[0] * unit, event.destination[1])
-        for image in self._anim_working:
-            width, height = image.size
-            if box[2] <= width and box[3] <= height and target[0] + box[2] - box[0] <= width \
-                    and target[1] + box[3] - box[1] <= height:
-                image.paste(image.crop(box), target)
-
-    @staticmethod
-    def _static_pose(pose, translation=None):
-        angle = 2 * math.pi / 4096
-        return StaticPose(Vector3(*(value / 4096 for value in pose.scale)),
-                          Vector3(*(value * angle for value in pose.rotation)),
-                          Vector3(*(float(value) for value in (translation or pose.translation))))
-
-    def _show_animation_pose(self):
-        player = self._anim_player
-        poses = [self._static_pose(player.pose(bone)) for bone in range(player.bone_count)]
-        poses[0] = self._static_pose(player.pose(0), translation=(0, 0, 0))
-        self.model_view.set_pose(poses, tuple(self._anim_offset))
-        sounds = sum(isinstance(event, SoundEvent) for event in player.events)
-        copies = sum(isinstance(event, TextureEvent) for event in player.events)
-        clip = player.clip
-        state = "finished" if not player.running else ("playing" if self.anim_timer.isActive() else "paused")
-        self.anim_status.setText(
-            f"Clip {clip.index}: frame {player.frame}/{clip.frame_count}, tick {player.ticks} "
-            f"({player.ticks / TICKS_PER_SECOND:.2f} s at an assumed {TICKS_PER_SECOND} ticks/s), {state}"
-            f"{'; loops forever' if clip.loops_forever else ''}. Events so far: {sounds} sound cue(s) (not played), "
-            f"{copies} texture copy(ies) applied. Stepping follows the game's integer momentum code.")
+        self._model_panel.show_message(f"Model preview unsupported: {message}")
 
     @Slot()
     def _model_finished(self):
         if self.model_progress:
             self.model_progress.close(); self.model_progress.deleteLater()
         self.model_progress = None; self.model_worker = None; self.model_thread = None
+        pending, self._pending_model = self._pending_model, None
+        if pending is not None and not self._closing:
+            self._load_character_model(*pending, show_dialog=False)
         self.background_finished.emit()
 
     def _selected_row(self):
@@ -1036,6 +1015,7 @@ class Workspace(QWidget):
         self.background_finished.emit()
 
     def cancel_background(self):
+        self._closing, self._pending_model = True, None
         if self.export_worker:
             self.export_worker.request_cancel()
         if self.model_worker:
