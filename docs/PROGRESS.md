@@ -20,7 +20,8 @@
 - Static Agumon (ID 3) verified against `DW1ModelConverter` `17d1a19` output and confirmed visually on a desktop display.
 - Worker progress and results delivered to the GUI thread through bound slots (fixes a Wayland segfault that offscreen tests did not show).
 - USA map table, TFS background, and MAP scene parsing; maps catalogued with area-name zones, scene/background files, warp links, and Digimon-placement links.
-- Maps and Zones browser: zone tree, background preview per palette with PNG + provenance export, scene data, followable warps, and floor grid.
+- Maps and Zones browser: searchable zone tree, background preview per palette with PNG + provenance export, scene data, followable outbound warps (walk-through exit and direction, or script/table-only) and inbound "linked from" maps, and a colour-coded tile-trigger grid.
+- Zone relation map: 65 zones linked by warps, laid out by exit direction, with pan/zoom and open-in-browser, built in a cancellable background worker.
 - All 241 file-backed maps verified against `DW1ModelConverter` `17d1a19` map output.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
@@ -34,7 +35,7 @@
 - Executable analysis: identity/header, character resource tables, and skeleton tables only.
 - MMD static geometry: one model (Agumon) verified; the other 177 are not yet compared and may be rejected if they use other primitive modes.
 - DW1 animation data: initial pose only.
-- Maps: sprite objects are parsed but not rendered; embedded map TIMs are located, not previewed; door models are not shown; the floor grid and palette time-of-day meanings are unverified.
+- Maps: sprite objects are parsed but not rendered; embedded map TIMs are located, not previewed; door models are not shown; palette time-of-day meaning is unverified; script-driven transitions are missing from the relation map until map scripts are decoded.
 
 ## Not implemented
 
@@ -42,7 +43,7 @@
 - Model export (GLB/glTF with provenance).
 - Standalone TMD decoding.
 - DW1 animation keyframes and playback.
-- Map scripts, 3D map geometry, and collision semantics.
+- Map scripts (needed for script-driven transitions) and 3D map geometry.
 - Audio/video decoding.
 - Disassembly/decompilation integration.
 - Co-op gameplay, native runtime, or networking.
@@ -72,6 +73,6 @@ Maps and zones, checked from the same image on 2026-11-02:
 
 - a fresh import catalogued 244 map records (241 decoded, 3 without files) in 65 zones, 449 warp links, and 709 Digimon-placement links; resource count 1,422;
 - all 241 file-backed maps and 512 background images matched the converter's map export (details in [FORMATS.md](FORMATS.md#maps-and-zones));
-- the Maps and Zones tab was exercised offscreen on that project (zone tree, background, palettes, scene data, warp navigation, floor grid, missing-file entries). It has not yet been inspected on a desktop display.
+- the Maps and Zones tab was inspected on the desktop by the user, who could not find zones linked south of Green Gym. Cause: only the warp table was shown, and Green Gym's other routes are script-driven or inbound. Search, inbound links, exit directions, the decoded tile-trigger grid, and the zone relation map were added and exercised offscreen; the updated tab awaits a desktop recheck.
 
 This validates this supplied USA image and implemented paths, not every retail revision, region, malformed disc, path-table-only entry, other MMD models, or animation. Automated coverage remains synthetic and contains no proprietary data; the converter comparison is a manual check kept outside Git.

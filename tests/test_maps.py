@@ -3,9 +3,11 @@ import struct
 import pytest
 
 from dw1_workbench.errors import DiscFormatError, ValidationError
-from dw1_workbench.maps import (AREA_NAME_POINTERS, DOOR_TABLE_OFFSET, EMPTY_TILE, MAP_TABLE_OFFSET,
-                                TOILET_TABLE_OFFSET, USA_LOAD_ADDRESS, export_background, parse_map,
-                                parse_map_table, parse_tfs, render_background, tfs_layout)
+from dw1_workbench.maps import (AREA_NAME_POINTERS, DOOR_TABLE_OFFSET, EMPTY_TILE, EXIT_COLOURS, MAP_TABLE_OFFSET,
+                                TOILET_TABLE_OFFSET, TRIGGER_COLOURS, USA_LOAD_ADDRESS, export_background,
+                                floor_grid_image, grid_direction, layout_zones, map_exits, map_links,
+                                parse_map, parse_map_table, parse_tfs, render_background, tfs_layout,
+                                trigger_kind, zone_links)
 
 AREA_STRINGS = 0x9A400  # after the map table, which ends at 0x992d4 + 255 * 16 = 0x9a2c4
 
@@ -39,7 +41,8 @@ def make_tfs(tiles=2, palettes=1, extra=0):
     return bytes(data + bytes(extra))
 
 
-def make_map(*, tiles=(0, 1), width=2, height=1, digimon=1, waypoints=2, tim=b"\x10\x00\x00\x00", warps=None):
+def make_map(*, tiles=(0, 1), width=2, height=1, digimon=1, waypoints=2, tim=b"\x10\x00\x00\x00", warps=None,
+             floor=None):
     header_size = 4 + 4 + 4 + 4 + 4  # setup, one 8-bpp image, objects, elements, floor
     tim_offset = header_size
     setup_offset = tim_offset + 8
@@ -60,7 +63,7 @@ def make_map(*, tiles=(0, 1), width=2, height=1, digimon=1, waypoints=2, tim=b"\
                                 *range(1, 9), 100, 2, 0, 46, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, waypoints, *range(8))
         elements += b"".join(struct.pack("<3h", i, 0, -i) for i in range(waypoints))
     floor_offset = elements_offset + len(elements)
-    floor = bytes([0, 128]) * 5000
+    floor = floor or bytes([0, 128]) * 5000
     header = struct.pack("<6I", setup_offset, tim_offset, object_offset, elements_offset, floor_offset, 0)[:header_size]
     return header + tim + bytes(4) + setup + objects + elements + floor
 
@@ -170,3 +173,63 @@ def test_background_export_never_overwrites(tmp_path):
     assert target.exists() and target.with_suffix(".png.json").exists()
     with pytest.raises(ValidationError):
         export_background(image, target, {"map": "TEST01"})
+
+
+def floor_with_exit(slot, rows, value_fill=0):
+    grid = bytearray([value_fill]) * 10000
+    for row in rows:
+        for column in range(45, 55):
+            grid[row * 100 + column] = 110 + slot
+    return bytes(grid)
+
+
+@pytest.mark.parametrize(("value", "kind"), [
+    (0, "walkable"), (128, "blocked"), (51, "step script"), (79, "step script"), (80, "interact script"),
+    (109, "interact script"), (110, "exit"), (119, "exit"), (120, "toilet"), (30, "unknown"),
+])
+def test_trigger_kinds_follow_the_game_tile_rules(value, kind):
+    assert trigger_kind(value) == kind
+
+
+def test_grid_direction_treats_row_zero_as_north():
+    assert grid_direction(50, 2) == "north" and grid_direction(50, 97) == "south"
+    assert grid_direction(97, 50) == "east" and grid_direction(2, 50) == "west"
+    assert grid_direction(90, 90) == "south-east" and grid_direction(50, 50) == "centre"
+
+
+def test_map_exits_mark_walk_through_and_table_only_warps():
+    entry = parse_map_table(make_executable())[0]
+    warps = [(1, 0), (0, 2)] + [(0xFFFF, 0)] * 8
+    scene = parse_map(make_map(warps=warps, floor=floor_with_exit(0, (96, 97))), entry)
+    south, scripted = map_exits(scene)
+    assert (south.slot, south.walk_through, south.cell_count, south.direction) == (0, True, 20, "south")
+    assert (scripted.slot, scripted.walk_through, scripted.direction) == (1, False, None)
+
+
+def test_zone_links_merge_both_directions_and_flip_compass():
+    entries = parse_map_table(make_executable())
+    woods = parse_map(make_map(warps=[(1, 0)] + [(0xFFFF, 0)] * 9, floor=floor_with_exit(0, (2, 3))), entries[0])
+    town_entry = type(entries[1])(**{**entries[1].__dict__, "image_count": 1})
+    town = parse_map(make_map(warps=[(0, 0)] + [(0xFFFF, 0)] * 9), town_entry)
+    links = map_links(entries, {0: woods, 1: town})
+    (zone,) = zone_links(entries, links)
+    assert (zone.source, zone.target, zone.walk_through, zone.scripted) == ("Test Town", "Test Woods", 1, 1)
+    # Woods exits north to Town, so from Town (the sorted first zone) Woods lies south.
+    assert zone.directions == {"south": 1}
+
+
+def test_layout_is_deterministic_and_follows_exit_direction():
+    entries = parse_map_table(make_executable())
+    woods = parse_map(make_map(warps=[(1, 0)] + [(0xFFFF, 0)] * 9, floor=floor_with_exit(0, (96, 97))), entries[0])
+    links = zone_links(entries, map_links(entries, {0: woods}))
+    first = layout_zones(["Test Town", "Test Woods"], links)
+    assert first == layout_zones(["Test Town", "Test Woods"], links)
+    # Woods' exit to Town is on its south edge, so Town is placed below Woods (screen y grows downward).
+    assert first["Test Town"][1] > first["Test Woods"][1]
+
+
+def test_floor_grid_image_colours_triggers_and_exit_slots():
+    entry = parse_map_table(make_executable())[0]
+    scene = parse_map(make_map(floor=floor_with_exit(3, (50,), value_fill=128)), entry)
+    image = floor_grid_image(scene)
+    assert image.getpixel((50, 50)) == EXIT_COLOURS[3] and image.getpixel((0, 0)) == TRIGGER_COLOURS["blocked"]

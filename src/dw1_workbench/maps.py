@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -301,6 +302,176 @@ def render_background(tfs: TfsFile, setup: MapSetup, palette_index: int = 0) -> 
     return canvas
 
 
+# Floor-grid trigger values, from DW1-SydPatches b9671fa (Tamer.cpp tick, Map.cpp getTileTrigger):
+# 0x80 impassable; 50-79 step-on script; 80-109 interact (cross button) script;
+# 110-119 walk-through exit using warp slot value-110; 120 toilet script.
+BLOCKED = 0x80
+WARP_TRIGGER = 110
+
+
+def trigger_kind(value: int) -> str:
+    if value == 0:
+        return "walkable"
+    if value == BLOCKED:
+        return "blocked"
+    if 50 <= value < 80:
+        return "step script"
+    if 80 <= value < 110:
+        return "interact script"
+    if WARP_TRIGGER <= value < WARP_TRIGGER + SLOTS:
+        return "exit"
+    if value == 120:
+        return "toilet"
+    return "unknown"
+
+
+DIRECTIONS = ("north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west")
+
+
+def grid_direction(column: float, row: float) -> str:
+    """Compass label for a grid position; row 0 is the far (+Z, screen-top) edge, called north."""
+    dx, dy = column - 49.5, row - 49.5
+    if max(abs(dx), abs(dy)) < 10:
+        return "centre"
+    angle = math.degrees(math.atan2(dx, -dy)) % 360
+    return DIRECTIONS[int((angle + 22.5) // 45) % 8]
+
+
+@dataclass(frozen=True)
+class MapExit:
+    slot: int
+    warp: Warp
+    cell_count: int
+    centroid: tuple[float, float] | None
+    direction: str | None
+
+    @property
+    def walk_through(self) -> bool:
+        return self.cell_count > 0
+
+
+def map_exits(scene: MapScene) -> tuple[MapExit, ...]:
+    """Every used warp slot, with the floor-grid exit tiles that trigger it (none means script or unused)."""
+    cells: dict[int, list[tuple[int, int]]] = {}
+    for index, value in enumerate(scene.floor_grid):
+        if WARP_TRIGGER <= value < WARP_TRIGGER + SLOTS:
+            cells.setdefault(value - WARP_TRIGGER, []).append((index % FLOOR_GRID, index // FLOOR_GRID))
+    exits = []
+    for slot, warp in scene.used_warps:
+        tiles = cells.get(slot, [])
+        if tiles:
+            centroid = (sum(x for x, _ in tiles) / len(tiles), sum(y for _, y in tiles) / len(tiles))
+            exits.append(MapExit(slot, warp, len(tiles), centroid, grid_direction(*centroid)))
+        else:
+            exits.append(MapExit(slot, warp, 0, None, None))
+    return tuple(exits)
+
+
+def trigger_summary(scene: MapScene) -> dict[str, dict[int, int]]:
+    summary: dict[str, dict[int, int]] = {}
+    for value in scene.floor_grid:
+        kind = summary.setdefault(trigger_kind(value), {})
+        kind[value] = kind.get(value, 0) + 1
+    return summary
+
+
+@dataclass(frozen=True)
+class MapLink:
+    source: int
+    target: int
+    slot: int
+    walk_through: bool
+    direction: str | None
+
+
+@dataclass
+class ZoneLink:
+    source: str
+    target: str
+    walk_through: int = 0
+    scripted: int = 0
+    directions: dict[str, int] | None = None
+
+
+def map_links(entries: list[MapEntry], scenes: dict[int, MapScene]) -> list[MapLink]:
+    return [MapLink(index, warp_exit.warp.map_index, warp_exit.slot, warp_exit.walk_through, warp_exit.direction)
+            for index, scene in sorted(scenes.items()) for warp_exit in map_exits(scene)
+            if warp_exit.warp.map_index < len(entries) and entries[warp_exit.warp.map_index].name]
+
+
+def zone_links(entries: list[MapEntry], links: list[MapLink]) -> list[ZoneLink]:
+    """Aggregate map links into undirected links between different area-name zones."""
+    merged: dict[tuple[str, str], ZoneLink] = {}
+    for link in links:
+        source, target = entries[link.source].area_name, entries[link.target].area_name
+        if source == target:
+            continue
+        key = tuple(sorted((source, target)))
+        zone = merged.setdefault(key, ZoneLink(key[0], key[1], directions={}))
+        if link.walk_through:
+            zone.walk_through += 1
+            # store the direction as seen from key[0]; a link out of key[1] points the opposite way
+            direction = link.direction if source == key[0] else _opposite(link.direction)
+            zone.directions[direction] = zone.directions.get(direction, 0) + 1
+        else:
+            zone.scripted += 1
+    return sorted(merged.values(), key=lambda zone: (zone.source, zone.target))
+
+
+def _opposite(direction: str | None) -> str | None:
+    if direction in DIRECTIONS:
+        return DIRECTIONS[(DIRECTIONS.index(direction) + 4) % 8]
+    return direction
+
+
+def _unit(direction: str | None) -> tuple[float, float] | None:
+    if direction not in DIRECTIONS:
+        return None
+    angle = math.radians(DIRECTIONS.index(direction) * 45)
+    return math.sin(angle), -math.cos(angle)
+
+
+def layout_zones(zones: list[str], links: list[ZoneLink], iterations: int = 600) -> dict[str, tuple[float, float]]:
+    """Deterministic force layout; walk-through exits pull the neighbour toward the exit's compass direction."""
+    count = len(zones)
+    position = {zone: (math.cos(2 * math.pi * i / max(count, 1)) * 400, math.sin(2 * math.pi * i / max(count, 1)) * 400)
+                for i, zone in enumerate(zones)}
+    spring = 160.0
+    for step in range(iterations):
+        heat = 40.0 * (1 - step / iterations) + 1.0
+        force = {zone: [0.0, 0.0] for zone in zones}
+        for i, a in enumerate(zones):
+            ax, ay = position[a]
+            for b in zones[i + 1:]:
+                dx, dy = ax - position[b][0], ay - position[b][1]
+                distance_sq = max(dx * dx + dy * dy, 1.0)
+                push = spring * spring / distance_sq
+                force[a][0] += dx * push; force[a][1] += dy * push
+                force[b][0] -= dx * push; force[b][1] -= dy * push
+        for link in links:
+            (ax, ay), (bx, by) = position[link.source], position[link.target]
+            weight = 1.0 if link.walk_through else 0.4
+            dx, dy = bx - ax, by - ay
+            distance = math.hypot(dx, dy) or 1.0
+            pull = weight * (distance - spring) / distance * 0.5
+            force[link.source][0] += dx * pull; force[link.source][1] += dy * pull
+            force[link.target][0] -= dx * pull; force[link.target][1] -= dy * pull
+            if link.directions:
+                direction = max(link.directions, key=link.directions.get)
+                unit = _unit(direction)
+                if unit:
+                    tx, ty = ax + unit[0] * spring, ay + unit[1] * spring
+                    force[link.target][0] += (tx - bx) * 0.6; force[link.target][1] += (ty - by) * 0.6
+                    force[link.source][0] -= (tx - bx) * 0.6; force[link.source][1] -= (ty - by) * 0.6
+        for zone in zones:
+            fx, fy = force[zone]
+            length = math.hypot(fx, fy)
+            if length > heat:
+                fx, fy = fx / length * heat, fy / length * heat
+            position[zone] = (position[zone][0] + fx, position[zone][1] + fy)
+    return position
+
+
 def export_background(image: Image.Image, destination: Path, provenance: dict) -> tuple[Path, Path]:
     """Write a background PNG and its JSON provenance sidecar; never overwrite."""
     destination = destination.resolve()
@@ -316,9 +487,25 @@ def export_background(image: Image.Image, destination: Path, provenance: dict) -
     return destination, metadata_path
 
 
+TRIGGER_COLOURS = {
+    "walkable": (205, 205, 205), "blocked": (45, 48, 56), "step script": (230, 160, 40),
+    "interact script": (70, 140, 230), "toilet": (140, 90, 40), "unknown": (255, 0, 0),
+}
+EXIT_COLOURS = ((40, 180, 90), (200, 60, 160), (0, 190, 190), (220, 80, 60), (150, 110, 230),
+                (120, 200, 40), (240, 200, 0), (110, 70, 40), (250, 120, 170), (60, 90, 160))
+
+
+def trigger_colour(value: int) -> tuple[int, int, int]:
+    kind = trigger_kind(value)
+    return EXIT_COLOURS[value - WARP_TRIGGER] if kind == "exit" else TRIGGER_COLOURS[kind]
+
+
 def floor_grid_image(scene: MapScene) -> Image.Image:
-    """Grey-scale view of the 100x100 floor grid, one pixel per cell, values unchanged."""
-    return Image.frombytes("L", (FLOOR_GRID, FLOOR_GRID), scene.floor_grid)
+    """The 100x100 floor grid, one pixel per cell, coloured by trigger kind (exits by warp slot)."""
+    palette = bytes(channel for value in range(256) for channel in trigger_colour(value))
+    image = Image.frombytes("P", (FLOOR_GRID, FLOOR_GRID), scene.floor_grid)
+    image.putpalette(palette)
+    return image.convert("RGB")
 
 
 class _Reader:

@@ -9,7 +9,9 @@ Worked in a separate worktree at `/home/drdark/dev/DW1-coop-maps` (branched from
 - Real data outside Git: extracted inputs in `/home/drdark/dev/DW1-coop-data/converter-input-maps/`, converter output and `compare_maps.py` in `/home/drdark/dev/DW1-coop-data/converter-run-maps/`, and a fresh project with maps at `/home/drdark/dev/DW1-coop-data/maps-validation/project`.
 - Result: all 241 file-backed maps and 512 backgrounds match the converter (see `docs/FORMATS.md#maps-and-zones`).
 
-Next: inspect the Maps and Zones tab on a desktop display; then candidates are sprite-object rendering, door models, an overlay of spawns/warps/Digimon on the background (needs the camera projection), and establishing floor-grid and palette semantics.
+First desktop check: the user could not find zones linked south of Green Gym. The warp list showed only Green Gym's one walk-through exit; its other routes are script-driven (step-script tile 51 on its east edge) or inbound from File City. Added: tree search, "linked from" inbound list, exit direction and walk-through vs table-only per warp, the floor grid decoded as the tile-trigger map (SydPatches evidence) with a colour legend, and a Relation map tab (`relation_view.py`, worker in `gui.py`). 64 tests pass.
+
+Next: desktop recheck of search, inbound links, and the relation map. Then candidates are decoding map scripts (the missing transitions), sprite-object rendering, door models, and an overlay of spawns/exits/Digimon on the background (needs the camera projection).
 
 ## Converter comparison (2026-11-02, resumed)
 
