@@ -283,6 +283,20 @@ Reading rejects duplicates, more than 180 packages, members other than `bundle.j
 
 Real USA disc (2026-11-03): Rookie bundle 28 packaged and 11 skipped (1.2 MB, 1.3 s); all stages 144 packaged and 24 skipped (6.4 MB, 6.5 s); both re-imported with no changes. An In-Training bundle with Koromon's member replaced by the in-game-verified inverted palette imported only that change, and the resulting `ALLTIM.TIM` equals the one played in game.
 
+### Game rules (P6, USA)
+
+`progression.py` applies these rules to console RAM every frame while the player runs the game (Play tab: **Game rules (P6)**). Nothing on the disc or memory card changes.
+
+- **Levels 0–99.** EXP to go from level L to L+1 is (L+1)(L+20)/2. Total EXP to reach level L is L(L+1)(L+29)/6. Level 20 = 3,430 EXP, 20→21 needs 420, 98→99 needs 5,841, level 99 = 211,200.
+- **Stats per level:** +100 max HP and MP, +10 Offense, Defense, Speed and Brains. A partner never has less than its level's values (level 20: 2,000 HP/MP, 200 each). Stats trained or evolved above that are kept, and a level-up adds the gains on top. Current HP/MP rise with their maximum. The game's caps are 9,999 and 999, and level 99 (9,900 / 990) fits under them.
+- **Start:** level 20.
+- **EXP per won battle:** each enemy's class from the game's Digimon table (`DIGIMON_DATA` `0x8012CEB4`, 52 bytes, level byte +29): Rookie 10, Champion 30, Ultimate 90. Fresh and In-Training give 0 (not set yet). The total is multiplied by the enemy count: 1 ×1, 2 ×1.5, 3 ×2, 4 ×3. The game puts at most 3 enemies in a battle (`PlayerData.entityIds[4]`, slot 0 is the partner).
+- **Win detection:** `PARTNER_PARA.battles` (+84) goes up only in `startBattle`'s win branch. Enemies are read during the battle (`GAME_STATE` `0x80134F0A` ≠ 0, `ENEMY_COUNT` `0x80134D6C`, `COMBAT_DATA_PTR` → `entityIds` at +1644, `ENTITY_TABLE` types) because their slots are cleared afterwards.
+- **No aging or death:** `PARTNER_PARA` `0x80138460`: `remainingLifetime` (+72) is kept at least 360 hours, `age` (+74) held, and `PartnerEntity.lives` (+124) kept at 3. This closes natural death, death from losing the last life in battle, and lives lost to sickness.
+- **Storage:** level/EXP live in `progression.json` in the player's save folder and in `slotN.progress.json` beside each quick save. Loading a slot restores its level. Memory-card saves do not carry the level; the player's current level applies.
+
+Checked on the real game (slot 2, Native Forest): Agumon went from 81/61/71/71 and 800/601 to the level-20 values; lifetime set to 1, lives to 1 and age +5 were restored while the game ran; a replayed win over the map's two ModokiBetamon (Rookie) gave 30 EXP; a win crossing level 21 added +100/+10. Real battle (2026-11-03): the user's two Native Forest inspections taken during a fight against one Rookie ("near end battle", "end of battle") were finished with the rules on: the enemy was read as Rookie while `GAME_STATE` was 1–2, and the win gave +10 EXP (`Lv 20 · EXP 10/420`) as the game's win counter went from 1 to 2. In that desktop session the Play-tab checkbox had not been ticked, so the rules were not running there.
+
 ### Drawing offsets and the world zoom (USA)
 
 Each frame the game sets the GPU drawing offset to `DRAWING_OFFSET_X/Y` (`0x80134EC0/4`, `GsSetOrign`) and, after rendering, inserts `DR_OFFSETS[buffer]` (`0x8015DB90`, an `E5` command with the screen centre 160,120 or 160,360) at ordering-table entry 32 (`applyDrawOffset`, `src/main/main.c`). Everything deeper than entry 32 — background tiles (entry 4095) and foreground pieces (depth ≥ 35, `calcMapObjectOrder`) — is drawn at primitive + drawing offset; characters (entries 9–31) and the HUD at primitive + screen centre. The GTE offset OFX/OFY is 0 (Beetle save state), so changing the projection distance H scales characters around the screen centre; consistent 2D scaling is therefore around primitive (160 − DRAWING_OFFSET_X, 120 − DRAWING_OFFSET_Y).

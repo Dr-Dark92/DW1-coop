@@ -73,6 +73,17 @@ Quick saves and the memory card are stored per disc image (keyed by its SHA-256)
 
 The source is opened read-only. Exports run in a cancellable background worker, never overwrite existing files, and use a temporary file that is removed on cancellation or error. Failed and cancelled imports are recorded as distinct states. Closing the application requests cancellation and waits for active workers; it never forcibly terminates a thread.
 
+## Game rules (levels, EXP, no aging or death)
+
+In the Play tab, tick **Game rules (P6)** (USA release only) before **Play**. Your partner then:
+
+- starts at level 20 with at least the stats of that level (2,000 HP/MP, 200 Offense, Defense, Speed and Brains); each level adds +100 HP/MP and +10 to the others, up to level 99
+- gains EXP for won battles: Rookie 10, Champion 30, Ultimate 90 per enemy, ×1.5 for 2 enemies, ×2 for 3, ×3 for 4
+- needs (L + 1)(L + 20) / 2 EXP to go from level L to L + 1 (420 from 20 to 21)
+- does not age or die: lifetime, age and lives are held
+
+The play window's status bar shows the level and EXP, and wins and level-ups appear as messages. Level and EXP are kept by the player and with each quick save, not on the memory card. See `docs/FORMATS.md` for addresses and checks.
+
 ## Digimon export and import
 
 In **Characters and Digimon**, select the target ID and choose **Export Digimon package…**. Save outside the repository. A `.dw1digimon` file is a ZIP: keep its paths and `manifest.json` intact when repacking after edits.

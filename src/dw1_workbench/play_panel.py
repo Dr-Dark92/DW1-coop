@@ -160,6 +160,17 @@ class PlayPanel(QWidget):
         self.use_imports.setChecked(self.settings.value("play/use_imports", False, type=bool))
         self.use_imports.toggled.connect(lambda value: self.settings.setValue("play/use_imports", value))
         form.addRow("", self.use_imports)
+        self.game_rules = QCheckBox("Game rules (P6): partner levels and EXP from battles, no aging or death")
+        self.game_rules.setToolTip(
+            "Applied to the running game's memory (USA release only). Your partner starts at level 20 with at least "
+            "the stats of its level: +100 max HP and MP and +10 Offense, Defense, Speed and Brains per level. "
+            "Won battles give EXP: Rookie 10, Champion 30, Ultimate 90 per enemy, ×1.5 for 2 enemies, ×2 for 3, "
+            "×3 for 4. EXP to the next level: (L + 1)(L + 20) / 2. Level and EXP are kept with the player's saves; "
+            "lifetime and lives are held full, so the partner does not age or die.")
+        self.game_rules.setEnabled(self.live_ram)
+        self.game_rules.setChecked(self.live_ram and self.settings.value("play/game_rules", False, type=bool))
+        self.game_rules.toggled.connect(lambda value: self.settings.setValue("play/game_rules", value))
+        form.addRow("", self.game_rules)
         self.refresh_imports()
         self.core.editingFinished.connect(self._check); self.bios.editingFinished.connect(self._check)
 
@@ -341,7 +352,8 @@ class PlayPanel(QWidget):
             return
         config = PlayConfig(Path(self.core.text()), Path(self.bios.text() or "."), disc or self.disc, self.store.directory,
                             launch_slot=slot, launch_inspection=inspection_id,
-                            resume_on_close=self.resume.isChecked(), live_ram=self.live_ram)
+                            resume_on_close=self.resume.isChecked(), live_ram=self.live_ram,
+                            game_rules=self.game_rules.isChecked())
         start = (f" from slot {slot}" if slot is not None else
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
         self._write_log(f"Launching {config.disc_path.name}{start}"

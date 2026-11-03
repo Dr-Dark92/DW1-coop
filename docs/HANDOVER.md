@@ -1,5 +1,12 @@
 # Handover
 
+## P6 game rules (2026-11-03, Claude, branch `python-player`)
+
+- User's rules: no aging/death, start at level 20 with matching stats, Rookie 10 / Champion 30 / Ultimate 90 EXP, combo ×1/×1.5/×2/×3 for 1–4 enemies, and a leveling equation (chosen: (L+1)(L+20)/2 to next level). Implemented as RAM rules in the Python player (`progression.py`, `GameRules.tick` every frame; `PlayConfig.game_rules`; Play-tab checkbox; level in the play window's status bar; `slotN.progress.json` with quick saves). Details and addresses in FORMATS.md.
+- Verified on the real game from slot 2 with `DW1-coop-data/dev-tools/p6_rules_check.py` (level floor, held life/lives/age, replayed win and level-up), and with a real fight: the user's inspections `20261103-093656-777038` ("near end battle") and `…093709-657079` ("end of battle") finished with `p6_real_battle.py` give +10 EXP for one Rookie. The user's own desktop session ran with the checkbox off (`play/game_rules` never set), so they have not seen it in the window yet.
+- Still to check on the desktop: the status-bar level, a level-up, a lost battle (lives back to 3), quick save/load keeping the level.
+- Open decisions: EXP for Fresh/In-Training enemies (0 now), evolution by level (roadmap table), whether stats below the level floor should also apply after the partner is reborn (they do now), storage.
+
 ## P4 in-game check and stage bundles (2026-11-03, Claude, branch `python-player`)
 
 - In-game gate passed: Koromon (ID 2) with palette 0 inverted, imported through `DigimonOverrides`, played from the patched disc; from the Native Forest inspection, walking into Green Gym loaded Koromon from disc and VRAM held only the inverted palette (original disc: only the original). Screenshot comparison differs only on Koromon's face. The partner was Agumon, so it did not keep Koromon resident. The game loads textures per model load (`loadDigimonTexture`), so changes show on entering a map that uses the Digimon. Harness: `DW1-coop-data/dev-tools/digimon_ingame.py` (uses a BIOS folder holding only `SCPH1001.BIN`, since the inspections were made with it); outputs in `DW1-coop-data/digimon-import-validation/koromon/`.

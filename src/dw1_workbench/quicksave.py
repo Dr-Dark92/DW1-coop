@@ -63,7 +63,8 @@ class QuickSaveStore:
         return stem.with_suffix(".state"), stem.with_suffix(".png"), stem.with_suffix(".json")
 
     def save(self, slot: int, state: bytes, screenshot: bytes | None, core: str, core_version: str,
-             note: str = "") -> SlotInfo:
+             note: str = "", progress: bytes | None = None) -> SlotInfo:
+        """`progress` is the player's level/EXP record (progression.Progress), kept with the slot when given."""
         state_path, image_path, info_path = self._paths(slot)
         info = SlotInfo(slot, datetime.now(timezone.utc).isoformat(timespec="seconds"), note.strip(), core,
                         core_version, len(state), hashlib.sha256(state).hexdigest())
@@ -72,6 +73,10 @@ class QuickSaveStore:
             _atomic_write(image_path, screenshot)
         else:
             image_path.unlink(missing_ok=True)
+        if progress is not None:
+            _atomic_write(self.progress_path(slot), progress)
+        else:
+            self.progress_path(slot).unlink(missing_ok=True)
         record = {"format": FORMAT_VERSION, **{key: getattr(info, key) for key in info.__dataclass_fields__}}
         _atomic_write(info_path, json.dumps(record, indent=2).encode())  # written last: marks the slot complete
         return info
@@ -107,8 +112,17 @@ class QuickSaveStore:
             raise QuickSaveError(f"{info.label} is damaged (its state file does not match its record).")
         return state
 
+    def progress_path(self, slot: int) -> Path:
+        return self._paths(slot)[0].with_suffix(".progress.json")
+
+    def progress(self, slot: int) -> bytes | None:
+        try:
+            return self.progress_path(slot).read_bytes()
+        except OSError:
+            return None
+
     def delete(self, slot: int):
-        for path in self._paths(slot):
+        for path in (*self._paths(slot), self.progress_path(slot)):
             path.unlink(missing_ok=True)
 
     @property

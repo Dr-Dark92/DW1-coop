@@ -25,7 +25,8 @@ from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Fra
                        LibretroError)
 from .live import LiveNpc, LiveState, grid_differences, read_live_state
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
-from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveError, QuickSaveStore
+from .progression import GameRules, Progress
+from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveError, QuickSaveStore, _atomic_write
 
 # World zoom (camera.py) is switched off: in the user's desktop play it crashed the game and misplaced the
 # player and NPCs (2026-11-03). The code stays for later work; nothing patches the game while this is False.
@@ -58,6 +59,7 @@ class PlayConfig:
     launch_inspection: str | None = None  # start from an inspection's save state instead of a slot
     resume_on_close: bool = True
     live_ram: bool = False  # read map/position/grid from RAM; the addresses are only valid for USA SLUS_010.32
+    game_rules: bool = False  # P6 rules (progression.py): levels/EXP, no aging or death; needs live_ram
     options: dict[str, str] = field(default_factory=dict)
 
 
@@ -85,6 +87,7 @@ class EmulatorWorker(QObject):
     live_changed = Signal(object)  # LiveState
     inspection_captured = Signal(object)  # dict: state, screenshot, live
     camera_zoom_changed = Signal(int, int)  # requested/effective fixed-point scale
+    progress_changed = Signal(str)  # level/EXP summary while the game rules are on
     finished = Signal()
 
     def __init__(self, config: PlayConfig):
@@ -108,6 +111,8 @@ class EmulatorWorker(QObject):
         self._camera_scale = 256
         self._camera_notice_sent = False
         self._reported_zoom = None
+        self.rules: GameRules | None = None
+        self._progress_path = config.store_dir / "progression.json"
 
     # -- called from the GUI thread ------------------------------------------------------------------------
 
@@ -154,6 +159,8 @@ class EmulatorWorker(QObject):
             if card is not None:
                 core.load_save_ram(card); self._card_hash = hashlib.sha256(card).digest()
                 self.message.emit(f"Memory card loaded from {self.store.memory_card_path}")
+            if config.game_rules and config.live_ram:
+                self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path))
             try:
                 if config.launch_slot is not None:
                     self._load(config.launch_slot)
@@ -161,6 +168,8 @@ class EmulatorWorker(QObject):
                     self._load_inspection(config.launch_inspection)
             except (LibretroError, QuickSaveError, InspectionError, OSError) as exc:
                 self.command_failed.emit(f"Started from power-on instead: {exc}")
+            if self.rules is not None:
+                self.progress_changed.emit(self.rules.progress.summary())
             self.started_ok.emit({"core": core.info.name, "version": core.info.version, "fps": core.fps,
                                   "sample_rate": core.sample_rate, "aspect": core.aspect_ratio})
             self._loop(core)
@@ -180,6 +189,8 @@ class EmulatorWorker(QObject):
                 continue
             core.buttons = self.buttons
             frame, audio = core.run_frame()
+            if self.rules is not None:
+                self._apply_rules()
             self._ensure_camera()
             if self._camera is not None:
                 self._camera.tick()
@@ -205,6 +216,25 @@ class EmulatorWorker(QObject):
             elif delay < -0.25:  # far behind (a slow frame or a breakpoint): do not try to catch up
                 deadline = time.perf_counter()
 
+    def _apply_rules(self):
+        before = self.rules.progress.exp
+        try:
+            messages = self.rules.tick()
+        except LibretroError as exc:
+            self.message.emit(f"Game rules turned off: {exc}"); self.rules = None
+            return
+        for text in messages:
+            self.message.emit(text)
+        if self.rules.progress.exp != before:
+            self._write_progress()
+            self.progress_changed.emit(self.rules.progress.summary())
+
+    def _write_progress(self):
+        try:
+            _atomic_write(self._progress_path, self.rules.progress.to_json())
+        except OSError as exc:
+            self.message.emit(f"Level/EXP could not be written: {exc}")
+
     def _publish(self, image: QImage):
         self._last_image = image
         with self._image_lock:
@@ -227,6 +257,8 @@ class EmulatorWorker(QObject):
                 elif command[0] == "reset":
                     self._restore_camera()
                     core.reset(); self.message.emit("Console reset")
+                    if self.rules is not None:
+                        self.rules.reset()
                 elif command[0] == "camera_scale":
                     self._camera_scale = command[1]
                     if self._camera_scale == 256:
@@ -249,7 +281,8 @@ class EmulatorWorker(QObject):
         core = self.core
         self._restore_camera()  # Save native game RAM; reapply the selected zoom on the next frame.
         info = self.store.save(slot, core.serialize(), png_bytes(self._last_image), core.info.name,
-                               core.info.version, note)
+                               core.info.version, note,
+                               self.rules.progress.to_json() if self.rules is not None else None)
         self.message.emit(f"{info.label} saved ({info.size:,} bytes){f': {info.note}' if info.note else ''}")
         return info
 
@@ -258,6 +291,17 @@ class EmulatorWorker(QObject):
         info = self.store.info(slot)
         core.unserialize(self.store.load(slot, core=core.info.name))
         self._camera = None
+        if self.rules is not None:
+            self.rules.reset()
+            saved = self.store.progress(slot)
+            if saved is not None:
+                try:
+                    self.rules.progress = Progress.from_json(saved)
+                except ValueError:
+                    pass
+                else:
+                    self._write_progress()
+            self.progress_changed.emit(self.rules.progress.summary())
         if info and info.core_version != core.info.version:
             self.message.emit(f"{info.label} was made by core version {info.core_version}; "
                               f"running {core.info.version}")
@@ -270,6 +314,8 @@ class EmulatorWorker(QObject):
             raise InspectionError(f"That inspection was saved by {record.core}, not {self.core.info.name}.")
         self.core.unserialize(store.state(inspection_id))
         self._camera = None
+        if self.rules is not None:
+            self.rules.reset()
         self.message.emit(f"Started from the inspection at {record.map_name if record else inspection_id}")
 
     def _ensure_camera(self):
@@ -536,6 +582,10 @@ class PlayWindow(QMainWindow):
         self.inspections = InspectionStore(config.store_dir / "inspections")
         self.live_label = QLabel("Live map: off (USA release only)" if not config.live_ram else "Live map: waiting")
         self.statusBar().addPermanentWidget(self.live_label)
+        self.level_label = QLabel()
+        self.level_label.setVisible(config.game_rules and config.live_ram)
+        self.level_label.setToolTip("P6 game rules: level and EXP of your partner. Aging and death are off.")
+        self.statusBar().addPermanentWidget(self.level_label)
         self.statusBar().addPermanentWidget(QLabel("F1: controls"))
         self.live_map = LiveMapView()
         self.npc_list = QLabel("NPCs on this map: —"); self.npc_list.setWordWrap(True)
@@ -561,6 +611,7 @@ class PlayWindow(QMainWindow):
         self.worker.live_changed.connect(self._live_changed)
         self.worker.inspection_captured.connect(self._inspection_captured)
         self.worker.camera_zoom_changed.connect(self._camera_zoom_changed)
+        self.worker.progress_changed.connect(self._progress_changed)
         # Direct: stop() blocks the GUI thread in wait(), so a queued quit would never be delivered.
         self.worker.finished.connect(self.thread.quit, Qt.ConnectionType.DirectConnection)
         self._finished = False
@@ -803,6 +854,10 @@ class PlayWindow(QMainWindow):
     def _play_audio(self, data: bytes):
         if self.audio is not None:
             self.audio.write(data)
+
+    @Slot(str)
+    def _progress_changed(self, text: str):
+        self.level_label.setText(text)
 
     @Slot(str)
     def _message(self, text: str):
