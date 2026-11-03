@@ -27,6 +27,9 @@ from .live import LiveNpc, LiveState, grid_differences, read_live_state
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
 from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveError, QuickSaveStore
 
+# World zoom (camera.py) is switched off: in the user's desktop play it crashed the game and misplaced the
+# player and NPCs (2026-11-03). The code stays for later work; nothing patches the game while this is False.
+WORLD_ZOOM_ENABLED = False
 FAST_FORWARD = 4  # speed while fast-forward is held
 MEMORY_CARD_FLUSH_FRAMES = 600  # write a changed memory card about every 10 s
 LIVE_FRAMES = 10  # read the live map, positions and grid about six times a second
@@ -270,7 +273,8 @@ class EmulatorWorker(QObject):
         self.message.emit(f"Started from the inspection at {record.map_name if record else inspection_id}")
 
     def _ensure_camera(self):
-        if self._camera is not None or self.core is None or self._camera_scale == 256 or not self.config.live_ram:
+        if (not WORLD_ZOOM_ENABLED or self._camera is not None or self.core is None or self._camera_scale == 256
+                or not self.config.live_ram):
             return
         try:
             self._camera = CameraZoom(self.core)
@@ -593,10 +597,11 @@ class PlayWindow(QMainWindow):
         bar.addWidget(QLabel("World zoom"))
         self.camera_zoom = QSlider(Qt.Orientation.Horizontal); self.camera_zoom.setRange(50, 100)
         self.camera_zoom.setValue(100); self.camera_zoom.setFixedWidth(120)
-        self.camera_zoom.setEnabled(self.config.live_ram)
+        self.camera_zoom.setEnabled(WORLD_ZOOM_ENABLED and self.config.live_ram)
         self.camera_zoom.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.camera_zoom.setToolTip("World zoom (USA): shows more of the map around the screen centre. The HUD stays "
-                                    "native; past a map's edge the view is black.")
+                                    "native; past a map's edge the view is black." if WORLD_ZOOM_ENABLED else
+                                    "World zoom is switched off for now: it crashed the game and misplaced characters.")
         self.camera_zoom.valueChanged.connect(lambda value: self.worker.set_camera_scale(value * 256 // 100))
         bar.addWidget(self.camera_zoom)
         self.camera_zoom_status = QLabel("100%")

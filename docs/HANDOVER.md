@@ -1,5 +1,9 @@
 # Handover
 
+## World zoom switched off (2026-11-03)
+
+After committing `74b09ff`, the user played with the zoom on the desktop: it **crashed the game and misplaced the player and NPCs**. At their request it is disabled (`player.WORLD_ZOOM_ENABLED = False`: slider disabled, `_ensure_camera` never installs). `camera.py`, `camera_engine.c` and their tests are kept. Not yet investigated; likely areas: entity culling/positions computed from screen bounds or `DRAWING_OFFSET` (e.g. `isOffScreen`, NPC AI using screen coordinates), the `VIEWPORT_DISTANCE` change affecting game logic beyond projection, state changes during map transitions or battles while patched, and RAM assumed free (`0x801C0000`–`0x801D3100`) being used in situations not sampled. Reproduce with the user's description before re-enabling.
+
 ## World zoom working (2026-11-03, Claude, branch `python-player`)
 
 The user handed camera settings back from Codex ("codex couldnt just do it"). Codex's state: hook running, coverage cap falling back to 100% outdoors. Now working at 50–100% indoors and outdoors:
