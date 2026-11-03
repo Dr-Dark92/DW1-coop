@@ -27,6 +27,7 @@ from .maps import (EXIT_COLOURS, MAX_MAP_FILE, MAX_TFS_FILE, TRIGGER_COLOURS, ex
 from .relation_view import RelationView
 from .animation import parse_animations
 from .animation_view import ModelAnimationPanel, ModelLoad
+from .play_panel import PlayPanel
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .project import import_project, layout_from_catalogue, source_state
 from .tim import decode_tim, export_png
@@ -283,6 +284,8 @@ class Workspace(QWidget):
         self.tabs.addTab(self._textures(), "Textures")
         self.tabs.addTab(self._maps(), "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
+        self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue))
+        self.tabs.addTab(self.play_panel, "Play")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
 
     def _overview(self):
@@ -1016,6 +1019,7 @@ class Workspace(QWidget):
 
     def cancel_background(self):
         self._closing, self._pending_model = True, None
+        self.play_panel.close_player()
         if self.export_worker:
             self.export_worker.request_cancel()
         if self.model_worker:
@@ -1185,6 +1189,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def closeEvent(self, event: QCloseEvent):
+        for workspace in self._active_workspaces():
+            workspace.play_panel.close_player()  # writes the resume slot and memory card first
         if self._has_active_work():
             self._close_pending = True
             self._request_import_cancel()

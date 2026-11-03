@@ -1,5 +1,17 @@
 # Handover
 
+## Python player (2026-11-03, branch `python-player`)
+
+`docs/ROADMAP.md` on `main` (`812f191`) makes a playable inspection build P0. The user asked for a Python-based player that works on Linux now and Windows later, with quick saves, rather than an external emulator. Branched from `animations`.
+
+- `libretro.py`: a ctypes libretro frontend (API 1). Answers the environment calls PS1 cores use (system/save directories, pixel format, legacy core options with overrides, input bitmasks, messages, geometry/timing changes), converts video/audio/input callbacks, and wraps serialize/unserialize and save RAM. One running core per process; libraries are never unloaded.
+- `quicksave.py`: slots 1–9 plus Resume (0); state + PNG + JSON written atomically, JSON last; loads check size, SHA-256 and core name. The memory card is `memory_card_1.srm` (the core's SAVE_RAM).
+- `player.py`: `EmulatorWorker` runs the core on a QThread (clock pacing at the core's fps, fast-forward ×4, command queue for save/load/reset, newest-frame hand-off, memory card flushed every 600 frames and on close). `PlayWindow` shows frames, plays audio via QAudioSink and maps keys. `worker.finished → thread.quit` must be a direct connection: `stop()` waits on the GUI thread, so a queued quit deadlocked for the full 10 s timeout (found by the tests).
+- `play_panel.py` and the Workspace "Play" tab: core/BIOS settings (QSettings `DW1-coop/workbench`), automatic Beetle PSX discovery, BIOS check (`scph5501.bin` for USA), saves folder per disc SHA-256 under the generic data location, slot table with thumbnails, launch log (also `launch.log` in the saves folder). Closing the workbench closes the game first so the Resume slot and memory card are written.
+- Tests: `tests/fake_core.c` is compiled by a session fixture (skipped without a C compiler) and drives `test_libretro.py`, `test_player.py`; `test_quicksave.py` is pure. 104 tests pass.
+
+Not yet done: running the real game. The user has to install a core (`sudo pacman -S libretro-beetle-psx`) and point the tab at their own BIOS; neither may be downloaded for them. Then the roadmap P0 gate: two connected zones, a gateway and a toilet, save/relaunch/load, and the inspection checklist. Next player work: gamepad input (Qt 6 has no gamepad module; SDL2 via `pysdl2` is the likely route), key remapping, core options UI, Windows check.
+
 ## Animations milestone (2026-11-02, branch `animations`)
 
 Branched from `agumon-preview-verification` (open as pull request #1). `src/dw1_workbench/animation.py` parses MMD animation tables and steps clips exactly like the decompiled game (`jype0/dw_decomp` `src/main/anim.c`; SydPatches double-steps the root remainder, the original does not). The model preview (`model_view.set_pose`, `gui.py` animation controls) plays clips at an assumed 20 ticks/s with optional root motion and texture copies; sound cues are counted, not played. `tests/test_animation.py` adds 16 synthetic tests (80 total pass).

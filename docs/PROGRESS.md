@@ -28,6 +28,7 @@
 - Animations tab: Digimon list with search, evolution-stage and partner-range filters, a per-clip table, and the shared model/animation player (also used by Characters and Digimon); unsupported geometry still lists clips. Confirmed on the desktop by the user.
 - Animation clip names from the game's own use of each animation ID (Digimon and player sets, with confidence and evidence) and technique names for clips 46+ via each Digimon's move list; 94% of USA clips named.
 - Evolution stage parsed from the executable's level byte and catalogued as a `stage` label; the GUI falls back to the executable for older projects.
+- Play tab (Python libretro frontend): loads a user-supplied libretro PlayStation core through `ctypes` and runs the imported disc on a worker thread at the core's frame rate, with Qt video and audio, keyboard input, pause/reset/fast-forward/full screen, nine quick-save slots plus an automatic Resume slot (atomic writes, screenshots, notes, SHA-256 and core checks), launch-into-slot, a persistent memory card and a launch log. Tested against a synthetic C core built during the test run; not yet run with a real core and BIOS.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
@@ -50,6 +51,7 @@
 - Map scripts (needed for script-driven transitions) and 3D map geometry.
 - Audio/video decoding.
 - Disassembly/decompilation integration.
+- Player: gamepad input, key remapping, core options UI, and audio-driven frame pacing (pacing is clock-based; audio is dropped rather than delayed).
 - Co-op gameplay, native runtime, or networking.
 
 ## Real-disc validation (user-provided USA image)

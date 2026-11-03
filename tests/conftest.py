@@ -49,3 +49,18 @@ def iso_to_raw(iso: Path, raw: Path) -> Path:
 @pytest.fixture
 def synthetic_iso(tmp_path):
     return make_iso(tmp_path / "synthetic.iso")
+
+
+@pytest.fixture(scope="session")
+def fake_core(tmp_path_factory) -> Path:
+    """tests/fake_core.c built as a shared library; skipped where no C compiler is available."""
+    import shutil
+    import subprocess
+    import sys
+    compiler = next((shutil.which(name) for name in ("cc", "gcc", "clang") if shutil.which(name)), None)
+    if compiler is None:
+        pytest.skip("no C compiler to build the fake libretro core")
+    output = tmp_path_factory.mktemp("core") / ("fake_core.dll" if sys.platform == "win32" else "fake_core.so")
+    source = Path(__file__).with_name("fake_core.c")
+    subprocess.run([compiler, "-shared", "-fPIC", "-O1", "-o", str(output), str(source)], check=True)
+    return output

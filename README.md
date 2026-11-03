@@ -2,7 +2,7 @@
 
 A read-only desktop workbench for importing a user-owned Digimon World 1 disc image, validating one evidenced release, inventorying its ISO 9660 filesystem, and preserving resource provenance in a local SQLite catalogue.
 
-This is an asset-analysis foundation. It is **not** co-op gameplay, a native port, or a universal asset decoder. No game image or proprietary game data is included or downloaded.
+This is an asset-analysis foundation with a Play tab that runs your own disc through a libretro PlayStation core you install yourself. It is **not** co-op gameplay, a native port, or a universal asset decoder. No game image, BIOS, emulator core, or proprietary game data is included or downloaded.
 
 ## Current scope
 
@@ -20,6 +20,7 @@ This is an asset-analysis foundation. It is **not** co-op gameplay, a native por
 - Maps and Zones browser: the USA map table (244 named maps grouped into 65 area-name zones), TFS background preview with every palette and PNG + provenance export, and decoded scene data — camera, lights, spawn points, outbound and inbound warps (followable between maps, with exit direction), Digimon placements with stats, sprite objects, and the 100×100 tile-trigger grid — plus a zone relation map laid out by exit direction. All 241 file-backed maps match an independent converter; script-driven transitions are not decoded.
 - Thread-safe import cancellation and streamed hashing/file export; partial exports are removed.
 - Animations tab: every Digimon with a model, searchable and filterable by evolution stage (from the game's own level byte) and partner range, with a per-clip table (clip names from the game code's own use of each animation ID, technique names for attack clips) and a player using the game's own frame-by-frame stepping (loops, root motion, texture copies); all 4,843 clips of the 178 USA models match an independent converter. Models with unsupported geometry list their clips without a preview.
+- Play tab: runs the imported disc through a user-supplied libretro PlayStation core (Beetle PSX recommended) loaded in-process from Python, on Linux and Windows. Video, audio, keyboard input, pause, reset, fast-forward, full screen, nine quick-save slots with screenshots and notes (F5/F8), an automatic Resume slot on close, launch straight into a slot, a persistent memory card, and a launch log. The disc is only read; saves live in the user data folder.
 - Honest unsupported states for model export, sound playback, general archives, map scripts, and 3D map geometry.
 
 See [docs/FORMATS.md](docs/FORMATS.md) for exact support boundaries and evidence.
@@ -45,6 +46,17 @@ pytest -q
 ```
 
 All tests use synthetic fixtures. The automated suite does not contain or require commercial game data.
+
+## Playing the game
+
+The Play tab needs two things you supply:
+
+- **A libretro PlayStation core.** Beetle PSX is recommended. On Arch/CachyOS: `sudo pacman -S libretro-beetle-psx` (installs `/usr/lib/libretro/mednafen_psx_libretro.so`, which the tab finds automatically). On Windows, use `mednafen_psx_libretro.dll` from the libretro buildbot or a RetroArch `cores` folder.
+- **Your PlayStation BIOS.** Point the BIOS folder at the folder containing it. Beetle PSX needs `scph5501.bin` for the USA disc.
+
+Press **Play**, or select a quick save and press **Play from selected slot**. In the game window F1 lists the controls: arrows for the D-pad, Z/X/A/S for Cross/Circle/Square/Triangle, Enter for Start, Backspace for Select, F5/F8 to quick save/load the selected slot, F6/F7 to change slot, Tab (held) to fast-forward, P to pause and F11 for full screen. Type a note (for example the zone) before saving to label the slot.
+
+Quick saves and the memory card are stored per disc image (keyed by its SHA-256) under the user data folder: `~/.local/share/DW1-coop/play/` on Linux and `%LOCALAPPDATA%\DW1-coop\play\` on Windows. Quick saves are core save states, so they only load in the same core; the memory card works like a real one. Gamepads, key remapping and core options are not configurable yet.
 
 ## Import workflow
 
