@@ -10,11 +10,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
 from .errors import Cancelled
+from .graphics import DEFAULT_RESOLUTION, RESOLUTIONS, core_options
 from .inspection import InspectionStore, SpawnLog
 from .libretro import LibretroError, core_info
 from .maps import trigger_description
@@ -171,6 +172,24 @@ class PlayPanel(QWidget):
         self.game_rules.setChecked(self.live_ram and self.settings.value("play/game_rules", False, type=bool))
         self.game_rules.toggled.connect(lambda value: self.settings.setValue("play/game_rules", value))
         form.addRow("", self.game_rules)
+        picture = QHBoxLayout()
+        self.resolution = QComboBox(); self.resolution.addItems(RESOLUTIONS)
+        self.resolution.setCurrentText(self.settings.value("play/resolution", DEFAULT_RESOLUTION))
+        self.resolution.setToolTip("Draws the 3D characters, HUD and menus at a higher resolution. Backgrounds are "
+                                   "pre-rendered pictures and keep their original detail. 4x can drop frames.")
+        self.resolution.currentTextChanged.connect(lambda value: self.settings.setValue("play/resolution", value))
+        self.smooth_colours = QCheckBox("Smooth colours (no dithering)")
+        self.smooth_colours.setToolTip("Turns off the PlayStation's dithering, the fine grain pattern on shading.")
+        self.smooth_colours.setChecked(self.settings.value("play/smooth_colours", True, type=bool))
+        self.smooth_colours.toggled.connect(lambda value: self.settings.setValue("play/smooth_colours", value))
+        self.steady_3d = QCheckBox("Steady 3D (PGXP)")
+        self.steady_3d.setToolTip("Less wobbly polygons and warped textures on 3D characters. Slightly slower.")
+        self.steady_3d.setChecked(self.settings.value("play/steady_3d", False, type=bool))
+        self.steady_3d.toggled.connect(lambda value: self.settings.setValue("play/steady_3d", value))
+        for widget in (self.resolution, self.smooth_colours, self.steady_3d):
+            picture.addWidget(widget)
+        picture.addStretch(1)
+        form.addRow("Graphics", picture)
         self.refresh_imports()
         self.core.editingFinished.connect(self._check); self.bios.editingFinished.connect(self._check)
 
@@ -353,7 +372,9 @@ class PlayPanel(QWidget):
         config = PlayConfig(Path(self.core.text()), Path(self.bios.text() or "."), disc or self.disc, self.store.directory,
                             launch_slot=slot, launch_inspection=inspection_id,
                             resume_on_close=self.resume.isChecked(), live_ram=self.live_ram,
-                            game_rules=self.game_rules.isChecked())
+                            game_rules=self.game_rules.isChecked(),
+                            options=core_options(self.resolution.currentText(), self.smooth_colours.isChecked(),
+                                                 self.steady_3d.isChecked()))
         start = (f" from slot {slot}" if slot is not None else
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
         self._write_log(f"Launching {config.disc_path.name}{start}"

@@ -9,8 +9,8 @@ description = "A provenance-first Digimon World 1 disc analysis workbench"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-# Essentials contains QtCore/QtGui/QtWidgets without Qt WebEngine; this app has no browser.
-dependencies = ["PySide6-Essentials>=6.8,<7", "Pillow>=11,<13"]
+# Essentials supplies widgets; Addons supplies QtMultimedia for player audio.
+dependencies = ["PySide6-Essentials>=6.8,<7", "PySide6-Addons>=6.8,<7", "Pillow>=11,<13"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]

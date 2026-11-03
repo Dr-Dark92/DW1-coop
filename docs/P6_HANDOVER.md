@@ -1,8 +1,67 @@
 # P6 handover — progression, evolution, death policy and storage
 
-Prepared 2026-11-03 (Asia/Muscat) from a fresh clone of `https://github.com/Dr-Dark92/DW1-coop.git`.
-This is the entry point for the current task (P6). Read it before `docs/CLAUDE_HANDOVER.md` and `docs/HANDOVER.md`,
-whose top sections describe P4 and the camera work, not P6.
+Updated 2026-11-03 (Asia/Muscat), Windows continuation. Start with [CLAUDE_HANDOVER.md](CLAUDE_HANDOVER.md), the consolidated current P6 resume guide. This file preserves chronological evidence; older paths, open decisions and implementation claims below can be superseded. Branch: `python-player`, committed HEAD `f7f7dc2`; Windows continuation uncommitted. P6 remains PARTIAL.
+
+## Reference-style Tree, menu audio and EXP reload fix (2026-11-03, Codex)
+
+User supplied the original native chart screenshot and requested that layout, opening/selection/navigation sounds, and reported EXP resetting on area change. The Tree is now local/focused: centered native portrait/name/stage, previous forms in the left pane, colored bent branches into next forms in the right pane. Up/Down cycle a branch; Left/Right select previous/next side and explore it on repeated presses; Cross confirms eligible Champions twice, or browses ineligible forms. All native forward partner links are available for browsing, including shared ancestors outside the current partner family; evolution still only allows the active Rookie's immediate linked Champions at level 21. Mega remains pending. This replaces the six-column rendering described below.
+
+Portraits are decoded from the resident UI atlas (`EVO_CHART_BOXES` at `0x80124544`, 61 eight-byte entries; `EVO_CHART_DETAIL_COLORS` at `0x80123E6C`; texture page `0x18`). No game art is bundled. The supplied native reference was matched with real Agumon/Koromon and Champion portraits; native menu exit and chart→Greymon evolution still pass in the isolated harness.
+
+`menu_audio.py` generates distinct short opening, navigation, choose and back tones; the worker mixes them into the existing stereo game PCM at the core's sample rate, clipping safely and avoiding queued input bleeps. Native delegated actions keep their native sounds. Windows F4 Dex opening also plays the open cue. Real core harness recorded open/navigation/choose/back events and a mixed PCM WAV outside Git; physical device loudness remains a desktop check.
+
+EXP issue: `GAME_STATE` can return to 0 while the game reloads the map, before `PARTNER_PARA.battles` increments. Clearing enemies at that boundary could discard a won reward even though the result panel had previewed it. `GameRules` now retains the confirmed victory panel's enemy snapshot/result across invalid-partner/map reload frames, awards once on the first valid world frame (after native combat stat restoration), and suppresses a duplicate when the late win counter changes. Explicit load/reset still clears the transient victory; loss/flee snapshots still clear. Regression covers invalid partner during reload, delayed counter, level crossing, area change, persistence and no duplicate award.
+
+Real Windows check from the user's latest Resume loaded read-only into an isolated store: one ModokiBetamon victory gave +10 EXP, crossing test-only level 20→21, ending at total 3855 / Lv21 EXP5/451; a native gateway transition from map109 to map112 (Green Gym) retained exactly 3855, and the private progression JSON reopened with that value. No test EXP was written to the user store. User save/memory-card hashes unchanged. Harness/report: `D:/DW1-coop-data/digidex-validation/check_exp_area.py`, `area-exp-report.json`. Tree/audio captures: `D:/DW1-coop-data/menu-validation/`. Full suite: 187 passed, 14 skipped; targeted follow-up checks pass. No commit/push; world zoom remains off. Restart for new code.
+
+## Menu exit fix, icon grid and relation chart (2026-11-03, Codex)
+
+User reported the new menu would not exit and requested original-style icons/names and an evolution relation view. Root cause: the USA game's `CANCEL_BUTTON` is **Triangle** (`0x10`, `include/dw/input.h`), but the overlay forwarded Circle. Both Circle and Triangle now forward native Triangle when closing the main menu, preserving nested Dex/chart back navigation. Real isolated checks closed from both buttons and confirmed `IS_IN_MENU=0`, tamer state 0; Dex → main → gameplay also passed. The earlier desktop-check claims did not cover this exit path.
+
+`game_menu_view.py` renders a three-column grid, with Up/Down retaining columns and Left/Right moving between items. The first six original icons (plus fishing) are decoded from the user's live VRAM once; new Evolution/Dex icons are small vector drawings. No game art is bundled. Main menu fields remain eight options (plus optional fishing) and native actions still delegate to the game.
+
+Evolution is now a six-column relation chart: Newborn, In-training, Rookie, Champion, Ultimate, Mega pending. Family = current partner's native ancestors and descendants, from `EVOLUTION_PATHS` and hardcoded Fresh links 1→2, 15→16, 29→30, 43→44 (`getFreshEvolutionTarget`). Only forward stage links are displayed; item/script-only routes are not invented. Long columns scroll around the selected form. Selected links are highlighted; current partner is green. Left/Right browse stages, Up/Down browse forms. Browsing ancestors/future forms never grants evolution: only the existing immediate linked Champion choices, level ≥21, idle/menu/fade revalidation and double confirmation may trigger the native sequence.
+
+Real isolated Windows check: original icon grid and full Botamon → Koromon → Agumon → Champion/Ultimate family visually inspected; both exit buttons, Dex returns, chart ancestor browsing and Agumon → Greymon through the chart passed (native evolution completed, normal gameplay restored). Test store only; user save/memory-card hashes unchanged. Harness and captures at `D:/DW1-coop-data/menu-validation/` outside Git. Full suite **184 passed, 14 skipped**; diff check passes. No commit/push; world zoom remains off. Restart the app for new code.
+
+## Digi-Dex continuation (2026-11-03, Codex)
+
+User requested information gated on encounters, then chose **only after battling** and added linked enemy skills. Implemented `digidex.py` / `digidex_view.py`, worker observation/persistence/signals, in-game **8. Digi-Dex** after Evolution and Windows **F4 / Digi-Dex**. The original six actions and Evolution remain; fishing follows the Dex. USA live RAM required; in-game integration uses P6/Beetle, Windows reader also works with P6 off.
+
+Battle participants only, after the initialized opponent list is ready; visibility/bystanders alone never unlock. Victory is not required. Anonymous locked entries cannot expose names/details through selection/search. Unlocked data: native stage/rank, drop/chance, possible decoded map placements, actual battle day/evening/night hours, variant base stats, native species-linked skills and opponent-equipped skills. Source-dependent schedules are explicitly unknown and placements may depend on scripts/story. See FORMATS.md for fields, addresses, persistence and coverage.
+
+Knowledge is atomic JSON format 1 in `digidex.json` per player/disc store, independent of quick-save rewinds. New entry/profile/hour updates only; failed writes keep the old file, bad versions/records preserve the file and report unavailable. No migration from older progression records is required. Startup indexing is cancellable; closing before a frame runs cannot replace Resume with an unstarted core state.
+
+Real isolated Windows check passed: map entry with two NPCs did not unlock; native ModokiBetamon battle unlocked ID 83 with correct stats, item/chance, five possible source placements and linked/equipped techniques. Knowledge survived loading an older state. In-game menu/detail pages and Windows dialog were visually inspected. User save/memory-card hashes unchanged. Harness/captures/report: `D:/DW1-coop-data/digidex-validation/` outside Git. Known placement index: 713 placements / 125 species; script-only spawns/schedules are not fully decoded. No user discovery file was populated by diagnostics. Full Windows suite: **180 passed, 14 skipped** (compiler-dependent mock-core tests). `git diff --check` passes. No commit/push; world zoom stays off.
+
+## Manual evolution continuation (2026-11-03, Codex)
+
+User chose **manual linked evolution**, with Champion eligibility at **level 21** for testing and Evolution as the **seventh in-game menu item**. Implemented in `evolution.py`, integrated with the emulator worker and an in-viewport main-menu/choice presentation. Original six actions remain native; fishing remains available as an additional option. All native natural/random/virus evolution branches are reversibly guarded in RAM while P6 is on. Explicit items/scripts are still native. Current manual stage support is Rookie → Champion only, using native links and level eligibility; no original care/stat requirements. Full address/patch/flow evidence is in FORMATS.md.
+
+Real Windows checks passed with the user's current Resume loaded read-only into an isolated emulator/test store: Agumon → Greymon through option 7 at test-only level 21, native evolution cutscene completed, returned to map 110 in normal walking states with native bonuses and level retained. Native/guarded comparisons proved the natural, virus and special-trigger branches start evolution unguarded and stay Agumon for 600 frames guarded. User saves and memory-card hashes were unchanged. Nothing was persisted to the user's level. Scripts/captures/reports: `D:/DW1-coop-data/evolution-validation/` (outside Git). Other targets and long play remain unverified.
+
+Quick saves/Resume/F9 serialize original instructions; load resets host menu state; per-slot EXP still restores normally. Supported core: Beetle PSX. Source mismatches/other cores report that manual evolution is unavailable. World zoom remains off. Restart the app to load this code, enable P6, open Triangle, choose Evolution, select a linked Champion and press Cross twice; Circle returns. Level 20 is still the user's saved level; reaching 21 needs 420 EXP.
+
+The Windows full suite passed 171 tests, 14 skipped (compiler-dependent mock-core tests). An existing generated-camera-source hash failed initially due to Windows CRLF checkout; `.gitattributes` now preserves LF for that generated source input, and the suite passes without rebuilding/changing the camera code. No commit/push.
+
+Next P6 work: storage/ownership/versioned saves and remaining stage thresholds. Earlier notes below about evolution being entirely unimplemented, and automatic-versus-choice being undecided, are superseded by this entry.
+
+## Battle results replacement (2026-11-03, Codex)
+
+User requested replacing the post-win gained-stat menu with EXP and next-level progress. With P6 enabled, the player now composites a replacement over the native stats panel: EXP gained, resulting level, EXP within that level and EXP remaining. This is a player presentation change, not an executable patch. Native stat rewards, Bits, drops, move learning and confirmation remain active underneath. Native rendering must continue because `renderPostBattleStatsBox` also applies stat gains.
+
+Detection uses USA `UI_BOX_DATA` at `0x8013D390`, 36-byte `UIBoxData`, state +18 and renderer +32 equal to `0x800EE1FC`. Source: dw_decomp `aaf69a4`, `include/dw/ui.h`, `src/main/battle_ui.c`, `src/main/ui.c`, `config/us/symbols.txt`. Native final rectangle (-88,-78,176,96) maps to (72,42,176,96) in 320x240; replacement includes its border and scales with output resolution. The native panel precedes the won-counter update, so displayed EXP is a preview; persistence still happens at the existing win check. Max-level handling is explicit. No instruction or save-state patch is installed.
+
+Validation: 15 progression/quick-save/panel tests passed, including repeated preview frames without awarding EXP, level crossing, unrelated boxes, clearing, maximum level and image region checks at 320x240/640x480. Rendered preview visually inspected at `D:/DW1-coop-data/validation/p6/battle-result-preview.png`. Real-game panel/input verification remains pending. Added missing PySide6-Addons dependency for the player's QtMultimedia import. No commit/push.
+
+## Windows continuation (2026-11-03, Codex)
+
+- Working tree: `D:\DW1-coop`, branch `python-player`, baseline `f7f7dc2`. No commit or push.
+- Restored `docs/ROADMAP.md` from local `main`, marked P6 PARTIAL, and labelled the older review/P0–P5 inventory as historical.
+- Fixed risk 4 below: after processing any win, out-of-battle frames clear the encounter enemy snapshot. Flee/loss cannot carry enemies into a later unreadable encounter.
+- Added parameterized regression checks for win/flee/loss followed by an unreadable battle, checking EXP and repeat-frame behavior. Synthetic life restoration is checked; real defeat remains unverified.
+- Created ignored `.venv` with pytest. With `PYTHONPATH=src`, `.venv\Scripts\python -m pytest -q tests/test_progression.py tests/test_quicksave.py`: **11 passed**. `git diff --check` passed. Full GUI suite and real-game checks were not run.
+- Next: desktop checks and evolution timing investigation; evolution/ownership/storage choices below remain open. User disc/archive files were left untouched; world zoom remains disabled.
 
 ## Where the work is
 

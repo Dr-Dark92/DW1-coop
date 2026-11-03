@@ -13,19 +13,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QBuffer, QCoreApplication, QPointF, QByteArray, QIODevice, QObject, QRectF, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPen
+from PySide6.QtCore import (QBuffer, QCoreApplication, QPointF, QByteArray, QIODevice, QObject, QRectF, QSettings, Qt,
+                            QThread, Signal, Slot)
+from PySide6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QSlider, QToolBar, QVBoxLayout, QWidget)
+                               QLineEdit, QMainWindow, QMessageBox, QScrollArea, QSizePolicy, QSlider, QToolBar,
+                               QVBoxLayout, QWidget)
 
 from .camera import CameraZoom
+from .graphics import SCREENS, screen_rects
 from .inspection import CATEGORIES, InspectionError, InspectionStore, SpawnLog
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
                        LibretroError)
 from .live import LiveNpc, LiveState, grid_differences, read_live_state
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
-from .progression import GameRules, Progress
+from .progression import BattleResult, GameRules, Progress
+from .avatars import load_avatars
+from .evolution import EvolutionController, EvolutionHistory
+from .game_menu_view import evolution_menu_image, native_icons, native_portraits
+from .menu_audio import MenuAudio, tone_pcm
+from .digidex import DigiDex, load_placements
+from .digidex_view import DigiDexDialog
+from .errors import Cancelled, DiscFormatError
 from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveError, QuickSaveStore, _atomic_write
 
 # World zoom (camera.py) is switched off: in the user's desktop play it crashed the game and misplaced the
@@ -45,7 +55,7 @@ DEFAULT_KEYS = {
     Qt.Key.Key_Return: "Start", Qt.Key.Key_Enter: "Start", Qt.Key.Key_Backspace: "Select",
 }
 KEY_HELP = ("Arrows: D-pad  •  Z Cross  X Circle  A Square  S Triangle  •  Q/W L1/R1  E/R L2/R2  •  "
-            "Enter Start  Backspace Select  •  F5 quick save  F8 quick load  F6/F7 slot  •  "
+            "Enter Start  Backspace Select  •  F4 Digi-Dex  •  F5 quick save  F8 quick load  F6/F7 slot  •  "
             "F9 inspect here  F10 live map  •  hold Tab fast-forward  •  P pause  •  F11 full screen")
 
 
@@ -65,6 +75,30 @@ class PlayConfig:
 
 def frame_image(frame: Frame) -> QImage:
     return QImage(frame.data, frame.width, frame.height, frame.pitch, IMAGE_FORMATS[frame.pixel_format]).copy()
+
+
+def battle_result_image(image: QImage, result: BattleResult | None) -> QImage:
+    """Replace only the USA post-battle stats panel in the presented frame.
+
+    Native rendering also applies rewards, so it must continue running underneath.
+    Coordinates follow createPostBattleStatsBox: centred (-88,-78), 176x96.
+    """
+    if result is None:
+        return image
+    image = image.convertToFormat(QImage.Format.Format_RGB32)
+    painter = QPainter(image)
+    painter.scale(image.width() / 320, image.height() / 240)
+    painter.fillRect(70, 40, 180, 100, QColor("#111c30"))
+    painter.setPen(QColor("#fad990"))
+    painter.drawRect(71, 41, 178, 98)
+    font = QFont("Arial")
+    font.setPixelSize(10)
+    painter.setFont(font)
+    for index, line in enumerate(result.lines):
+        painter.setPen(QColor("#fad990" if index == 0 else "#ffffff"))
+        painter.drawText(82, 57 + index * 17, line)
+    painter.end()
+    return image
 
 
 def png_bytes(image: QImage | None) -> bytes | None:
@@ -87,6 +121,7 @@ class EmulatorWorker(QObject):
     live_changed = Signal(object)  # LiveState
     inspection_captured = Signal(object)  # dict: state, screenshot, live
     camera_zoom_changed = Signal(int, int)  # requested/effective fixed-point scale
+    dex_changed = Signal(object)  # immutable snapshot from the core thread
     progress_changed = Signal(str)  # level/EXP summary while the game rules are on
     finished = Signal()
 
@@ -112,6 +147,19 @@ class EmulatorWorker(QObject):
         self._camera_notice_sent = False
         self._reported_zoom = None
         self.rules: GameRules | None = None
+        self.evolution: EvolutionController | None = None
+        self.dex: DigiDex | None = None
+        self.dex_map_names = {}
+        self._dex_write_error = False
+        self._has_run_frame = False
+        self._menu_icons = ()
+        self._icons_attempted = False
+        self._portraits = {}
+        self._portraits_attempted = False
+        self.history: EvolutionHistory | None = None
+        self.avatars = {}  # replaced (never mutated) by the avatar thread, so the core thread reads it safely
+        self._avatar_thread: threading.Thread | None = None
+        self._menu_audio = None
         self._progress_path = config.store_dir / "progression.json"
 
     # -- called from the GUI thread ------------------------------------------------------------------------
@@ -154,13 +202,36 @@ class EmulatorWorker(QObject):
             self.failed.emit(str(exc)); self.finished.emit()
             return
         core = self.core
+        self._menu_audio = MenuAudio(core.sample_rate)
         try:
             card = self.store.read_memory_card()
             if card is not None:
                 core.load_save_ram(card); self._card_hash = hashlib.sha256(card).digest()
                 self.message.emit(f"Memory card loaded from {self.store.memory_card_path}")
+            if config.live_ram:
+                try:
+                    self.dex = DigiDex(config.store_dir / "digidex.json")
+                except (OSError, ValueError) as exc:
+                    self.message.emit(f"Digi-Dex unavailable: {exc}; existing file preserved")
+                    self.dex_changed.emit({"error": str(exc)})
+                if self.dex is not None:
+                    try:
+                        self.dex.map_names = self.dex_map_names
+                        self.dex.placements = load_placements(config.disc_path, self._stop.is_set, self.dex_map_names)
+                    except Cancelled:
+                        return
+                    except (OSError, ValueError, DiscFormatError, KeyError) as exc:
+                        self.message.emit(f"Digi-Dex placement index unavailable; sightings still recorded: {exc}")
+                    self.dex_changed.emit(self.dex.snapshot())
+                    self._start_avatars()
+                try:
+                    self.history = EvolutionHistory(config.store_dir / "evolution_history.json")
+                except (OSError, ValueError) as exc:
+                    self.message.emit(f"Evolution history unavailable ({exc}); the chart shows every linked form")
             if config.game_rules and config.live_ram:
                 self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path))
+                self.evolution = EvolutionController(core, self.rules.progress, self.dex, self.dex_map_names,
+                                                     self.history)
             try:
                 if config.launch_slot is not None:
                     self._load(config.launch_slot)
@@ -188,7 +259,20 @@ class EmulatorWorker(QObject):
                 self._stop.wait(0.02); deadline = time.perf_counter()
                 continue
             core.buttons = self.buttons
+            if self.evolution is not None:
+                try:
+                    self.evolution.progress = self.rules.progress
+                    core.buttons = self.evolution.before_frame(self.buttons)
+                    for event in self.evolution.sound_events:
+                        self._menu_audio.trigger(event)
+                    self._bank_events()
+                except ValueError as exc:
+                    self.evolution.restore()
+                    self.evolution = None
+                    self.message.emit(f"Manual evolution turned off: {exc}")
             frame, audio = core.run_frame()
+            self._has_run_frame = True
+            audio = self._menu_audio.mix(audio)
             if self.rules is not None:
                 self._apply_rules()
             self._ensure_camera()
@@ -200,7 +284,15 @@ class EmulatorWorker(QObject):
                 self.camera_zoom_changed.emit(*zoom_state)
             frames += 1
             if frame is not None:
-                self._publish(frame_image(frame))
+                image = battle_result_image(frame_image(frame), self.rules.battle_result if self.rules else None)
+                menu = self.evolution.menu if self.evolution else None
+                if menu is not None and menu.layout == "grid" and not self._icons_attempted:
+                    self._menu_icons = native_icons(core)
+                    self._icons_attempted = True
+                if menu is not None and menu.layout == "relation" and not self._portraits_attempted:
+                    self._portraits = native_portraits(core)
+                    self._portraits_attempted = True
+                self._publish(evolution_menu_image(image, menu, self._menu_icons, self._portraits, self.avatars))
             fast = self.fast_forward
             if audio and not fast:
                 self.audio_ready.emit(audio)
@@ -212,7 +304,9 @@ class EmulatorWorker(QObject):
             deadline += 1.0 / (core.fps * (FAST_FORWARD if fast else 1))
             delay = deadline - time.perf_counter()
             if delay > 0:
-                self._stop.wait(delay)
+                # time.sleep uses a high-resolution timer on Windows (Python 3.11+); Event.wait rounds up to the
+                # 15.6 ms system tick, which alternated 31 ms and 2 ms frames. A stop request is seen next frame.
+                time.sleep(delay)
             elif delay < -0.25:  # far behind (a slow frame or a breakpoint): do not try to catch up
                 deadline = time.perf_counter()
 
@@ -221,11 +315,27 @@ class EmulatorWorker(QObject):
         try:
             messages = self.rules.tick()
         except LibretroError as exc:
-            self.message.emit(f"Game rules turned off: {exc}"); self.rules = None
+            self.message.emit(f"Game rules turned off: {exc}")
+            if self.evolution is not None:
+                self.evolution.restore()
+                self.evolution = None
+            self.rules = None
             return
         for text in messages:
             self.message.emit(text)
         if self.rules.progress.exp != before:
+            self._write_progress()
+            self.progress_changed.emit(self.rules.progress.summary())
+
+    def _bank_events(self):
+        """Digi-Bank changes (a hatch, a swap starting or finishing): keep the record, and let the rules re-read
+        the partner so its own age and battle count are not mistaken for the previous partner's."""
+        for text in self.evolution.notices:
+            self.message.emit(text)
+        self.evolution.notices.clear()
+        if self.evolution.events:
+            self.evolution.events.clear()
+            self.rules.reset()
             self._write_progress()
             self.progress_changed.emit(self.rules.progress.summary())
 
@@ -257,6 +367,10 @@ class EmulatorWorker(QObject):
                 elif command[0] == "reset":
                     self._restore_camera()
                     core.reset(); self.message.emit("Console reset")
+                    if self.dex is not None:
+                        self.dex.reset_runtime()
+                    if self.evolution is not None:
+                        self.evolution.reset()
                     if self.rules is not None:
                         self.rules.reset()
                 elif command[0] == "camera_scale":
@@ -271,16 +385,22 @@ class EmulatorWorker(QObject):
                     self._restore_camera()  # Inspections must also reopen with native camera RAM.
                     if self.config.live_ram:
                         self._read_live(core)
-                    self.inspection_captured.emit({"state": core.serialize(), "screenshot": png_bytes(self._last_image),
+                    self.inspection_captured.emit({"state": self._serialize_native(), "screenshot": png_bytes(self._last_image),
                                                    "live": self.live, "core": core.info.name,
                                                    "core_version": core.info.version})
             except (LibretroError, QuickSaveError, InspectionError, OSError) as exc:
                 self.command_failed.emit(str(exc))
 
+    def _serialize_native(self):
+        # No live evolution-selector patch may escape into a slot or inspection.
+        if self.evolution is not None:
+            self.evolution.restore()
+        return self.core.serialize()
+
     def _save(self, slot: int, note: str = ""):
         core = self.core
         self._restore_camera()  # Save native game RAM; reapply the selected zoom on the next frame.
-        info = self.store.save(slot, core.serialize(), png_bytes(self._last_image), core.info.name,
+        info = self.store.save(slot, self._serialize_native(), png_bytes(self._last_image), core.info.name,
                                core.info.version, note,
                                self.rules.progress.to_json() if self.rules is not None else None)
         self.message.emit(f"{info.label} saved ({info.size:,} bytes){f': {info.note}' if info.note else ''}")
@@ -291,6 +411,10 @@ class EmulatorWorker(QObject):
         info = self.store.info(slot)
         core.unserialize(self.store.load(slot, core=core.info.name))
         self._camera = None
+        if self.dex is not None:
+            self.dex.reset_runtime()
+        if self.evolution is not None:
+            self.evolution.reset()
         if self.rules is not None:
             self.rules.reset()
             saved = self.store.progress(slot)
@@ -314,6 +438,10 @@ class EmulatorWorker(QObject):
             raise InspectionError(f"That inspection was saved by {record.core}, not {self.core.info.name}.")
         self.core.unserialize(store.state(inspection_id))
         self._camera = None
+        if self.dex is not None:
+            self.dex.reset_runtime()
+        if self.evolution is not None:
+            self.evolution.reset()
         if self.rules is not None:
             self.rules.reset()
         self.message.emit(f"Started from the inspection at {record.map_name if record else inspection_id}")
@@ -348,6 +476,26 @@ class EmulatorWorker(QObject):
         key = (live.map_index, live.tamer_tile, live.partner_tile, hash(live.grid),
                tuple((npc.slot, npc.character_id, npc.tile) for npc in live.npcs))
         self.live = live
+        if self.dex is not None:
+            try:
+                unlocked = self.dex.observe(core.read_memory, live)
+                if unlocked:
+                    self.message.emit("Digi-Dex unlocked: " + ", ".join(unlocked))
+                if self.dex.dirty:
+                    self.dex_changed.emit(self.dex.snapshot())
+                    self.dex.save()
+                    self._dex_write_error = False
+            except (LibretroError, OSError) as exc:
+                if not self._dex_write_error:
+                    self.message.emit(f"Digi-Dex update failed: {exc}")
+                    self._dex_write_error = True
+        if self.history is not None:
+            try:
+                if self.history.observe(core.read_memory):
+                    self.history.save()
+            except (LibretroError, OSError) as exc:
+                self.message.emit(f"Evolution history not recorded: {exc}")
+                self.history = None
         if key != self._live_key:
             self._live_key = key
             self.live_changed.emit(live)
@@ -363,7 +511,7 @@ class EmulatorWorker(QObject):
 
     def _shutdown(self, core: LibretroCore):
         try:
-            if self.config.resume_on_close and core.av is not None:
+            if self.config.resume_on_close and core.av is not None and self._has_run_frame:
                 self.slot_saved.emit(self._save(RESUME_SLOT, "Saved when the game was closed"))
         except (LibretroError, QuickSaveError, OSError) as exc:
             self.message.emit(f"Resume save failed: {exc}")
@@ -372,14 +520,38 @@ class EmulatorWorker(QObject):
                 self._flush_memory_card(core)
         except OSError as exc:
             self.message.emit(f"Memory card could not be written: {exc}")
+        self._stop.set()  # also ends avatar rendering when the game itself quit
+        if self._avatar_thread is not None:
+            self._avatar_thread.join(5)
         core.stop()
         self.message.emit("Game closed")
+
+    def _start_avatars(self):
+        """Render Digi-Dex avatars on their own thread: discovered Digimon first, then the rest."""
+        discovered = [int(kind) for kind in self.dex.entries]
+        order = list(dict.fromkeys(discovered + list(range(1, 180))))
+
+        def publish(kind, image):
+            self.avatars = {**self.avatars, kind: image}  # GUI (F4) and core threads read the reference
+
+        def run():
+            try:
+                load_avatars(self.config.disc_path, self.config.store_dir / "avatars", order, publish,
+                             self._stop.is_set)
+            except (OSError, KeyError, DiscFormatError) as exc:
+                self.message.emit(f"Digi-Dex avatars unavailable: {exc}")
+            except Exception as exc:  # never take the game down for a picture
+                self.message.emit(f"Digi-Dex avatars stopped: {exc}")
+
+        self._avatar_thread = threading.Thread(target=run, name="dex-avatars", daemon=True)
+        self._avatar_thread.start()
 
 
 class AudioOutput:
     """Pushes the core's 16-bit stereo audio to the default output; drops audio rather than lagging."""
 
     def __init__(self, sample_rate: int, log):
+        self.sample_rate = sample_rate
         audio_format = QAudioFormat()
         audio_format.setSampleRate(sample_rate); audio_format.setChannelCount(2)
         audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
@@ -405,7 +577,7 @@ class AudioOutput:
 
 
 class FrameView(QWidget):
-    """Draws the newest frame letterboxed at the core's aspect ratio; forwards keys to the window."""
+    """Draws the newest frame at the core's aspect ratio, or in a 16:9 screen (graphics.SCREENS); forwards keys."""
 
     def __init__(self, key_handler, parent=None):
         super().__init__(parent)
@@ -414,23 +586,25 @@ class FrameView(QWidget):
         self.image: QImage | None = None
         self.aspect = 4 / 3
         self.smooth = False
+        self.screen = SCREENS[0]
         self.text = "Starting…"
         self._keys = key_handler
 
     def target(self) -> QRectF:
-        width, height = self.width(), self.height()
-        if width / height > self.aspect:
-            shown = height * self.aspect
-            return QRectF((width - shown) / 2, 0, shown, height)
-        shown = width / self.aspect
-        return QRectF(0, (height - shown) / 2, width, shown)
+        return QRectF(*screen_rects(self.width(), self.height(), self.aspect, self.screen)[1])
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("black"))
         if self.image is not None:
+            area, game = (QRectF(*rect) for rect in screen_rects(self.width(), self.height(), self.aspect, self.screen))
+            if area != game:  # 16:9 fill: a blurred, darkened copy of the picture behind it, so the sides match
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                painter.drawImage(area, self.image.scaled(40, 22, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                                          Qt.TransformationMode.SmoothTransformation))
+                painter.fillRect(area, QColor(0, 0, 0, 120))
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.smooth)
-            painter.drawImage(self.target(), self.image)
+            painter.drawImage(game, self.image)
         if self.text:
             painter.setPen(QColor("#e0e0e0"))
             painter.drawText(self.rect().adjusted(12, 12, -12, -12),
@@ -582,6 +756,9 @@ class PlayWindow(QMainWindow):
         self.inspections = InspectionStore(config.store_dir / "inspections")
         self.live_label = QLabel("Live map: off (USA release only)" if not config.live_ram else "Live map: waiting")
         self.statusBar().addPermanentWidget(self.live_label)
+        for label in (self.status, self.live_label):  # long map names/messages clip instead of widening the window
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.live_label.setMinimumWidth(220)
         self.level_label = QLabel()
         self.level_label.setVisible(config.game_rules and config.live_ram)
         self.level_label.setToolTip("P6 game rules: level and EXP of your partner. Aging and death are off.")
@@ -589,15 +766,22 @@ class PlayWindow(QMainWindow):
         self.statusBar().addPermanentWidget(QLabel("F1: controls"))
         self.live_map = LiveMapView()
         self.npc_list = QLabel("NPCs on this map: —"); self.npc_list.setWordWrap(True)
-        live_panel = QWidget(); live_layout = QVBoxLayout(live_panel)
-        live_layout.addWidget(self.live_map, 1); live_layout.addWidget(self.npc_list)
+        self.npc_list.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        # Fixed width, scrolling list: the panel must not resize (and shrink the game view) as maps/NPCs change.
+        npc_scroll = QScrollArea(); npc_scroll.setWidget(self.npc_list); npc_scroll.setWidgetResizable(True)
+        npc_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        npc_scroll.setFixedHeight(180); npc_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        live_panel = QWidget(); live_panel.setFixedWidth(320); live_layout = QVBoxLayout(live_panel)
+        live_layout.addWidget(self.live_map, 1); live_layout.addWidget(npc_scroll)
         self.live_dock = QDockWidget("Live map", self); self.live_dock.setWidget(live_panel)
         self.live_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.live_dock)
         self.live_dock.setVisible(config.live_ram)
         self._live: LiveState | None = None
         self.thread = QThread(self)
+        self._dex_snapshot = {"entries": {}, "catalog": []}
         self.worker = EmulatorWorker(config)
+        self.worker.dex_map_names = dict(self.map_names)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.frame_ready.connect(self._show_frame)
@@ -611,6 +795,7 @@ class PlayWindow(QMainWindow):
         self.worker.live_changed.connect(self._live_changed)
         self.worker.inspection_captured.connect(self._inspection_captured)
         self.worker.camera_zoom_changed.connect(self._camera_zoom_changed)
+        self.worker.dex_changed.connect(self._dex_changed)
         self.worker.progress_changed.connect(self._progress_changed)
         # Direct: stop() blocks the GUI thread in wait(), so a queued quit would never be delivered.
         self.worker.finished.connect(self.thread.quit, Qt.ConnectionType.DirectConnection)
@@ -620,6 +805,24 @@ class PlayWindow(QMainWindow):
     def start(self):
         self.show(); self.view.setFocus()
         self.thread.start()
+
+    @Slot(object)
+    def _dex_changed(self, snapshot):
+        self._dex_snapshot = snapshot
+
+    def _show_digidex(self):
+        if self._dex_snapshot.get("error"):
+            QMessageBox.warning(self, "Digi-Dex unavailable", self._dex_snapshot["error"])
+            return
+        if self.audio is not None:
+            self.audio.write(tone_pcm("open",self.audio.sample_rate))
+        paused = self.worker.paused
+        self.worker.paused = True
+        try:
+            DigiDexDialog(self._dex_snapshot, self.map_names, self, self.worker.avatars).exec()
+        finally:
+            self.worker.paused = paused
+            self.view.setFocus()
 
     def _build_toolbar(self):
         bar = QToolBar("Quick saves"); bar.setMovable(False); self.addToolBar(bar)
@@ -642,9 +845,20 @@ class PlayWindow(QMainWindow):
         bar.addWidget(self.note); bar.addSeparator()
         self.pause = action("Pause", "P", self._toggle_pause, checkable=True)
         action("Reset", "Ctrl+R", self._reset)
+        dex_action = action("Digi-Dex", "F4", self._show_digidex)
+        dex_action.setEnabled(self.config.live_ram)
         self.full = action("Full screen", "F11", self._toggle_full_screen, checkable=True)
+        settings = QSettings("DW1-coop", "workbench")
         smooth = QCheckBox("Smooth"); smooth.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        smooth.setToolTip("Blend pixels when the picture is enlarged (softer, less blocky)")
         smooth.toggled.connect(self._set_smooth); bar.addWidget(smooth)
+        smooth.setChecked(settings.value("play/smooth", True, type=bool))
+        screen = QComboBox(); screen.addItems(SCREENS); screen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        screen.setToolTip("4:3: the original shape. 16:9 fill: the original shape in a 16:9 screen, with a blurred copy "
+                          "of the picture at the sides. 16:9 stretch: the picture stretched to 16:9 (wider characters).")
+        screen.currentTextChanged.connect(self._set_screen)
+        screen.setCurrentText(settings.value("play/screen", SCREENS[0]))
+        bar.addWidget(QLabel("Screen")); bar.addWidget(screen)
         bar.addWidget(QLabel("World zoom"))
         self.camera_zoom = QSlider(Qt.Orientation.Horizontal); self.camera_zoom.setRange(50, 100)
         self.camera_zoom.setValue(100); self.camera_zoom.setFixedWidth(120)
@@ -775,6 +989,7 @@ class PlayWindow(QMainWindow):
         reachable = [self.item_label(item.item_id) for item in live.items if in_game and item.in_reach(live.tamer_tile)]
         extra = [part for part in (threat, f"{', '.join(reachable)} in reach" if reachable else "") if part]
         self.live_label.setText(" · ".join([self.live_summary(live), *extra]))
+        self.live_label.setToolTip(self.live_label.text())  # the label may be clipped
         if in_game:
             self.live_map.show_items([(item.tile, self.item_label(item.item_id)) for item in live.items],
                                      [(chest.tile, self.item_label(chest.item_id), chest.taken) for chest in live.chests])
@@ -839,7 +1054,12 @@ class PlayWindow(QMainWindow):
         self.showFullScreen() if full else self.showNormal()
 
     def _set_smooth(self, smooth: bool):
+        QSettings("DW1-coop", "workbench").setValue("play/smooth", smooth)
         self.view.smooth = smooth; self.view.update(); self.view.setFocus()
+
+    def _set_screen(self, screen: str):
+        QSettings("DW1-coop", "workbench").setValue("play/screen", screen)
+        self.view.screen = screen; self.view.update(); self.view.setFocus()
 
     def _show_help(self):
         QMessageBox.information(self, "Controls", KEY_HELP.replace("  •  ", "\n"))

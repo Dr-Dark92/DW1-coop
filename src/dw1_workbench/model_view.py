@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QImage, QMatrix4x4, QMouseEvent,
                            QPainter, QPainterPath, QPen, QQuaternion,
                            QTransform, QVector3D, QWheelEvent)
@@ -148,24 +148,28 @@ class StaticModelView(QWidget):
         return tuple((u + du, v + dv) for (u, v), (du, dv) in zip(uvs, ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75))))
 
     def paintEvent(self, _event):
-        painter = QPainter(self)
+        self.paint(QPainter(self), self.width(), self.height())
+
+    def paint(self, painter, width, height, background=QColor("#20242b"), hint=True):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#20242b"))
+        painter.fillRect(QRectF(0, 0, width, height), background)
         if not self._triangles:
-            painter.setPen(QColor("#d0d4da")); painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No model preview loaded")
+            if hint:
+                painter.setPen(QColor("#d0d4da"))
+                painter.drawText(QRectF(0, 0, width, height), Qt.AlignmentFlag.AlignCenter, "No model preview loaded")
             return
         yaw, pitch = math.radians(self.yaw), math.radians(self.pitch)
         cy, sy, cp, sp = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
         distance = self._radius * 3.2 / self.zoom
-        focal = min(self.width(), self.height()) * 0.95
+        focal = min(width, height) * 0.95
 
         def project(point):
             p = point - self._center
             x, z = cy * p.x() + sy * p.z(), -sy * p.x() + cy * p.z()
             y, z = cp * p.y() - sp * z, sp * p.y() + cp * z
             depth = z + distance
-            return QPointF(self.width() / 2 + x * focal / depth,
-                           self.height() / 2 - y * focal / depth), depth
+            return QPointF(width / 2 + x * focal / depth,
+                           height / 2 - y * focal / depth), depth
 
         rendered = []
         for vertices, face, object_index in self._triangles:
@@ -201,5 +205,31 @@ class StaticModelView(QWidget):
                 painter.fillPath(path, QBrush(QColor.fromHsv(hue, 90, 190)))
             if self.wireframe:
                 painter.setPen(QPen(QColor(245, 245, 245, 190), 0.8)); painter.drawPath(path)
-        painter.setPen(QColor("#c8ccd2"))
-        painter.drawText(10, 20, "drag: orbit  •  wheel: zoom")
+        if hint:
+            painter.setPen(QColor("#c8ccd2"))
+            painter.drawText(10, 20, "drag: orbit  •  wheel: zoom")
+
+
+class ModelSnapshot:
+    """The preview's renderer without a widget: draws into a QImage on any thread (Digi-Dex avatars)."""
+
+    _local_matrix = staticmethod(StaticModelView._local_matrix)
+    _texture_transform = staticmethod(StaticModelView._texture_transform)
+    _sampling_uvs = staticmethod(StaticModelView._sampling_uvs)
+    _apply_pose = StaticModelView._apply_pose
+    paint = StaticModelView.paint
+
+    def __init__(self, model: StaticModel, palettes: tuple[QImage, ...], clut_y_base: int):
+        self.model, self.palettes, self.clut_y_base = model, palettes, clut_y_base
+        self.textured, self.wireframe = True, False
+        self.yaw, self.pitch, self.zoom = -35.0, -12.0, 1.0
+        self._triangles, self._center, self._radius = [], QVector3D(), 1.0
+        self._apply_pose(model.pose, (0.0, 0.0, 0.0), recentre=True)
+
+    def image(self, size: int, background=QColor(0, 0, 0, 0)) -> QImage:
+        image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(background)
+        painter = QPainter(image)
+        self.paint(painter, size, size, background, hint=False)
+        painter.end()
+        return image

@@ -1,5 +1,25 @@
 # Handover
 
+## Claude P6 entry point (2026-11-03)
+
+Read [CLAUDE_HANDOVER.md](CLAUDE_HANDOVER.md) first for the consolidated current Windows/P6 guide, setup, settled decisions, verification and remaining work. P6_HANDOVER.md is chronological evidence. Old Claude/P4 notes are preserved in CLAUDE_P4_HANDOVER_HISTORY.md. No commit/push.
+
+## Native-style focused Tree, sounds and EXP repair (2026-11-03, Codex)
+
+Tree now follows the user’s screenshot, with native portraits and colored previous/next branches. Added opening/navigation/choose cues. Confirmed victory rewards survive map reloads before the late win-counter update; real battle +10 EXP and level-up retained through Native Forest→Green Gym in a separate test store. Latest details/evidence in P6_HANDOVER.md. User saves unchanged; no commit/push.
+
+## P6 menu repair and relation view (2026-11-03, Codex)
+
+Fixed the reported menu exit: USA native cancel is Triangle, so both overlay back buttons now forward it. Replaced the list with an original-icon grid and Evolution with a staged family relation chart; level-21 Champion eligibility remains. Native exit/Dex/chart paths and Greymon evolution verified separately, user saves unchanged. 184 tests passed, 14 skipped. See the latest P6_HANDOVER entry.
+
+## Digi-Dex (2026-11-03, Codex, Windows)
+
+Added battle-only discovery, in-game option 8 and Windows F4, with stats/stage, drops, linked/equipped skills, possible source locations and observed battle hours. Real ModokiBetamon battle/UI verified without changing user saves. See the opening of P6_HANDOVER.md and FORMATS.md for the persistence and schedule limits. Full suite: 180 passed, 14 skipped. No commit/push.
+
+## P6 manual evolution (2026-11-03, Codex, Windows)
+
+Implemented and real-game checked: Evolution is option 7 in the in-game menu with P6 on; Rookie → linked Champion at level 21, player choice with confirmation. Automatic natural/random/virus evolution is guarded. Agumon → Greymon completed through the native sequence in a separate test store; original save hashes unchanged. See the opening of P6_HANDOVER.md and the manual-evolution section of FORMATS.md for implementation/evidence/limits. Restart the app for the new code. No commit/push; world zoom remains off.
+
 ## P6 game rules (2026-11-03, Claude, branch `python-player`)
 
 - User's rules: no aging/death, start at level 20 with matching stats, Rookie 10 / Champion 30 / Ultimate 90 EXP, combo ×1/×1.5/×2/×3 for 1–4 enemies, and a leveling equation (chosen: (L+1)(L+20)/2 to next level). Implemented as RAM rules in the Python player (`progression.py`, `GameRules.tick` every frame; `PlayConfig.game_rules`; Play-tab checkbox; level in the play window's status bar; `slotN.progress.json` with quick saves). Details and addresses in FORMATS.md.

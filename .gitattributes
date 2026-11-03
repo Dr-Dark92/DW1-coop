@@ -1,0 +1,2 @@
+# Generated camera bytecode checks the exact source hash on every host.
+src/dw1_workbench/camera_engine.c text eol=lf

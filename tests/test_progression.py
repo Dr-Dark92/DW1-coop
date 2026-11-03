@@ -117,3 +117,146 @@ def test_quick_save_keeps_progress(tmp_path):
     store.save(3, b"state", None, "core", "1", progress=progress.to_json())
     store.delete(3)
     assert store.progress(3) is None
+
+
+@pytest.mark.parametrize("outcome", ["flee", "loss", "win"])
+def test_completed_encounter_cannot_award_stale_enemies(ram, outcome):
+    rules = P.GameRules(ram.read, ram.write)
+    rules.tick()
+    ram.put(COMBAT + P.COMBAT_ENTITY_IDS, "4B", 1, 7, 0, 0)
+    ram.put(P.ENEMY_COUNT, "<h", 1)
+    ram.put(P.GAME_STATE, "<h", 3)
+    rules.tick()
+    ram.put(P.GAME_STATE, "<h", 0)
+    if outcome == "win":
+        ram.put(P.BATTLES_WON, "<h", 1)
+    elif outcome == "loss":
+        ram.put(P.PARTNER_LIVES, "<B", 2)
+    messages = rules.tick()
+    expected = P.total_exp(20) + (90 if outcome == "win" else 0)
+    assert rules.progress.exp == expected
+    assert bool(messages) == (outcome == "win")
+    assert ram.get(P.PARTNER_LIVES, "<B") == 3
+
+    # The next encounter cannot be read; its win must not reuse the Ultimate.
+    ram.put(P.GAME_STATE, "<h", 3)
+    ram.put(P.COMBAT_DATA_PTR, "<I", 0)
+    rules.tick()
+    ram.put(P.GAME_STATE, "<h", 0)
+    ram.put(P.BATTLES_WON, "<h", ram.get(P.BATTLES_WON, "<h") + 1)
+    assert rules.tick() == []
+    assert rules.progress.exp == expected
+    assert rules.tick() == []
+    assert rules.progress.exp == expected
+
+
+def test_results_preview_before_reward_and_clear_on_exit(ram):
+    rules = P.GameRules(ram.read, ram.write, P.Progress(P.total_exp(21) - 5))
+    rules.tick()
+    ram.put(COMBAT + P.COMBAT_ENTITY_IDS, "4B", 1, 5, 0, 0)
+    ram.put(P.ENEMY_COUNT, "<h", 1)
+    ram.put(P.GAME_STATE, "<h", 2)
+    ram.put(P.UI_BOX_DATA + 18, "<h", 1)
+    ram.put(P.UI_BOX_DATA + 32, "<I", P.POST_BATTLE_RENDER)
+    before = rules.progress.exp
+    for _ in range(3):
+        assert rules.tick() == []
+        assert rules.progress.exp == before
+        assert rules.battle_result.gained == 10
+        assert rules.battle_result.exp == P.total_exp(21) + 5
+        assert rules.battle_result.lines[2] == "Level 21"
+        assert rules.battle_result.lines[-1] == "Next level 446 EXP"
+    ram.put(P.UI_BOX_DATA + 18, "<h", 0)
+    rules.tick()
+    assert rules.battle_result is None
+    ram.put(P.GAME_STATE, "<h", 0)
+    ram.put(P.BATTLES_WON, "<h", 1)
+    rules.tick()
+    assert rules.progress.exp == before + 10
+    assert rules.battle_result is None
+    rules.reset()
+    assert rules.battle_result is None
+
+
+def test_results_ignore_unrelated_boxes_and_max_level(ram):
+    rules = P.GameRules(ram.read, ram.write)
+    ram.put(P.GAME_STATE, "<h", 2)
+    ram.put(P.UI_BOX_DATA + 18, "<h", 1)
+    ram.put(P.UI_BOX_DATA + 32, "<I", 0x800BB610)
+    rules.tick()
+    assert rules.battle_result is None
+    assert P.BattleResult(90, P.total_exp(99)).lines[-2:] == ("Maximum level", "EXP complete")
+
+
+def test_confirmed_victory_survives_area_reload_before_win_counter(ram):
+    rules = P.GameRules(ram.read, ram.write, P.Progress(P.total_exp(21) - 5))
+    rules.tick()
+    ram.put(COMBAT + P.COMBAT_ENTITY_IDS, "4B", 1, 5, 0, 0)
+    ram.put(P.ENEMY_COUNT, "<h", 1)
+    ram.put(P.GAME_STATE, "<h", 3)
+    rules.tick()
+    ram.put(P.UI_BOX_DATA + 18, "<h", 1)
+    ram.put(P.UI_BOX_DATA + 32, "<I", P.POST_BATTLE_RENDER)
+    rules.tick()
+    assert rules.battle_result.gained == 10
+    # The native return reloads map assets before incrementing the win counter.
+    ram.put(P.GAME_STATE, "<h", 0)
+    ram.put(P.PARTNER_STATS + 16, "<h", 0)
+    rules.tick()
+    ram.put(0x80134DA8, "<B", 112)
+    ram.put(P.PARTNER_STATS + 16, "<h", 2000)
+    assert any("+10 EXP" in text for text in rules.tick())
+    expected = P.total_exp(21) + 5
+    assert rules.progress.exp == expected
+    assert rules.progress.level == 21
+    assert rules._stats()["offense"] == 210
+    ram.put(P.BATTLES_WON, "<h", 1)
+    for _ in range(5): assert rules.tick() == []
+    assert rules.progress.exp == expected
+    restored = P.Progress.from_json(rules.progress.to_json())
+    assert restored.exp == expected
+    ram.put(0x80134DA8, "<B", 109)
+    rules.tick()
+    assert rules.progress.exp == expected
+
+
+def test_regen_one_percent_per_second_out_of_battle_only(ram):
+    rules = P.GameRules(ram.read, ram.write, P.Progress(P.total_exp(20)))
+    rules.tick()  # floor: max HP/MP 2000, current 636+1200 / 420+1399
+    ram.put(P.PARTNER_STATS + P.CURRENT_HP, "<hh", 1000, 1990)
+    for _ in range(P.REGEN_FRAMES - 2):  # the floor tick above was the first frame of this second
+        rules.tick()
+    assert ram.get(P.PARTNER_STATS + P.CURRENT_HP, "<h") == 1000
+    rules.tick()
+    assert ram.get(P.PARTNER_STATS + P.CURRENT_HP, "<hh") == 1020
+    assert ram.get(P.PARTNER_STATS + P.CURRENT_MP, "<h") == 2000  # capped at max
+    ram.put(P.GAME_STATE, "<h", 1)
+    for _ in range(P.REGEN_FRAMES * 3):
+        rules.tick()
+    assert ram.get(P.PARTNER_STATS + P.CURRENT_HP, "<h") == 1020
+    ram.put(P.GAME_STATE, "<h", 0)
+    ram.put(P.PARTNER_STATS + P.CURRENT_HP, "<h", 0)
+    for _ in range(P.REGEN_FRAMES):
+        rules.tick()
+    assert ram.get(P.PARTNER_STATS + P.CURRENT_HP, "<h") == 0  # never revives
+
+
+def test_finished_training_session_gives_exp(ram):
+    rules = P.GameRules(ram.read, ram.write, P.Progress(P.total_exp(20) + 418))
+    ram.put(P.TRN_CURRENT_HOUR, "<h", 23)
+    ram.put(P.HOUR, "<h", 23)
+    for state in (1, 3, 4, 5):
+        ram.put(P.TRAINING_STATE, "<B", state)
+        assert rules.tick() == []
+    ram.put(P.HOUR, "<h", 0)  # TRN_advanceTrainingTime: one hour later
+    ram.put(P.TRAINING_STATE, "<B", 0)
+    messages = rules.tick()
+    assert messages[0].startswith("Training: +5 EXP") and messages[1].startswith("Level up! Lv 21")
+    assert rules.progress.exp == P.total_exp(21) + 3
+    assert rules.tick() == []
+    # A session whose clock did not advance (a state loaded mid-session, then left) gives nothing.
+    ram.put(P.TRAINING_STATE, "<B", 2)
+    rules.tick()
+    ram.put(P.TRAINING_STATE, "<B", 0)
+    ram.put(P.TRN_CURRENT_HOUR, "<h", 0)
+    assert rules.tick() == []
