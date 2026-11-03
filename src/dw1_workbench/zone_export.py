@@ -2,7 +2,7 @@
 
 A package keeps the original MAP and TFS bytes unchanged (with SHA-256), the decoded scene data, rendered
 backgrounds and floor grids, pathing (walkable regions, spawn-to-exit routes, map-to-map routes inside the
-package), the links in and out of the package, and, optionally, what was observed while playing. Unknown
+package) and the links in and out of the package. Play-time observations are never included. Unknown
 fields are carried as raw values. The package contains game data from the user's own disc: keep it private.
 """
 from __future__ import annotations
@@ -156,7 +156,7 @@ def pathing_document(pathing: MapPathing) -> dict:
 
 def export_package(destination: Path, zones: list[str], sources: dict[int, MapSource], all_scenes: dict[int, MapScene],
                    entries: list[MapEntry], map_names: dict[int, str], character_names: dict[int, str], meta: dict,
-                   observations: dict | None = None, all_palettes: bool = False, cancelled=lambda: False,
+                   all_palettes: bool = False, cancelled=lambda: False,
                    progress=lambda value, text: None) -> dict:
     """Write the package for `zones` (all maps in `sources` belong to them) and return its manifest."""
     destination = Path(destination)
@@ -231,12 +231,6 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                 add(f"zones/{slug(zone)}.json", json.dumps(document, indent=1).encode(), "zone")
             add("routes.json", json.dumps({"rules": "walk-through exits only; script-driven exits are not decoded",
                                            "routes": route_table}).encode(), "map-to-map routes")
-            if observations:
-                progress(92, "Adding observations")
-                for name, data, kind in observations.get("files", ()):
-                    add(f"observations/{name}", data, kind)
-                add("observations/observations.json", json.dumps(observations.get("records", {}), indent=1).encode(),
-                    "observations (seen while playing, not decoded)")
             manifest = {
                 "format": PACKAGE_FORMAT, "version": PACKAGE_VERSION, "kind": "zone" if len(zones) == 1 else "bundle",
                 "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),

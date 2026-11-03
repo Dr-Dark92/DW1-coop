@@ -1,5 +1,49 @@
 # Handover
 
+## Handover for Codex (2026-11-03, paused by the user mid-task)
+
+### Where things stand
+
+- Repository `/home/drdark/dev/DW1-coop`, branch `python-player` (pushed up to `220c776`; it sits on `animations`, which sits on PR #1 `agumon-preview-verification`; `main` has only `docs/ROADMAP.md` on top of the old base). Python 3.14 venv at `/home/drdark/.venv`.
+- Run tests: `QT_QPA_PLATFORM=offscreen PYTHONPATH=src /home/drdark/.venv/bin/python -m pytest -q` (135 pass; the fake libretro core in `tests/fake_core.c` is compiled by a fixture). Run the app: `env PYTHONPATH=src /home/drdark/.venv/bin/python -m dw1_workbench.app`.
+- The user's real project is `/home/drdark/Documents/dw` (disc: `~/Downloads/Digimon World (USA)/Digimon World (USA).cue`, BIOS `~/Downloads/SCPH1001.BIN`, core `/usr/lib/libretro/mednafen_psx_libretro.so`, saves `~/.local/share/DW1-coop/play/06084490ea0db340/`). The validation project used by scripts is `/home/drdark/dev/DW1-coop-data/maps-validation/project`. Never commit game data; packages, patched discs and `slus.bin` stay outside Git.
+- The user only wants commits/pushes when they ask, and confirms features on the desktop before saying "commit it".
+
+### Uncommitted work (verified, waiting for the user's "commit it")
+
+Everything in `git status` after `220c776`: observations removed from zone export; zone import (`zone_import.py`, `disc_patch.py`, `background_import.py`, GUI dialogs, Play tab "Play with imported zones"); background repaint with the foreground layer (all kinds); `LibretroCore.write_memory`. The sections below describe and verify each. The user confirmed the import/background fix ("much better") and then asked for all foreground kinds, which is done and checked across all 241 maps but not yet confirmed by them on the desktop.
+
+### In progress: camera zoom prototype (`src/dw1_workbench/camera.py`, not wired into the UI)
+
+Goal from the user: a wider camera / aspect ratio that only changes the zoom level, without stretching images.
+
+Design (from dw_decomp `aaf69a4`): the overworld draws a 320×240 window with the drawing origin at the screen centre (`GsInitGraph(320, 240, 4, ...)`), background tiles via `renderMap` → `setPosDataMapTile` → `setPosDataPolyFT4`, foreground pieces via `buildMapOverlayPrim` → `setPosDataPolyFT4`, and 3D through GTE H = `VIEWPORT_DISTANCE` (0x80134ED4, set per map by `GsSetProjection` in `loadMapSetup`). `camera.routine(scale)` is a 28-instruction scaled copy of `setPosDataPolyFT4` (corners × scale/256, then `ctc2` of `VIEWPORT_DISTANCE` into GTE H); encodings were checked against `llvm-mc` (27/28; `ctc2` by hand, `0x48CED000`). `CameraZoom` writes it at `ROUTINE = 0x801D0000` (inside 96 KB that stayed zero in all sampled saves) and points the three `jal setPosDataPolyFT4` call sites (`0x800D71F8`, `0x800B5074`, `0x800B509C`) at it, and `tick()` keeps `VIEWPORT_DISTANCE` at the map's value × scale. Beetle's `beetle_psx_internal_resolution` (2x, 4x, …) is the plan for keeping a smaller-drawn background sharp.
+
+Status: **not working yet, and the last diagnostic was misleading.** Patches are written correctly (read back), RAM writes reach the game (moving the Tamer's position works), but the routine never ran. The emulated CPU has an instruction cache (Beetle PSX save state field `ICache_Bulk`: 1024 × (u32 tag, u32 word)); writing code into RAM from outside does not invalidate it. `camera.flush_instruction_cache` invalidates every tag (OR 0x2) in a serialized state and loads it back — **this freezes the game** (RAM changes over 30 frames: 97 bytes before, 0 after), so every "call count 0" probe after a flush means nothing. Next steps:
+
+1. Fix the flush: check Mednafen/Beetle `cpu.cpp` for how tags encode validity (the tag likely carries more than "address | valid"; set invalid lines to what `PS_CPU::Power()`/`AssertIRQ` use, e.g. `0x2 | (BIU & 0x800 ? 0 : 1)`), or flush only the lines whose index matches the patched addresses (`(addr & 0xFFC) >> 2`) by writing the new instruction word into the cached entry instead of invalidating. Alternatively patch code before the game first runs it (apply to `SLUS_010.32` in the patched disc via `disc_patch`, which avoids the cache entirely) — this is probably the robust route for the real feature, with the live route only for quick experiments.
+2. Then re-run the call probe (`dev-tools/probe2.py`) and the zoom capture (`dev-tools/zoom_try.py`, sheet in `dev-tools/zoom_sheet.png` shows no effect so far).
+3. Expected follow-ups once quads scale: only 4×3 background tiles are streamed (`uploadMapTileImages`), so the edges of a zoomed-out view will show unloaded tiles; the camera clamps and object culling still assume 320×240; HUD must stay unscaled (other `setPosDataPolyFT4` callers are untouched); battles reuse the overworld map. 16:9 would be the same mechanism with separate X/Y factors plus Beetle's `beetle_psx_widescreen_hack` for 3D, or the player displaying anamorphically.
+
+### Development scripts (outside Git)
+
+`/home/drdark/dev/DW1-coop-data/dev-tools/`: `cam/dis.py` (disassembles `cam/slus.bin`, the USA executable, at virtual addresses; file offset = VA − 0x80090000, load address 0x80090800) via `llvm-mc --disassemble`; `nav.py`/`walk.py`/`chase.py` (drive the real game headless along walk-through exits from an inspection state); `edit_test.py`, `bg_game*.py`, `import_try.py`, `export_try.py` (import/patched-disc checks); `fg_check.py`/`fg_match.py` (all-map foreground checks); `probe2.py`, `zoom_try.py`, `zoom_probe.py` (camera work). They expect `PYTHONPATH=src` from the repository and `QT_QPA_PLATFORM=offscreen`.
+
+## Zone import (2026-11-03, branch `python-player`)
+
+User: exports must not include observation files; add import for a single zone or a bundle. Observations were removed from export (option, code and test guard).
+
+- `zone_import.py`: `read_package`/`check_package` (manifest hashes, release and disc, per-map parse, warps, sector room) and `OverrideStore` (`<project>/overrides/`, changed files only; an unchanged import restores the disc's files).
+- `disc_patch.py`: Mode 2/Form 1 EDC/ECC encoder (matches 198/198 real sectors), directory-record lookup, `build_patched_image` (copy, patch only differing sectors, size field, CUE copied; one cached copy, about 365 MB).
+- GUI: Maps and Zones "Import zone or bundle…" (`ZoneImportDialog` shows changed/unchanged/problems), "Imported zones (N)…" (remove), previews/pathing/export read overrides; Play tab "Play with imported zones" builds the patched disc on a `PatchWorker` (bound slots only) and launches it.
+- Verified: unchanged 48-map bundle → nothing stored, patched BIN byte-identical; MAYO00 tile 52,30 blocked in a package → imported → live grid on the patched disc equals the imported MAP. Full GUI flow run offscreen on a copy of the project. 132 tests pass.
+
+Follow-up (user's `~/Documents/native-forest.dw1zone`): they repainted `maps/109-MAYO00/background-palette0.png` at 1145×1374 and import ignored it (only MAP/TFS were read, so it looked identical). `background_import.encode_background` now converts an edited palette-0 picture into the TFS; `read_package` reports edited files instead of failing on manifest mismatches; other generated files are reported as ignored. Their package imports as one changed TFS and the new background was seen in the game. The user then saw black stepped blocks and old-coloured bushes in front of the characters: MAYO00's foreground layer (32 sprite objects from two embedded 8-bit TIMs) uses the background palette, whose transparent entry (index 255) had become opaque. `encode_background` now also repaints those TIM pixels from the picture at each instance's position, keeping transparency, and returns the new MAP; import marks MAP and TFS changed. Seen fixed in the game. The user must re-import the package (the earlier override has the old TFS only). 135 tests pass.
+
+Then all foreground kinds (user: "for the other zones should be the same right?"): survey of 241 maps — 170 with background-palette pieces, 127 with own-palette pieces (104 with 4-bit images), 39 animated, 13 Freezeland particle maps, 27 without a foreground. `background_import._Vram` models the image loads; `_repaint_foreground` repaints opaque, static, single-place cut-outs (measured against the original background) and keeps effects, separate art, animation, particles and repeated pieces, reporting each reason in the import notes. Identity conversion of all 241 maps: no failures, median foreground colour change 0, worst 13.5/255; the scratch harness lives outside Git. For the user's MAYO00: 104,704 texels repainted, 8 semi-transparent effects and 4 right-edge foliage pieces kept. A possible next step is exporting the foreground layer as its own editable PNG.
+
+Limits: files cannot grow past their original sectors; there is no in-workbench zone editor yet.
+
 ## Zone pathing and export (2026-11-03, branch `python-player`)
 
 User request: "zone exporting + pathing, single zone or bundle zone" (roadmap P2's export half; import is not started).

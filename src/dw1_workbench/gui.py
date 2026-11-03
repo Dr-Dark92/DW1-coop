@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import struct
 import threading
@@ -31,6 +32,8 @@ from .animation_view import ModelAnimationPanel, ModelLoad
 from .items import parse_item_names
 from .pathing import map_pathing, plan_route
 from .play_panel import PlayPanel
+from .disc_patch import build_patched_image
+from .zone_import import OverrideStore, check_package
 from .zone_export import SUFFIX as ZONE_SUFFIX, MapSource, export_package, pathing_image, slug as zone_slug
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .project import import_project, layout_from_catalogue, source_state
@@ -251,12 +254,19 @@ class ZoneWorker(QObject):
                         raise Cancelled("Cancelled.")
                     self.progress.emit(3 * done // len(self.maps) if self.task == "export" else 95 * done // len(self.maps),
                                        f"Reading {entries[index].name}")
-                    map_bytes = read(map_item)
+                    imported = self.export.get("overrides", {}).get(index, {})
+                    map_bytes = imported.get("MAP") or read(map_item)
+                    if "MAP" in imported:
+                        map_row = {**map_row, "content_hash": hashlib.sha256(map_bytes).hexdigest(),
+                                   "size": len(map_bytes), "imported": True}
                     scene = scenes[index] = parse_map(map_bytes, entries[index])
                     if self.task == "pathing":
                         pathing[index] = map_pathing(entries[index], scene, self.export.get("map_names"), with_paths=False)
                     elif entries[index].area_name in zones:
-                        tfs_bytes = read(tfs_item) if tfs_item is not None else None
+                        tfs_bytes = imported.get("TFS") or (read(tfs_item) if tfs_item is not None else None)
+                        if "TFS" in imported:
+                            tfs_row = {**tfs_row, "content_hash": hashlib.sha256(tfs_bytes).hexdigest(),
+                                       "size": len(tfs_bytes), "imported": True}
                         sources[index] = MapSource(entries[index], scene, parse_tfs(tfs_bytes) if tfs_bytes else None,
                                                    map_bytes, tfs_bytes, map_row, tfs_row)
             if self.task == "pathing":
@@ -266,7 +276,7 @@ class ZoneWorker(QObject):
             options = self.export
             manifest = export_package(options["destination"], options["zones"], sources, scenes, entries,
                                       options["map_names"], options["character_names"], options["meta"],
-                                      options.get("observations"), options.get("all_palettes", False), cancelled,
+                                      options.get("all_palettes", False), cancelled,
                                       lambda value, text: self.progress.emit(3 + value * 97 // 100, text))
             self.succeeded.emit(manifest)
         except Cancelled as exc:
@@ -295,10 +305,8 @@ class ZoneExportDialog(QDialog):
             self.list.addItem(item)
         self.search.textChanged.connect(lambda text: [self.list.item(row).setHidden(
             text.lower() not in self.list.item(row).text().lower()) for row in range(self.list.count())])
-        self.observations = QCheckBox("Include what was seen while playing (inspections and item spawns)")
-        self.observations.setChecked(True)
         self.palettes = QCheckBox("Render backgrounds in every palette (larger; the original TFS is always included)")
-        layout.addWidget(self.observations); layout.addWidget(self.palettes)
+        layout.addWidget(self.palettes)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Export…")
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
@@ -307,6 +315,75 @@ class ZoneExportDialog(QDialog):
     def zones(self) -> list[str]:
         return [self.list.item(row).data(Qt.ItemDataRole.UserRole) for row in range(self.list.count())
                 if self.list.item(row).checkState() == Qt.CheckState.Checked]
+
+
+class ZoneImportDialog(QDialog):
+    """Shows what a package would change before anything is stored."""
+
+    def __init__(self, report, current: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Import {report.path.name}")
+        layout = QVBoxLayout(self)
+        manifest = report.manifest
+        summary = QLabel(f"{manifest.get('kind', 'zone').capitalize()} with {len(manifest.get('zones', []))} zone(s), "
+                         f"{len(report.maps)} map(s), made {manifest.get('created', '?')} from "
+                         f"{(manifest.get('source') or {}).get('release', 'an unknown release')}. "
+                         f"{len(report.changed_maps)} map(s) differ from the disc.")
+        summary.setWordWrap(True); layout.addWidget(summary)
+        table = QTableWidget(len(report.maps), 4)
+        table.setHorizontalHeaderLabels(["Map", "MAP", "TFS", "Checks"])
+        table.verticalHeader().setVisible(False); table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        for row, item in enumerate(report.maps):
+            checks = "; ".join(item.problems) or "; ".join(item.notes) or "ok"
+            if item.index in current and not item.changed:
+                checks += "; replaces the earlier import with the disc's files"
+            for column, value in enumerate((item.label, item.status.get("MAP", "—"), item.status.get("TFS", "—"), checks)):
+                cell = QTableWidgetItem(value)
+                if item.problems:
+                    cell.setForeground(Qt.GlobalColor.red)
+                table.setItem(row, column, cell)
+        layout.addWidget(table, 1)
+        if report.problems:
+            problems = QLabel("Package problems:\n" + "\n".join(f"• {problem}" for problem in report.problems))
+            problems.setStyleSheet("color: #a33"); problems.setWordWrap(True); layout.addWidget(problems)
+        note = QLabel("Imported files are kept in the project's overrides folder; the disc image is never changed. "
+                      "Files must fit the sectors of the originals they replace.")
+        note.setWordWrap(True); layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Import")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(report.ok)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+        self.resize(760, 520)
+
+
+class ImportedZonesDialog(QDialog):
+    def __init__(self, overrides, parent=None):
+        super().__init__(parent)
+        self.overrides = overrides
+        self.setWindowTitle("Imported zones")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Maps that use imported files instead of the disc's. Removing one goes back to the disc."))
+        self.list = QListWidget(); layout.addWidget(self.list, 1)
+        remove = QPushButton("Remove selected"); remove.clicked.connect(self._remove)
+        close = QPushButton("Close"); close.clicked.connect(self.accept)
+        row = QHBoxLayout(); row.addWidget(remove); row.addStretch(); row.addWidget(close); layout.addLayout(row)
+        self._fill(); self.resize(620, 360)
+
+    def _fill(self):
+        self.list.clear()
+        for index, record in sorted(self.overrides.records().items()):
+            item = QListWidgetItem(f"{record['label']} — {', '.join(record['files'])} from {record['package']} "
+                                   f"({record['imported']})")
+            item.setData(Qt.ItemDataRole.UserRole, index); self.list.addItem(item)
+        if not self.list.count():
+            self.list.addItem("No imported zones.")
+
+    def _remove(self):
+        item = self.list.currentItem()
+        if item is not None and item.data(Qt.ItemDataRole.UserRole) is not None:
+            self.overrides.remove(item.data(Qt.ItemDataRole.UserRole)); self._fill()
 
 
 class WelcomePage(QWidget):
@@ -357,6 +434,7 @@ class Workspace(QWidget):
         self.rows_by_id = {row["id"]: row for row in self.rows}
         self.associations = catalogue.associations()
         self.labels = {(row["resource_id"], row["kind"]): row for row in catalogue.labels()}
+        self.overrides = OverrideStore(catalogue.project_dir)
         self.export_thread: QThread | None = None
         self.export_worker: ExportWorker | None = None
         self.export_progress: QProgressDialog | None = None
@@ -384,7 +462,8 @@ class Workspace(QWidget):
         self.tabs.addTab(self.maps_page, "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
         self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid,
-                                    self._character_names(), self._item_names())
+                                    self._character_names(), self._item_names(),
+                                    (lambda: len(self.overrides.records()), self._build_patched_disc))
         self.play_panel.show_map_requested.connect(self.show_map)
         self.tabs.addTab(self.play_panel, "Play")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
@@ -707,7 +786,12 @@ class Workspace(QWidget):
         export.clicked.connect(self._export_map_background)
         browser = QWidget(); browser_layout = QVBoxLayout(browser); browser_layout.setContentsMargins(0, 0, 0, 0)
         export_zone = QPushButton("Export zone or bundle…"); export_zone.clicked.connect(self._export_zones)
-        export_row = QHBoxLayout(); export_row.addWidget(export); export_row.addWidget(export_zone)
+        import_zone = QPushButton("Import zone or bundle…"); import_zone.clicked.connect(self._import_zones)
+        self.imported_button = QPushButton(f"Imported zones ({len(self.overrides.records())})…")
+        self.imported_button.clicked.connect(self._manage_overrides)
+        export_row = QHBoxLayout()
+        for button in (export, export_zone, import_zone, self.imported_button):
+            export_row.addWidget(button)
         browser_layout.addWidget(split, 1); browser_layout.addLayout(export_row)
         self.maps_tabs = QTabWidget()
         self.maps_tabs.addTab(browser, "Browser"); self.maps_tabs.addTab(self._relation_page(), "Relation map")
@@ -868,6 +952,7 @@ class Workspace(QWidget):
         executable, maps = self._zone_maps()
         dialog = QProgressDialog(title, "Cancel", 0, 100, self)
         dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
+        export = {**(export or {}), "overrides": self._override_files()}
         thread, worker = QThread(self), ZoneWorker(self.catalogue, executable, maps, task, export)
         worker.moveToThread(thread); thread.started.connect(worker.run)
         worker.progress.connect(self._zone_progress_changed)
@@ -937,25 +1022,11 @@ class Workspace(QWidget):
             return
         export = {"destination": destination, "zones": chosen, "map_names": self._map_names(),
                   "character_names": self._character_names(), "meta": self.catalogue.meta(),
-                  "observations": self._observations(chosen) if dialog.observations.isChecked() else None,
                   "all_palettes": dialog.palettes.isChecked()}
         try:
             self._start_zone_worker("export", f"Exporting {name}", export, self._zones_exported)
         except Exception as exc:
             QMessageBox.critical(self, "Zone export failed", str(exc))
-
-    def _observations(self, zones: list[str]) -> dict:
-        indices = {int(row["original_path"].rsplit("/", 2)[1]) for row in self.map_rows.values()
-                   if (label := self.labels.get((row["id"], "area_name"))) and label["value"] in zones}
-        panel, files = self.play_panel, []
-        inspections = [record for record in panel.inspections.list() if record.map_index in indices]
-        for record in inspections:
-            if (screenshot := panel.inspections.screenshot_path(record.id)) is not None:
-                files.append((f"inspections/{record.id}.png", screenshot.read_bytes(), "inspection screenshot"))
-        spawns = [spawn for spawn in panel.spawns.spawns() if spawn.map_index in indices]
-        return {"files": files, "records": {"note": "observed while playing; not decoded data",
-                                            "inspections": [record.__dict__ for record in inspections],
-                                            "item_spawns": [spawn.__dict__ for spawn in spawns]}}
 
     @Slot(object)
     def _zones_exported(self, manifest):
@@ -1057,8 +1128,8 @@ class Workspace(QWidget):
             scene_row, tfs_row = self._character_related(row, "scene"), self._character_related(row, "background")
             if scene_row is None or tfs_row is None:
                 raise ValueError(f"{entry.map_path} / .TFS are absent from this disc; only the table entry exists.")
-            scene = parse_map(self._read_row(scene_row, MAX_MAP_FILE), entry)
-            tfs = parse_tfs(self._read_row(tfs_row, MAX_TFS_FILE))
+            scene = parse_map(self._map_file(entry.index, "MAP", scene_row, MAX_MAP_FILE), entry)
+            tfs = parse_tfs(self._map_file(entry.index, "TFS", tfs_row, MAX_TFS_FILE))
             self._map_scene, self._map_tfs = scene, tfs
             self._update_pathing(entry, scene)
             self.map_palette.blockSignals(True)
@@ -1083,7 +1154,9 @@ class Workspace(QWidget):
             setup = scene.setup
             lines = [
                 f"map: {entry.name} (table index {entry.index}, area {entry.area_id}: {entry.area_name})",
-                f"files: {entry.map_path}, {entry.tfs_path}",
+                f"files: {entry.map_path}, {entry.tfs_path}"
+                + (f" — IMPORTED {', '.join(self.overrides.records()[entry.index]['files'])} from "
+                   f"{self.overrides.records()[entry.index]['package']}" if entry.index in self.overrides.records() else ""),
                 f"flags: sound {entry.sound_id}, day/night {'yes' if entry.has_time_cycle else 'no'}, "
                 f"Digimon {'yes' if entry.has_digimon else 'no'}",
                 f"background: {setup.grid_width}×{setup.grid_height} tiles of 128×128, {len(tfs.palettes)} palette(s)",
@@ -1189,6 +1262,68 @@ class Workspace(QWidget):
                 names.setdefault(character_id, label["value"])
         return names
 
+    def _map_file(self, index, kind, row, limit):
+        """A map's MAP or TFS bytes: the imported override when there is one, else the disc's file."""
+        return self.overrides.file(index, kind) or self._read_row(row, limit)
+
+    def _override_files(self) -> dict[int, dict[str, bytes]]:
+        return {index: {kind: self.overrides.file(index, kind) for kind in record["files"]}
+                for index, record in self.overrides.records().items()}
+
+    def _import_originals(self):
+        """Catalogue hash and size of each map's MAP/TFS on the disc, and the bytes its sectors hold."""
+        originals, room = {}, {}
+        for row in self.map_rows.values():
+            index = int(row["original_path"].rsplit("/", 2)[1])
+            for kind, relation in (("MAP", "scene"), ("TFS", "background")):
+                related = self._character_related(row, relation)
+                if related is not None:
+                    originals.setdefault(index, {})[kind] = {"content_hash": related["content_hash"],
+                                                              "size": related["size"]}
+                    room.setdefault(index, {})[kind] = (related["size"] + 2047) // 2048 * 2048
+        return originals, room
+
+    def _import_zones(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import zone package", "", f"Zone package (*{ZONE_SUFFIX})")
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self._map_entry(next(iter(self.map_rows.values())))
+            report = check_package(Path(path), self.catalogue.meta(), self._map_entries, *self._import_originals())
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Import failed", str(exc)); return
+        QApplication.restoreOverrideCursor()
+        dialog = ZoneImportDialog(report, self.overrides.records(), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            changed = self.overrides.apply(report)
+            self._overrides_changed()
+            QMessageBox.information(self, "Zone package imported",
+                                    f"{len(changed)} map(s) now use imported files: "
+                                    f"{', '.join(item.label for item in changed) or 'none (all identical to the disc)'}. "
+                                    "Tick “Play with imported zones” in the Play tab to play them.")
+
+    def _manage_overrides(self):
+        ImportedZonesDialog(self.overrides, self).exec()
+        self._overrides_changed()
+
+    def _overrides_changed(self):
+        count = len(self.overrides.records())
+        self.imported_button.setText(f"Imported zones ({count})…")
+        self._all_pathing = None
+        self.play_panel.refresh_imports()
+        self._preview_map()
+
+    def _build_patched_disc(self, cancelled, progress) -> Path:
+        """Runs on the Play tab's worker thread: a patched copy of the disc with every imported file."""
+        executable = next(row for row in self.rows if row["detected_format"] == "PS-X EXE" and row["offset"] is None)
+        with layout_from_catalogue(self.catalogue).open() as reader:
+            entry = self._entry(executable)
+            entries = parse_map_table(reader.read_extent_range(entry.extent, entry.extent_size, entry.offset, entry.size))
+        return build_patched_image(layout_from_catalogue(self.catalogue), self.overrides.replacements(entries),
+                                   self.overrides.directory / "patched", cancelled, progress)
+
     def _map_names(self) -> dict[int, str]:
         names = {}
         for row in self.map_rows.values():
@@ -1203,7 +1338,8 @@ class Workspace(QWidget):
         scene_row = self._character_related(row, "scene") if row is not None else None
         if scene_row is None:
             return None
-        return parse_map(self._read_row(scene_row, MAX_MAP_FILE), self._map_entry(row)).floor_grid
+        entry = self._map_entry(row)
+        return parse_map(self._map_file(entry.index, "MAP", scene_row, MAX_MAP_FILE), entry).floor_grid
 
     def _export_map_background(self):
         try:

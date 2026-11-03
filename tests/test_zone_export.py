@@ -32,16 +32,15 @@ def test_bundle_package_contents(tmp_path):
     names = {0: "Test Woods · TEST01", 1: "Test Town · TEST02"}
     manifest = export_package(tmp_path / "bundle", ["Test Woods", "Test Town"], sources(entries, first, second),
                               {0: first, 1: second}, entries, names, {3: "Agumon"},
-                              {"release": "test", "source_sha256": "ab"},
-                              observations={"files": [("inspections/a.png", b"png", "shot")], "records": {"n": 1}})
+                              {"release": "test", "source_sha256": "ab"})
     path = tmp_path / "bundle.dw1zone"
     with zipfile.ZipFile(path) as package:
         names_in = set(package.namelist())
         assert {"manifest.json", "routes.json", "zones/test-woods.json", "zones/test-town.json",
                 "maps/000-TEST01/TEST01.MAP", "maps/000-TEST01/TEST01.TFS", "maps/000-TEST01/map.json",
                 "maps/000-TEST01/pathing.json", "maps/000-TEST01/pathing.png", "maps/000-TEST01/floor-grid.png",
-                "maps/000-TEST01/background-palette0.png", "observations/inspections/a.png",
-                "observations/observations.json"} <= names_in
+                "maps/000-TEST01/background-palette0.png"} <= names_in
+        assert not any(name.startswith("observations/") for name in names_in)
         assert package.read("maps/001-TEST02/TEST02.MAP") == b"MAP1"
         document = json.loads(package.read("maps/000-TEST01/map.json"))
         assert document["files"]["map"]["sha256"] == hashlib.sha256(b"MAP0").hexdigest()

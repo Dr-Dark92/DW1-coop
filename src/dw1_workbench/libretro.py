@@ -311,6 +311,13 @@ class LibretroCore:
             raise LibretroError(f"Memory region {kind} has no bytes {offset:#x}+{size:#x} (size {total:#x}).")
         return ctypes.string_at(pointer + offset, size)
 
+    def write_memory(self, offset: int, data: bytes, kind: int = MEMORY_SYSTEM_RAM):
+        """Overwrite bytes of the core's memory region (main RAM by default)."""
+        pointer, total = self._lib.retro_get_memory_data(kind), self._lib.retro_get_memory_size(kind)
+        if not pointer or offset < 0 or offset + len(data) > total:
+            raise LibretroError(f"Memory region {kind} has no bytes {offset:#x}+{len(data):#x} (size {total:#x}).")
+        ctypes.memmove(pointer + offset, data, len(data))
+
     # -- callbacks (run on the core's thread) --------------------------------------------------------------
 
     def _environment(self, command, data):

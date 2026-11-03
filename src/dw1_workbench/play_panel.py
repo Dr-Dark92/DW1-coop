@@ -4,15 +4,17 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QStandardPaths, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+                               QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
+from .errors import Cancelled
 from .inspection import InspectionStore, SpawnLog
 from .libretro import LibretroError, core_info
 from .maps import trigger_description
@@ -83,18 +85,47 @@ def _local_time(created: str) -> str:
     return datetime.fromisoformat(created).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
+class PatchWorker(QObject):
+    progress = Signal(int, str)
+    succeeded = Signal(str)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, build):
+        super().__init__()
+        self.build, self.cancel_event = build, threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
+
+    @Slot()
+    def run(self):
+        try:
+            self.succeeded.emit(str(self.build(self.cancel_event.is_set, self.progress.emit)))
+        except Cancelled:
+            pass
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class PlayPanel(QWidget):
     show_map_requested = Signal(int)  # map-table index
     inspections_changed = Signal()
 
     def __init__(self, meta: dict, source_ok: bool, source_message: str, map_names: dict[int, str] | None = None,
                  decoded_grid=None, character_names: dict[int, str] | None = None,
-                 item_names: list[str] | None = None, parent=None):
+                 item_names: list[str] | None = None, imports=None, parent=None):
         super().__init__(parent)
         self.meta, self.source_ok = meta, source_ok
         self.map_names, self.decoded_grid = map_names or {}, decoded_grid
         self.character_names = character_names or {}
         self.item_names = item_names or []
+        # imports: (count of maps with imported files, build(cancelled, progress) -> patched disc path)
+        self.imports = imports or (lambda: 0, None)
+        self._patch_thread = self._patch_worker = self._patch_dialog = None
+        self._pending_launch = None
         # Live RAM addresses come from the USA executable's decompilation; other releases differ.
         self.live_ram = meta.get("executable") == "SLUS_010.32"
         self.disc = Path(meta.get("source_path", ""))
@@ -125,6 +156,11 @@ class PlayPanel(QWidget):
         self.resume.setChecked(self.settings.value("play/resume", True, type=bool))
         self.resume.toggled.connect(lambda value: self.settings.setValue("play/resume", value))
         form.addRow("", self.resume)
+        self.use_imports = QCheckBox()
+        self.use_imports.setChecked(self.settings.value("play/use_imports", False, type=bool))
+        self.use_imports.toggled.connect(lambda value: self.settings.setValue("play/use_imports", value))
+        form.addRow("", self.use_imports)
+        self.refresh_imports()
         self.core.editingFinished.connect(self._check); self.bios.editingFinished.connect(self._check)
 
         self.slots = _table(["Slot", "Saved", "Note", "Core"], 2)
@@ -285,19 +321,31 @@ class PlayPanel(QWidget):
         if inspection_id is not None:
             self.launch(None, inspection_id)
 
-    def launch(self, slot: int | None, inspection_id: str | None = None):
+    def refresh_imports(self):
+        count = self.imports[0]()
+        self.use_imports.setText(f"Play with imported zones ({count} map{'s' if count != 1 else ''} changed; a patched "
+                                 "copy of the disc is built, the original is untouched)")
+        self.use_imports.setEnabled(count > 0)
+
+    def launch(self, slot: int | None, inspection_id: str | None = None, disc: Path | None = None):
         if self.window is not None:
             self.window.raise_(); self.window.activateWindow()
+            return
+        if self._patch_thread is not None:
             return
         if not self._check() or not self.source_ok:
             QMessageBox.warning(self, "Cannot play yet", "Choose a working core and make sure the disc image is available.")
             return
-        config = PlayConfig(Path(self.core.text()), Path(self.bios.text() or "."), self.disc, self.store.directory,
+        if disc is None and self.use_imports.isChecked() and self.imports[0]() > 0:
+            self._build_patched(slot, inspection_id)
+            return
+        config = PlayConfig(Path(self.core.text()), Path(self.bios.text() or "."), disc or self.disc, self.store.directory,
                             launch_slot=slot, launch_inspection=inspection_id,
                             resume_on_close=self.resume.isChecked(), live_ram=self.live_ram)
         start = (f" from slot {slot}" if slot is not None else
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
-        self._write_log(f"Launching {config.disc_path.name}{start}")
+        self._write_log(f"Launching {config.disc_path.name}{start}"
+                        + (" with imported zones (patched copy)" if disc is not None else ""))
         window = PlayWindow(config, self.meta.get("release", "Digimon World"), self.map_names, self.decoded_grid,
                             self.character_names, self.item_names)
         window.log.connect(self._write_log)
@@ -307,6 +355,49 @@ class PlayPanel(QWidget):
         self.window = window
         self._update_buttons()
         window.start()
+
+    def _build_patched(self, slot, inspection_id):
+        dialog = QProgressDialog("Building the patched disc", "Cancel", 0, 100, self)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
+        thread, worker = QThread(self), PatchWorker(self.imports[1])
+        worker.moveToThread(thread); thread.started.connect(worker.run)
+        # Bound slots, not lambdas: lambdas would run on the worker thread and touch widgets there.
+        worker.progress.connect(self._patch_progress)
+        dialog.canceled.connect(worker.request_cancel)
+        worker.succeeded.connect(self._patched_ready)
+        self._patch_request = (slot, inspection_id)
+        worker.failed.connect(self._patch_failed)
+        worker.finished.connect(thread.quit); worker.finished.connect(dialog.close)
+        thread.finished.connect(self._patch_finished)
+        self._patch_thread, self._patch_worker, self._patch_dialog = thread, worker, dialog
+        self._write_log("Building the patched disc with imported zones")
+        thread.start()
+
+    @Slot(int, str)
+    def _patch_progress(self, value, text):
+        if self._patch_dialog is not None:
+            self._patch_dialog.setValue(value); self._patch_dialog.setLabelText(text)
+
+    @Slot(str)
+    def _patched_ready(self, path):
+        self._write_log(f"Patched disc ready: {path}")
+        self._pending_launch = (*self._patch_request, Path(path))
+
+    @Slot(str)
+    def _patch_failed(self, message):
+        self._write_log(f"Patched disc failed: {message}")
+        QMessageBox.critical(self, "Imported zones", message)
+
+    @Slot()
+    def _patch_finished(self):
+        self._patch_thread = self._patch_worker = self._patch_dialog = None
+        pending, self._pending_launch = getattr(self, "_pending_launch", None), None
+        if pending is not None:
+            self.launch(*pending)
+
+    def wait_for_patch(self, timeout_ms: int = 60000):
+        if self._patch_thread is not None:
+            self._patch_worker.request_cancel(); self._patch_thread.wait(timeout_ms)
 
     @Slot()
     def _window_closed(self):
@@ -326,5 +417,6 @@ class PlayPanel(QWidget):
 
     def close_player(self):
         """Stop a running game (writing its resume slot and memory card) before the workbench closes."""
+        self.wait_for_patch()
         if self.window is not None:
             self.window.close()
