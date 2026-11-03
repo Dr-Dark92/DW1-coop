@@ -207,10 +207,14 @@ def build_patched_image(layout: DiscLayout, replacements: dict[str, bytes], dire
                 return output.read(SECTOR)
 
             for path, data in sorted(replacements.items()):
+                if cancelled():
+                    raise Cancelled('Building the patched disc was cancelled.')
                 record = records[path.upper()]
                 sectors = (record.size + SECTOR - 1) // SECTOR
                 padded = data + bytes(sectors * SECTOR - len(data))
                 for index in range(sectors):
+                    if cancelled():
+                        raise Cancelled('Building the patched disc was cancelled.')
                     block = padded[index * SECTOR:(index + 1) * SECTOR]
                     if block != read_sector(record.extent + index):
                         write_sector(record.extent + index, block)

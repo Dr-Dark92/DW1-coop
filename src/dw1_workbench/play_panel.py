@@ -122,7 +122,7 @@ class PlayPanel(QWidget):
         self.map_names, self.decoded_grid = map_names or {}, decoded_grid
         self.character_names = character_names or {}
         self.item_names = item_names or []
-        # imports: (count of maps with imported files, build(cancelled, progress) -> patched disc path)
+        # imports: (count of maps/characters with overrides, build(cancelled, progress) -> patched disc path)
         self.imports = imports or (lambda: 0, None)
         self._patch_thread = self._patch_worker = self._patch_dialog = None
         self._pending_launch = None
@@ -323,7 +323,7 @@ class PlayPanel(QWidget):
 
     def refresh_imports(self):
         count = self.imports[0]()
-        self.use_imports.setText(f"Play with imported zones ({count} map{'s' if count != 1 else ''} changed; a patched "
+        self.use_imports.setText(f"Play with imported resources ({count} map/Digimon override{'s' if count != 1 else ''}; a patched "
                                  "copy of the disc is built, the original is untouched)")
         self.use_imports.setEnabled(count > 0)
 
@@ -345,7 +345,7 @@ class PlayPanel(QWidget):
         start = (f" from slot {slot}" if slot is not None else
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
         self._write_log(f"Launching {config.disc_path.name}{start}"
-                        + (" with imported zones (patched copy)" if disc is not None else ""))
+                        + (" with imported resources (patched copy)" if disc is not None else ""))
         window = PlayWindow(config, self.meta.get("release", "Digimon World"), self.map_names, self.decoded_grid,
                             self.character_names, self.item_names)
         window.log.connect(self._write_log)
@@ -370,7 +370,7 @@ class PlayPanel(QWidget):
         worker.finished.connect(thread.quit); worker.finished.connect(dialog.close)
         thread.finished.connect(self._patch_finished)
         self._patch_thread, self._patch_worker, self._patch_dialog = thread, worker, dialog
-        self._write_log("Building the patched disc with imported zones")
+        self._write_log("Building the patched disc with imported resources")
         thread.start()
 
     @Slot(int, str)
@@ -386,7 +386,7 @@ class PlayPanel(QWidget):
     @Slot(str)
     def _patch_failed(self, message):
         self._write_log(f"Patched disc failed: {message}")
-        QMessageBox.critical(self, "Imported zones", message)
+        QMessageBox.critical(self, "Imported resources", message)
 
     @Slot()
     def _patch_finished(self):

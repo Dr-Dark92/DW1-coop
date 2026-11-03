@@ -33,10 +33,16 @@
 - Hostile Digimon: follow modes decoded (ignores/watches/chases, tracking box around the post), shown on each map's floor grid in Maps and Zones and, live, with HP, reacting state and whether contact starts a battle (autotalk), plus a status-bar warning; checked against a ModokiBetamon in the running game.
 - Items: the 128 item names from the executable; live ground items and chests on the live map, in reach hints, stored with inspections, and an observed item-spawn log per map and tile shown in Maps and Zones (map scripts, which place items, are not decoded). Checked with a Digimushroom in Native Forest.
 - Zone pathing and `.dw1zone` export and import (single zone or bundle): walkability from the game's collision rule, spawn-to-exit routes, a cross-map route planner; packages with original files (hash-checked), decoded data, images, pathing and routes; import with validation into a project override layer, and play through a patched disc copy with regenerated EDC/ECC. Unchanged round trip byte-identical; a one-tile edit confirmed in the running game.
+- P4 first native single-Digimon package path: `.dw1digimon` export, background import validation/review/apply, same-ID model/texture overrides, imported model/animation preview, original restore, and combined zone/Digimon patched-disc building. Agumon native model/texture round trip is byte-identical; a controlled palette edit persists/reopens, appears in the preview and matches the patched ALLTIM bytes without altering the other 179 slots or original BIN. In-game asset reload is still unverified.
+- World zoom (USA, 50–100%): an in-game background tile engine (C compiled for the R3000, installed live into unused RAM) keeps its own ring of tiles downscaled to the drawn size in the game's tile VRAM, streams them as the camera moves and draws them; foreground pieces and the projection scale around the screen centre, matching the game's drawing-offset switch at ordering-table entry 32. At 99.6% the engine reproduces the native frame; indoor and outdoor (walking) captures, save/load while zoomed and return to native verified. Black beyond map edges; camera clamps and object culling still assume 320×240.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
 ## Partial
+
+- Digimon imports: existing relative MMD layout/length, executable skeleton, animation slot/reference compatibility and texture VRAM layout only. PNG edits use the existing palette with approximation reported. Unsupported primitives, arbitrary glTF conversion, new skeletons, larger models, character retargeting and stage bundles are not supported. Native package export is distinct from GLB/glTF model export.
+
+
 
 - CUE: one data track only; audio is described but not processed.
 - ISO 9660: common primary-directory traversal only.

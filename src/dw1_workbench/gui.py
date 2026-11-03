@@ -33,6 +33,8 @@ from .items import parse_item_names
 from .pathing import map_pathing, plan_route
 from .play_panel import PlayPanel
 from .disc_patch import build_patched_image
+from .digimon_package import (DigimonOverrides, export_package as export_digimon_package,
+                              load_source as load_digimon_source, prepare_import as prepare_digimon_import)
 from .zone_import import OverrideStore, check_package
 from .zone_export import SUFFIX as ZONE_SUFFIX, MapSource, export_package, pathing_image, slug as zone_slug
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
@@ -135,6 +137,9 @@ class ModelWorker(QObject):
                 texture_data = reader.read_extent_range(self.texture.extent, self.texture.extent_size,
                                                          self.texture.offset, self.texture.size,
                                                          cancelled=self.cancel_event.is_set)
+            imported = DigimonOverrides(self.catalogue.project_dir, self.catalogue.meta().get('source_sha256'))
+            model_data = imported.file(self.resource_id, 'MMD') or model_data
+            texture_data = imported.file(self.resource_id, 'TIM') or texture_data
             if self.cancel_event.is_set():
                 raise Cancelled("Model preview cancelled.")
             self.progress.emit(70, "Validating geometry and materials")
@@ -152,7 +157,8 @@ class ModelWorker(QObject):
                 if len(model_data) < 8:
                     raise DiscFormatError("MMD header is truncated.")
                 animation_offset = struct.unpack_from("<I", model_data, 4)[0]
-                clips, clip_error = tuple(parse_animations(model_data, animation_offset, len(skeleton))), None
+                clips, clip_error = tuple(parse_animations(model_data, animation_offset, len(skeleton),
+                                                           self.cancel_event.is_set)), None
             except DiscFormatError as exc:
                 clips, clip_error = (), str(exc)
             try:
@@ -165,6 +171,56 @@ class ModelWorker(QObject):
             self.progress.emit(100, "Model ready")
             self.succeeded.emit(ModelLoad(self.label, model, geometry_error, palettes, first.clut_y, used_palettes,
                                           first.bits_per_pixel, len(skeleton), clips, clip_error, names))
+        except Cancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
+class DigimonWorker(QObject):
+    """Package I/O, parsing and staged writes run here; every GUI update uses bound slots."""
+    progress = Signal(int, str)
+    succeeded = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal(str)
+    finished = Signal()
+
+    def __init__(self, catalogue, character_id, task, path=None, report=None):
+        super().__init__()
+        self.catalogue, self.character_id, self.task = catalogue, character_id, task
+        self.path, self.report = path, report
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
+
+    @Slot()
+    def run(self):
+        try:
+            store = DigimonOverrides(self.catalogue.project_dir, self.catalogue.meta().get('source_sha256'))
+            options = {'cancelled': self.cancel_event.is_set, 'progress': self.progress.emit}
+            if self.task == 'apply':
+                fresh = load_digimon_source(self.catalogue, self.character_id, **options)
+                if fresh.character != self.report.source.character or fresh.meta.get('source_sha256') != self.report.source.meta.get('source_sha256'):
+                    raise ValueError('The selected character/source changed since validation; validate the package again.')
+                result = store.apply(self.report, **options)
+                try:
+                    self.catalogue.log('INFO', f"Digimon {result.source.character.resource_id} import: "
+                                       f"{', '.join(result.changed) or 'restored original'}; {result.package}")
+                except Exception as exc:
+                    # The atomic override index is already committed and retains full provenance.
+                    self.progress.emit(100, f'Import applied; catalogue log unavailable: {exc}')
+            else:
+                source = load_digimon_source(self.catalogue, self.character_id, **options)
+                if self.task == 'export':
+                    result = export_digimon_package(self.path, source,
+                        store.file(source.character.resource_id, 'MMD'), store.file(source.character.resource_id, 'TIM'),
+                        **options)
+                else:
+                    result = prepare_digimon_import(self.path, source, **options)
+            self.succeeded.emit((self.task, result))
         except Cancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception as exc:
@@ -435,6 +491,9 @@ class Workspace(QWidget):
         self.associations = catalogue.associations()
         self.labels = {(row["resource_id"], row["kind"]): row for row in catalogue.labels()}
         self.overrides = OverrideStore(catalogue.project_dir)
+        self.digimon_overrides = DigimonOverrides(catalogue.project_dir, catalogue.meta().get('source_sha256'))
+        self.digimon_thread = self.digimon_worker = self.digimon_progress = None
+        self._digimon_result = None
         self.export_thread: QThread | None = None
         self.export_worker: ExportWorker | None = None
         self.export_progress: QProgressDialog | None = None
@@ -463,7 +522,8 @@ class Workspace(QWidget):
         self.tabs.addTab(self._executable(), "Executable Analysis")
         self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid,
                                     self._character_names(), self._item_names(),
-                                    (lambda: len(self.overrides.records()), self._build_patched_disc))
+                                    (lambda: len(self.overrides.records()) + len(self.digimon_overrides.records()),
+                                     self._build_patched_disc))
         self.play_panel.show_map_requested.connect(self.show_map)
         self.tabs.addTab(self.play_panel, "Play")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
@@ -627,8 +687,14 @@ class Workspace(QWidget):
         self.character_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.character_preview.setMinimumSize(320, 240)
         self.character_details = QPlainTextEdit(); self.character_details.setReadOnly(True); self.character_details.setMaximumHeight(170)
         self.character_table.itemSelectionChanged.connect(self._preview_character)
-        export = QPushButton("Export associated texture PNG + provenance metadata…")
+        export = QPushButton("Export texture PNG + metadata…")
         export.clicked.connect(self._export_character_texture)
+        package_export = QPushButton('Export Digimon package…')
+        package_export.clicked.connect(self._export_digimon)
+        package_import = QPushButton('Import Digimon package…')
+        package_import.clicked.connect(self._import_digimon)
+        restore = QPushButton('Restore selected Digimon from disc')
+        restore.clicked.connect(self._restore_digimon)
         model_page = ModelAnimationPanel("Load model and animations")
         model_page.load_requested.connect(self._load_character_model)
         self.character_panel = model_page
@@ -638,7 +704,11 @@ class Workspace(QWidget):
         right = QWidget(); right_layout = QVBoxLayout(right)
         right_layout.addWidget(preview_tabs)
         split = QSplitter(); split.addWidget(self.character_table); split.addWidget(right)
-        layout.addWidget(split, 1); layout.addWidget(export)
+        layout.addWidget(split, 1)
+        actions = QHBoxLayout()
+        for button in (export, package_export, package_import, restore):
+            actions.addWidget(button)
+        layout.addLayout(actions)
         return page
 
     def _selected_character(self):
@@ -666,7 +736,8 @@ class Workspace(QWidget):
             label = self.labels.get((character["id"], "display_name"))
             if texture is None:
                 raise ValueError("This entry has no verified texture association.")
-            tim = decode_tim(self._read_row(texture, PREVIEW_LIMIT))
+            resource_id = int(character['original_path'].split('/')[-2])
+            tim = decode_tim(self.digimon_overrides.file(resource_id, 'TIM') or self._read_row(texture, PREVIEW_LIMIT))
             pixmap = QPixmap.fromImage(ImageQt(tim.image))
             self.character_preview.setPixmap(pixmap.scaled(self.character_preview.size(),
                                                             Qt.AspectRatioMode.KeepAspectRatio,
@@ -683,6 +754,7 @@ class Workspace(QWidget):
                 f"texture parser: {texture['decoder']} {texture['decoder_version']}",
                 f"model: {model['original_path'] if model else 'absent / unsupported'}",
                 f"evidence: {character['mapping_evidence']}",
+                f"imported override: {self.digimon_overrides.records().get(resource_id, 'none')}",
             ]
             self.character_details.setPlainText("\n".join(details))
         except Exception as exc:
@@ -694,15 +766,122 @@ class Workspace(QWidget):
             texture = self._character_related(character, "texture")
             if texture is None:
                 raise ValueError("This entry has no verified texture association.")
-            tim = decode_tim(self._read_row(texture, PREVIEW_LIMIT))
+            resource_id = int(character['original_path'].split('/')[-2])
+            data = self.digimon_overrides.file(resource_id, 'TIM') or self._read_row(texture, PREVIEW_LIMIT)
+            tim = decode_tim(data)
             name = character["original_path"].split("/")[-1]
             path, _ = QFileDialog.getSaveFileName(self, "Export associated texture", f"{name}-{texture['offset']//0x4800:03d}.png", "PNG image (*.png)")
             if not path: return
-            export_png(tim, Path(path), texture["id"], texture["content_hash"],
+            export_png(tim, Path(path), texture["id"], hashlib.sha256(data).hexdigest(),
                        provenance=self._resource_provenance(texture))
             QMessageBox.information(self, "Texture exported", f"Wrote {path} and provenance JSON.")
         except Exception as exc:
             QMessageBox.critical(self, "Texture export failed", str(exc))
+
+    def _export_digimon(self):
+        try:
+            character = self._selected_character()
+            name = character['original_path'].split('/')[-1]
+            path, _ = QFileDialog.getSaveFileName(self, 'Export native Digimon package', f'{name}.dw1digimon',
+                                                 'DW1 Digimon package (*.dw1digimon)')
+            if path:
+                self._start_digimon('export', Path(path))
+        except Exception as exc:
+            QMessageBox.critical(self, 'Digimon export failed', str(exc))
+
+    def _import_digimon(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'Import native Digimon package', '',
+                                             'DW1 Digimon package (*.dw1digimon)')
+        if path:
+            try:
+                self._start_digimon('validate', Path(path))
+            except Exception as exc:
+                QMessageBox.critical(self, 'Digimon import failed', str(exc))
+
+    def _start_digimon(self, task, path=None, report=None):
+        if self.digimon_thread is not None:
+            raise ValueError('Another Digimon package operation is still finishing.')
+        character_id = self._selected_character()['id']
+        dialog = QProgressDialog('Processing Digimon package', 'Cancel', 0, 100, self)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
+        thread = QThread(self)
+        worker = DigimonWorker(self.catalogue, character_id, task, path, report)
+        worker.moveToThread(thread); thread.started.connect(worker.run)
+        dialog.canceled.connect(lambda: worker.request_cancel())
+        worker.progress.connect(self._digimon_progress_changed)
+        worker.succeeded.connect(self._digimon_succeeded)
+        worker.failed.connect(self._digimon_failed)
+        worker.cancelled.connect(self._digimon_cancelled)
+        worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater); thread.finished.connect(self._digimon_finished)
+        self.digimon_thread, self.digimon_worker, self.digimon_progress = thread, worker, dialog
+        self._digimon_result = None
+        thread.start()
+
+    @Slot(int, str)
+    def _digimon_progress_changed(self, value, text):
+        self.digimon_progress.setValue(value); self.digimon_progress.setLabelText(text)
+
+    @Slot(object)
+    def _digimon_succeeded(self, result):
+        self._digimon_result = result
+
+    @Slot(str)
+    def _digimon_failed(self, text):
+        if not self._closing:
+            QMessageBox.critical(self, 'Digimon operation failed', text)
+
+    @Slot(str)
+    def _digimon_cancelled(self, text):
+        if not self._closing:
+            QMessageBox.information(self, 'Digimon operation cancelled', text)
+
+    @Slot()
+    def _digimon_finished(self):
+        self.digimon_progress.close(); self.digimon_progress.deleteLater()
+        self.digimon_thread = self.digimon_worker = self.digimon_progress = None
+        result, self._digimon_result = self._digimon_result, None
+        if result is not None and not self._closing:
+            task, value = result
+            if task == 'validate':
+                dialog = QDialog(self); dialog.setWindowTitle('Review Digimon import')
+                layout = QVBoxLayout(dialog)
+                summary = QLabel(f"ID {value.source.character.resource_id} — {value.source.character.internal_name}\n"
+                                 f"Changes from disc: {', '.join(value.changed) or 'none (restores original)'}\n"
+                                 + '\n'.join(value.notes))
+                summary.setWordWrap(True); layout.addWidget(summary)
+                preview = QLabel(); pixmap = QPixmap.fromImage(ImageQt(decode_tim(value.texture).image))
+                preview.setPixmap(pixmap.scaled(512, 256, Qt.AspectRatioMode.KeepAspectRatio))
+                layout.addWidget(preview)
+                layout.addWidget(QLabel('Stored in project overrides. Enable “Play with imported resources” to play it.\n'
+                                       'Reload the character or start normal play; old save states may retain old assets.'))
+                buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+                buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Apply import')
+                buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); layout.addWidget(buttons)
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    self._start_digimon('apply', report=value)
+            elif task == 'apply':
+                self._digimon_changed()
+                QMessageBox.information(self, 'Digimon imported', 'Preview uses the imported resources. Enable '
+                                        '“Play with imported resources” to use them on a patched disc copy.')
+            else:
+                QMessageBox.information(self, 'Digimon exported', f'Wrote {value}')
+        self.background_finished.emit()
+
+    def _restore_digimon(self):
+        try:
+            character = self._selected_character()
+            resource_id = int(character['original_path'].split('/')[-2])
+            self.digimon_overrides.remove(resource_id)
+            self.catalogue.log('INFO', f'Digimon {resource_id}: restored original disc resources')
+            self._digimon_changed()
+        except Exception as exc:
+            QMessageBox.critical(self, 'Cannot restore Digimon', str(exc))
+
+    def _digimon_changed(self):
+        self.play_panel.refresh_imports()
+        self._preview_character()
+        self._load_character_model(show_dialog=False)
 
     def _maps(self):
         page, layout = QWidget(), QVBoxLayout(); page.setLayout(layout)
@@ -1302,7 +1481,7 @@ class Workspace(QWidget):
             QMessageBox.information(self, "Zone package imported",
                                     f"{len(changed)} map(s) now use imported files: "
                                     f"{', '.join(item.label for item in changed) or 'none (all identical to the disc)'}. "
-                                    "Tick “Play with imported zones” in the Play tab to play them.")
+                                    "Tick “Play with imported resources” in the Play tab to play them.")
 
     def _manage_overrides(self):
         ImportedZonesDialog(self.overrides, self).exec()
@@ -1321,7 +1500,18 @@ class Workspace(QWidget):
         with layout_from_catalogue(self.catalogue).open() as reader:
             entry = self._entry(executable)
             entries = parse_map_table(reader.read_extent_range(entry.extent, entry.extent_size, entry.offset, entry.size))
-        return build_patched_image(layout_from_catalogue(self.catalogue), self.overrides.replacements(entries),
+            alltim_row = next(row for row in self.rows if row['original_path'] == 'CHDAT/ALLTIM.TIM'
+                              and row['offset'] is None)
+            alltim_entry = self._entry(alltim_row)
+            alltim = reader.read_extent_range(alltim_entry.extent, alltim_entry.extent_size, alltim_entry.offset,
+                                              alltim_entry.size, cancelled=cancelled)
+            if hashlib.sha256(alltim).hexdigest() != alltim_row['content_hash']:
+                raise ValueError('ALLTIM source hash changed; re-import the disc.')
+        models = {int(row['original_path'].split('/')[-2]): dict(model)
+                  for row in self.character_rows if (model := self._character_related(row, 'model_container')) is not None}
+        replacements = self.overrides.replacements(entries)
+        replacements.update(self.digimon_overrides.replacements(alltim, models))
+        return build_patched_image(layout_from_catalogue(self.catalogue), replacements,
                                    self.overrides.directory / "patched", cancelled, progress)
 
     def _map_names(self) -> dict[int, str]:
@@ -1538,9 +1728,11 @@ class Workspace(QWidget):
             self.model_worker.request_cancel()
         if self.relation_worker:
             self.relation_worker.request_cancel()
+        if self.digimon_worker:
+            self.digimon_worker.request_cancel()
 
     def has_background_work(self):
-        return bool((self.export_thread and self.export_thread.isRunning()) or
+        return bool(self.digimon_thread is not None or (self.export_thread and self.export_thread.isRunning()) or
                     (self.model_thread and self.model_thread.isRunning()) or
                     (self.relation_thread and self.relation_thread.isRunning()) or
                     (self.zone_thread and self.zone_thread.isRunning()))

@@ -17,8 +17,9 @@ from PySide6.QtCore import QBuffer, QCoreApplication, QPointF, QByteArray, QIODe
 from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QToolBar, QVBoxLayout, QWidget)
+                               QLineEdit, QMainWindow, QMessageBox, QSlider, QToolBar, QVBoxLayout, QWidget)
 
+from .camera import CameraZoom
 from .inspection import CATEGORIES, InspectionError, InspectionStore, SpawnLog
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
                        LibretroError)
@@ -80,6 +81,7 @@ class EmulatorWorker(QObject):
     command_failed = Signal(str)
     live_changed = Signal(object)  # LiveState
     inspection_captured = Signal(object)  # dict: state, screenshot, live
+    camera_zoom_changed = Signal(int, int)  # requested/effective fixed-point scale
     finished = Signal()
 
     def __init__(self, config: PlayConfig):
@@ -99,6 +101,10 @@ class EmulatorWorker(QObject):
         self._live_key = None
         self.live: LiveState | None = None
         self.core: LibretroCore | None = None
+        self._camera: CameraZoom | None = None
+        self._camera_scale = 256
+        self._camera_notice_sent = False
+        self._reported_zoom = None
 
     # -- called from the GUI thread ------------------------------------------------------------------------
 
@@ -113,6 +119,10 @@ class EmulatorWorker(QObject):
 
     def reset(self):
         self._commands.put(("reset",))
+
+    def set_camera_scale(self, scale: int):
+        """Set world zoom only; the HUD and native frame remain unscaled by this control."""
+        self._commands.put(("camera_scale", max(64, min(256, int(scale)))))
 
     def inspect(self):
         self._commands.put(("inspect",))
@@ -167,6 +177,13 @@ class EmulatorWorker(QObject):
                 continue
             core.buttons = self.buttons
             frame, audio = core.run_frame()
+            self._ensure_camera()
+            if self._camera is not None:
+                self._camera.tick()
+            zoom_state = (self._camera_scale, self._camera.scale if self._camera else 256)
+            if zoom_state != self._reported_zoom:
+                self._reported_zoom = zoom_state
+                self.camera_zoom_changed.emit(*zoom_state)
             frames += 1
             if frame is not None:
                 self._publish(frame_image(frame))
@@ -205,8 +222,18 @@ class EmulatorWorker(QObject):
                 elif command[0] == "load":
                     self._load(command[1]); self.slot_loaded.emit(command[1])
                 elif command[0] == "reset":
+                    self._restore_camera()
                     core.reset(); self.message.emit("Console reset")
+                elif command[0] == "camera_scale":
+                    self._camera_scale = command[1]
+                    if self._camera_scale == 256:
+                        self._restore_camera()
+                    else:
+                        self._ensure_camera()
+                        if self._camera is not None:
+                            self._camera.set_scale(self._camera_scale)
                 elif command[0] == "inspect":
+                    self._restore_camera()  # Inspections must also reopen with native camera RAM.
                     if self.config.live_ram:
                         self._read_live(core)
                     self.inspection_captured.emit({"state": core.serialize(), "screenshot": png_bytes(self._last_image),
@@ -217,6 +244,7 @@ class EmulatorWorker(QObject):
 
     def _save(self, slot: int, note: str = ""):
         core = self.core
+        self._restore_camera()  # Save native game RAM; reapply the selected zoom on the next frame.
         info = self.store.save(slot, core.serialize(), png_bytes(self._last_image), core.info.name,
                                core.info.version, note)
         self.message.emit(f"{info.label} saved ({info.size:,} bytes){f': {info.note}' if info.note else ''}")
@@ -226,6 +254,7 @@ class EmulatorWorker(QObject):
         core = self.core
         info = self.store.info(slot)
         core.unserialize(self.store.load(slot, core=core.info.name))
+        self._camera = None
         if info and info.core_version != core.info.version:
             self.message.emit(f"{info.label} was made by core version {info.core_version}; "
                               f"running {core.info.version}")
@@ -237,7 +266,27 @@ class EmulatorWorker(QObject):
         if record is not None and record.core != self.core.info.name:
             raise InspectionError(f"That inspection was saved by {record.core}, not {self.core.info.name}.")
         self.core.unserialize(store.state(inspection_id))
+        self._camera = None
         self.message.emit(f"Started from the inspection at {record.map_name if record else inspection_id}")
+
+    def _ensure_camera(self):
+        if self._camera is not None or self.core is None or self._camera_scale == 256 or not self.config.live_ram:
+            return
+        try:
+            self._camera = CameraZoom(self.core)
+            self._camera.install(self._camera_scale)
+            self.message.emit(f"World zoom {round(self._camera_scale * 100 / 256)}%: the background is drawn by "
+                              "the zoom tile engine; saving restores the native camera")
+        except (ValueError, LibretroError) as exc:
+            self._camera = None
+            if not self._camera_notice_sent:
+                self.message.emit(f"World zoom unavailable in this game state: {exc}")
+                self._camera_notice_sent = True
+
+    def _restore_camera(self):
+        if self._camera is not None:
+            self._camera.uninstall()
+            self._camera = None
 
     def _read_live(self, core: LibretroCore):
         try:
@@ -507,6 +556,7 @@ class PlayWindow(QMainWindow):
         self.worker.command_failed.connect(self._command_failed)
         self.worker.live_changed.connect(self._live_changed)
         self.worker.inspection_captured.connect(self._inspection_captured)
+        self.worker.camera_zoom_changed.connect(self._camera_zoom_changed)
         # Direct: stop() blocks the GUI thread in wait(), so a queued quit would never be delivered.
         self.worker.finished.connect(self.thread.quit, Qt.ConnectionType.DirectConnection)
         self._finished = False
@@ -540,6 +590,17 @@ class PlayWindow(QMainWindow):
         self.full = action("Full screen", "F11", self._toggle_full_screen, checkable=True)
         smooth = QCheckBox("Smooth"); smooth.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         smooth.toggled.connect(self._set_smooth); bar.addWidget(smooth)
+        bar.addWidget(QLabel("World zoom"))
+        self.camera_zoom = QSlider(Qt.Orientation.Horizontal); self.camera_zoom.setRange(50, 100)
+        self.camera_zoom.setValue(100); self.camera_zoom.setFixedWidth(120)
+        self.camera_zoom.setEnabled(self.config.live_ram)
+        self.camera_zoom.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.camera_zoom.setToolTip("World zoom (USA): shows more of the map around the screen centre. The HUD stays "
+                                    "native; past a map's edge the view is black.")
+        self.camera_zoom.valueChanged.connect(lambda value: self.worker.set_camera_scale(value * 256 // 100))
+        bar.addWidget(self.camera_zoom)
+        self.camera_zoom_status = QLabel("100%")
+        bar.addWidget(self.camera_zoom_status)
         inspect = QAction(self); inspect.setShortcut(QKeySequence("F9")); inspect.triggered.connect(self.worker_inspect)
         live_toggle = QAction(self); live_toggle.setShortcut(QKeySequence("F10"))
         live_toggle.triggered.connect(lambda: self.live_dock.setVisible(not self.live_dock.isVisible()))
@@ -741,6 +802,13 @@ class PlayWindow(QMainWindow):
     @Slot(str)
     def _message(self, text: str):
         self.status.setText(text); self.log.emit(text)
+
+    @Slot(int, int)
+    def _camera_zoom_changed(self, requested: int, effective: int):
+        self.camera_zoom_status.setText(f"{round(effective * 100 / 256)}%")
+        self.camera_zoom_status.setToolTip(
+            f"Requested {round(requested * 100 / 256)}%; applied {round(effective * 100 / 256)}%"
+            + (" (waiting for the next rendered frame)." if effective != requested else "."))
 
     @Slot(object)
     def _started(self, info):

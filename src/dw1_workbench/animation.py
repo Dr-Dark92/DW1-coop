@@ -13,7 +13,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-from .errors import DiscFormatError
+from .errors import Cancelled, DiscFormatError
 from .mmd import MAX_OBJECTS
 
 DECODER_VERSION = "mmd-animation-v1"
@@ -71,7 +71,8 @@ def _check_range(offset: int, size: int, limit: int, label: str) -> None:
         raise DiscFormatError(f"{label} is outside its bounded section.")
 
 
-def parse_clip(data: bytes, index: int, start: int, end: int, bone_count: int) -> AnimationClip:
+def parse_clip(data: bytes, index: int, start: int, end: int, bone_count: int,
+               cancelled=lambda: False) -> AnimationClip:
     """Parse one animation record occupying data[start:end]."""
     _check_range(start, 2, end, f"Animation {index} header")
     (frame_word,) = struct.unpack_from("<H", data, start)
@@ -94,6 +95,8 @@ def parse_clip(data: bytes, index: int, start: int, end: int, bone_count: int) -
         initial.append(BonePose(scale, rotation, translation))
     instructions = []
     while True:
+        if cancelled():
+            raise Cancelled('Animation parsing cancelled.')
         if len(instructions) > MAX_INSTRUCTIONS:
             raise DiscFormatError(f"Animation {index} exceeds the instruction safety limit.")
         head = word()
@@ -143,7 +146,8 @@ def parse_clip(data: bytes, index: int, start: int, end: int, bone_count: int) -
                          tuple(instructions))
 
 
-def parse_animations(data: bytes, animation_offset: int, bone_count: int) -> list[AnimationClip | None]:
+def parse_animations(data: bytes, animation_offset: int, bone_count: int,
+                     cancelled=lambda: False) -> list[AnimationClip | None]:
     """Parse the MMD animation table; empty slots are None, as in the game's pointer table."""
     if not 1 <= bone_count <= MAX_OBJECTS:
         raise DiscFormatError(f"Bone count {bone_count} is outside the safety limit.")
@@ -157,6 +161,8 @@ def parse_animations(data: bytes, animation_offset: int, bone_count: int) -> lis
     starts = sorted({offset for offset in offsets if offset})
     clips: list[AnimationClip | None] = []
     for index, offset in enumerate(offsets):
+        if cancelled():
+            raise Cancelled('Animation parsing cancelled.')
         if not offset:
             clips.append(None)
             continue
@@ -166,7 +172,7 @@ def parse_animations(data: bytes, animation_offset: int, bone_count: int) -> lis
         following = [s for s in starts if s > offset]
         end = animation_offset + following[0] if following else len(data)
         _check_range(start, 0, len(data), f"Animation {index}")
-        clips.append(parse_clip(data, index, start, min(end, len(data)), bone_count))
+        clips.append(parse_clip(data, index, start, min(end, len(data)), bone_count, cancelled))
     return clips
 
 
