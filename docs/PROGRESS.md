@@ -32,6 +32,7 @@
 - Live zone inspection (USA): current map, player/partner tile and the live tile grid read from console RAM using dw_decomp addresses, shown in the play window's status bar and a live map; the live grid matched the decoded MAP floor grid on all 10,000 tiles of the two maps checked. F9 inspections (category, note, screenshot, position, trigger, live grid, compressed save state) are listed in the Play tab and in Maps and Zones, and the game can be started from one.
 - Hostile Digimon: follow modes decoded (ignores/watches/chases, tracking box around the post), shown on each map's floor grid in Maps and Zones and, live, with HP, reacting state and whether contact starts a battle (autotalk), plus a status-bar warning; checked against a ModokiBetamon in the running game.
 - Items: the 128 item names from the executable; live ground items and chests on the live map, in reach hints, stored with inspections, and an observed item-spawn log per map and tile shown in Maps and Zones (map scripts, which place items, are not decoded). Checked with a Digimushroom in Native Forest.
+- Zone pathing and `.dw1zone` export (single zone or bundle): walkability from the game's collision rule, spawn-to-exit routes, a cross-map route planner, and packages with original files (hash-checked), decoded data, images, pathing, routes and optional observations.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
@@ -49,6 +50,7 @@
 
 - General game archive unpacking beyond the fixed ALLTIM layout.
 - Model export (GLB/glTF with provenance).
+- Zone package import or replacement (packages are export-only).
 - Standalone TMD decoding.
 - Sound playback for animation cues, and the per-type texture cycling outside animation data.
 - Map scripts (needed for script-driven transitions) and 3D map geometry.

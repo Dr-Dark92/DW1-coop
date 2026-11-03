@@ -1,5 +1,16 @@
 # Handover
 
+## Zone pathing and export (2026-11-03, branch `python-player`)
+
+User request: "zone exporting + pathing, single zone or bundle zone" (roadmap P2's export half; import is not started).
+
+- `pathing.py`: walkability (`value & 0x80` blocks, from dw_decomp `checkMapCollisionX/Z`), regions, Dijkstra with 8-way steps (no diagonal squeeze), `map_places` (deduplicated spawns, blocked flag, walk-through exits, toilets), `map_pathing`, `routes_from`/`plan_route` across maps over walk-through exits.
+- `zone_export.py`: `.dw1zone` ZIP (see FORMATS "Zone packages"), written to a temporary file then renamed; original bytes are re-hashed against the catalogue; cancellable.
+- GUI: Maps and Zones "Pathing" preview tab (route highlight, region sizes, route planner backed by a `ZoneWorker` pathing pass over all maps) and "Export zone or bundle…" (`ZoneExportDialog`: zone checklist, observations, all palettes; refuses destinations inside the repository).
+- Checked: all 241 maps (8 s), routes like File City → Green Gym → Native Forest (15.9 tiles); Native Forest and a three-zone bundle exported with every MAP/TFS equal to its catalogue hash. 125 tests pass.
+
+Next: zone import (unchanged round trip, then one controlled edit) needs the execution target decided — the player could load edited MAP/TFS files through a patched disc image or file overrides.
+
 ## Live zone inspection (2026-11-03, branch `python-player`)
 
 Next milestone after the player, finishing the roadmap's P0 inspection requirement. The user had confirmed boot, quick save/load, Resume and the memory card with Beetle PSX and `SCPH1001.BIN` (Beetle logs `scph5501.bin` missing but boots; the BIOS check now accepts any North American BIOS).

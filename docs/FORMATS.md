@@ -235,6 +235,22 @@ Items (`src/main/item.c`, `src/main/map_object.c`, `src/main/tamer.c`): names co
 
 Scripts can change the live grid (the game has `setImpassableRect`); the player reports any such difference instead of assuming the decoded grid.
 
+### Pathing
+
+Walkability follows the game's collision code (`checkMapCollisionX/Z` in `src/main/map_collision.c`): a tile blocks movement when its floor-grid value has bit 7 set (`value & 0x80`); every other value, including exits, toilets and script tiles, can be walked on. Routes use 8-way steps with diagonal moves only when both orthogonal neighbours are open (X and Z are checked separately), and distances in tiles (diagonal √2). Character radius is not modelled. Spawn points with identical positions are merged (unused slots repeat a default), and spawns on blocked tiles are marked. Across maps, routes follow walk-through exits (warp slot tiles 110–119) to the warp's target spawn; script-driven exits have no tiles and are not followed. Over the 241 USA maps: 1,237 spawn-to-exit/toilet routes, 40 unreachable (spawns in separate walkable areas joined by scripts), 78 spawns on blocked tiles.
+
+### Zone packages (`.dw1zone`)
+
+A ZIP holding one zone (`kind: zone`) or several (`kind: bundle`), format `dw1-zone-package` version 1:
+
+- `manifest.json`: tool and parser versions, source release and disc SHA-256, zones, maps, count of links leaving or entering the package, limits, and every file with its size and SHA-256.
+- `maps/<index>-<NAME>/`: the original `NAME.MAP` and `NAME.TFS` bytes (checked against the catalogue SHA-256 before writing), `map.json` (table entry with its raw bytes, setup, spawns with tiles, warps, entrances from any map, Digimon placements with behaviour, sprites, trigger counts and the floor grid as 100 hex rows), `pathing.json` (rules, walkable regions, places, routes with tile paths), `floor-grid.png`, `pathing.png`, and background PNGs (first palette, or all).
+- `zones/<zone>.json`: member maps, entrances from outside the package and exits leading out of it.
+- `routes.json`: the shortest walk-through route between every pair of maps in the package, leg by leg.
+- `observations/` (optional): inspections, their screenshots and observed item spawns, marked as seen while playing, not decoded.
+
+A Native Forest package (7 maps) is about 18 MB; Native Forest + Green Gym + File City (48 maps) exported with all 96 MAP/TFS files equal to their catalogue hashes. Packages contain the user's game data and must stay out of Git.
+
 ## Resource association
 
 The catalogue contains 180 confirmed numeric character-resource records. Each is associated with its same-index ALLTIM texture; 178 are associated with a path-present, boundary-validated MMD container. Display names are stored as separate labels with executable offsets and evidence, not derived from appearance. This proves resource-table relationships, not playable-character semantics or animation labels. Static model correctness is compared for the 151 models the parser accepts, as described above. Empty/unsupported categories state their limits explicitly.

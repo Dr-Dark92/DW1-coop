@@ -10,7 +10,7 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton,
     QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -29,7 +29,9 @@ from .relation_view import RelationView
 from .animation import parse_animations
 from .animation_view import ModelAnimationPanel, ModelLoad
 from .items import parse_item_names
+from .pathing import map_pathing, plan_route
 from .play_panel import PlayPanel
+from .zone_export import SUFFIX as ZONE_SUFFIX, MapSource, export_package, pathing_image, slug as zone_slug
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .project import import_project, layout_from_catalogue, source_state
 from .tim import decode_tim, export_png
@@ -218,6 +220,95 @@ class RelationWorker(QObject):
             self.finished.emit()
 
 
+class ZoneWorker(QObject):
+    """Reads MAP/TFS files for zone export ("export") or computes pathing for every map ("pathing")."""
+    progress = Signal(int, str)
+    succeeded = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal(str)
+    finished = Signal()
+
+    def __init__(self, catalogue: Catalogue, executable: IsoEntry, maps: dict, task: str, export: dict | None = None):
+        super().__init__()
+        self.catalogue, self.executable, self.maps, self.task, self.export = catalogue, executable, maps, task, export or {}
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
+
+    @Slot()
+    def run(self):
+        try:
+            cancelled = self.cancel_event.is_set
+            with layout_from_catalogue(self.catalogue).open() as reader:
+                read = lambda item: reader.read_extent_range(item.extent, item.extent_size, item.offset, item.size,
+                                                             cancelled=cancelled)
+                entries = parse_map_table(read(self.executable))
+                zones = set(self.export.get("zones", ()))
+                scenes, sources, pathing = {}, {}, {}
+                for done, (index, (map_item, tfs_item, map_row, tfs_row)) in enumerate(sorted(self.maps.items())):
+                    if cancelled():
+                        raise Cancelled("Cancelled.")
+                    self.progress.emit(3 * done // len(self.maps) if self.task == "export" else 95 * done // len(self.maps),
+                                       f"Reading {entries[index].name}")
+                    map_bytes = read(map_item)
+                    scene = scenes[index] = parse_map(map_bytes, entries[index])
+                    if self.task == "pathing":
+                        pathing[index] = map_pathing(entries[index], scene, self.export.get("map_names"), with_paths=False)
+                    elif entries[index].area_name in zones:
+                        tfs_bytes = read(tfs_item) if tfs_item is not None else None
+                        sources[index] = MapSource(entries[index], scene, parse_tfs(tfs_bytes) if tfs_bytes else None,
+                                                   map_bytes, tfs_bytes, map_row, tfs_row)
+            if self.task == "pathing":
+                self.progress.emit(100, "Pathing ready")
+                self.succeeded.emit(pathing)
+                return
+            options = self.export
+            manifest = export_package(options["destination"], options["zones"], sources, scenes, entries,
+                                      options["map_names"], options["character_names"], options["meta"],
+                                      options.get("observations"), options.get("all_palettes", False), cancelled,
+                                      lambda value, text: self.progress.emit(3 + value * 97 // 100, text))
+            self.succeeded.emit(manifest)
+        except Cancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
+class ZoneExportDialog(QDialog):
+    """Choose the zones for a package: one zone, or several as a bundle."""
+
+    def __init__(self, zones: dict[str, int], selected: str | None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export zones")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Pick one zone, or several for a bundle. The package keeps the original MAP/TFS "
+                                "files, decoded data, pathing and routes between its maps."))
+        self.search = QLineEdit(); self.search.setPlaceholderText("Filter zones"); layout.addWidget(self.search)
+        self.list = QListWidget(); layout.addWidget(self.list, 1)
+        for zone, count in sorted(zones.items()):
+            item = QListWidgetItem(f"{zone} ({count} maps)"); item.setData(Qt.ItemDataRole.UserRole, zone)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if zone == selected else Qt.CheckState.Unchecked)
+            self.list.addItem(item)
+        self.search.textChanged.connect(lambda text: [self.list.item(row).setHidden(
+            text.lower() not in self.list.item(row).text().lower()) for row in range(self.list.count())])
+        self.observations = QCheckBox("Include what was seen while playing (inspections and item spawns)")
+        self.observations.setChecked(True)
+        self.palettes = QCheckBox("Render backgrounds in every palette (larger; the original TFS is always included)")
+        layout.addWidget(self.observations); layout.addWidget(self.palettes)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Export…")
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+        self.resize(480, 560)
+
+    def zones(self) -> list[str]:
+        return [self.list.item(row).data(Qt.ItemDataRole.UserRole) for row in range(self.list.count())
+                if self.list.item(row).checkState() == Qt.CheckState.Checked]
+
+
 class WelcomePage(QWidget):
     import_requested = Signal()
     open_requested = Signal()
@@ -278,6 +369,11 @@ class Workspace(QWidget):
         self.relation_thread: QThread | None = None
         self.relation_worker: RelationWorker | None = None
         self.relation_progress: QProgressDialog | None = None
+        self.zone_thread: QThread | None = None
+        self.zone_worker: ZoneWorker | None = None
+        self.zone_progress: QProgressDialog | None = None
+        self._all_pathing = None
+        self._map_pathing = None
         self.tabs = QTabWidget()
         self.tabs.addTab(self._overview(), "Overview")
         self.tabs.addTab(self._disc_files(), "Disc Files")
@@ -602,6 +698,7 @@ class Workspace(QWidget):
         self.map_preview_tabs = QTabWidget()
         self.map_preview_tabs.addTab(background_page, "Background"); self.map_preview_tabs.addTab(scene_page, "Scene data")
         self.map_preview_tabs.addTab(floor_page, "Floor grid")
+        self.map_preview_tabs.addTab(self._pathing_page(), "Pathing")
         tree_panel = QWidget(); tree_layout = QVBoxLayout(tree_panel); tree_layout.setContentsMargins(0, 0, 0, 0)
         tree_layout.addWidget(self.map_search); tree_layout.addWidget(self.map_tree)
         split = QSplitter(); split.addWidget(tree_panel); split.addWidget(self.map_preview_tabs)
@@ -609,7 +706,9 @@ class Workspace(QWidget):
         export = QPushButton("Export background PNG + provenance metadata…")
         export.clicked.connect(self._export_map_background)
         browser = QWidget(); browser_layout = QVBoxLayout(browser); browser_layout.setContentsMargins(0, 0, 0, 0)
-        browser_layout.addWidget(split, 1); browser_layout.addWidget(export)
+        export_zone = QPushButton("Export zone or bundle…"); export_zone.clicked.connect(self._export_zones)
+        export_row = QHBoxLayout(); export_row.addWidget(export); export_row.addWidget(export_zone)
+        browser_layout.addWidget(split, 1); browser_layout.addLayout(export_row)
         self.maps_tabs = QTabWidget()
         self.maps_tabs.addTab(browser, "Browser"); self.maps_tabs.addTab(self._relation_page(), "Relation map")
         self.maps_tabs.currentChanged.connect(self._maps_tab_changed)
@@ -696,6 +795,196 @@ class Workspace(QWidget):
         self.relation_status.setText(f"Relation map unavailable: {message}")
 
     @Slot()
+    def _pathing_page(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        note = QLabel("Walkable areas in colour (the game blocks tiles whose value has bit 7 set). Routes go from each "
+                      "spawn point (where you arrive, cyan) to each walk-through exit (red) and toilet (violet); "
+                      "distances are in tiles. Script-driven exits are not decoded and are not followed.")
+        note.setWordWrap(True); layout.addWidget(note)
+        row = QHBoxLayout()
+        self.path_from, self.path_to = QComboBox(), QComboBox()
+        for combo in (self.path_from, self.path_to):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            combo.currentIndexChanged.connect(self._show_pathing)
+        row.addWidget(QLabel("From")); row.addWidget(self.path_from); row.addWidget(QLabel("to")); row.addWidget(self.path_to)
+        row.addStretch(); layout.addLayout(row)
+        self.path_result = QLabel(); self.path_result.setWordWrap(True); layout.addWidget(self.path_result)
+        self.path_image = QLabel(); self.path_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.path_image, 1)
+        planner = QHBoxLayout()
+        self.route_target = QComboBox(); self.route_target.setEditable(True)
+        self.route_target.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        for index, label in sorted(self._map_names().items(), key=lambda item: item[1]):
+            self.route_target.addItem(label, index)
+        plan = QPushButton("Plan route from this map"); plan.clicked.connect(self._plan_route)
+        planner.addWidget(QLabel("Walk to")); planner.addWidget(self.route_target, 1); planner.addWidget(plan)
+        layout.addLayout(planner)
+        self.route_text = QPlainTextEdit(); self.route_text.setReadOnly(True); self.route_text.setMaximumHeight(140)
+        layout.addWidget(self.route_text)
+        return page
+
+    def _update_pathing(self, entry, scene):
+        self._map_pathing = (scene, map_pathing(entry, scene, self._map_names()))
+        _, pathing = self._map_pathing
+        for combo, places in ((self.path_from, [p for p in pathing.places if p.kind == "spawn"]),
+                              (self.path_to, [p for p in pathing.places if p.kind != "spawn"])):
+            combo.blockSignals(True); combo.clear()
+            for place in places:
+                combo.addItem(place.label + (" — on a blocked tile (unused?)" if place.blocked else ""), place.id)
+            combo.blockSignals(False)
+        self._show_pathing()
+
+    def _show_pathing(self, *_):
+        if self._map_pathing is None:
+            return
+        scene, pathing = self._map_pathing
+        route = pathing.route(self.path_from.currentData(), self.path_to.currentData())
+        if self.path_to.count() == 0:
+            text = "This map has no walk-through exits or toilets; it is left through map scripts."
+        elif route is None:
+            text = "No route: the spawn is on a blocked tile."
+        elif route.distance is None:
+            text = "Unreachable: that spawn is in a separate walkable area (the game connects them with a script)."
+        else:
+            text = f"{route.distance:g} tiles, {len(route.path)} steps."
+        sizes = ", ".join(map(str, pathing.region_sizes))
+        self.path_result.setText(f"{text}  Walkable areas: {len(pathing.region_sizes)} ({sizes} tiles).")
+        self.path_image.setPixmap(QPixmap.fromImage(ImageQt(pathing_image(scene, pathing, highlight=route))))
+
+    def _zone_maps(self, zones: set[str] | None = None) -> tuple[IsoEntry, dict]:
+        executable = next(row for row in self.rows if row["detected_format"] == "PS-X EXE" and row["offset"] is None)
+        maps = {}
+        for row in self.map_rows.values():
+            scene_row, tfs_row = self._character_related(row, "scene"), self._character_related(row, "background")
+            if scene_row is not None:
+                maps[int(row["original_path"].rsplit("/", 2)[1])] = (
+                    self._entry(scene_row), self._entry(tfs_row) if tfs_row is not None else None,
+                    dict(scene_row), dict(tfs_row) if tfs_row is not None else None)
+        return self._entry(executable), maps
+
+    def _start_zone_worker(self, task: str, title: str, export: dict | None, on_success):
+        if self.zone_thread and self.zone_thread.isRunning():
+            raise ValueError("A zone export or route planning is already running.")
+        executable, maps = self._zone_maps()
+        dialog = QProgressDialog(title, "Cancel", 0, 100, self)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
+        thread, worker = QThread(self), ZoneWorker(self.catalogue, executable, maps, task, export)
+        worker.moveToThread(thread); thread.started.connect(worker.run)
+        worker.progress.connect(self._zone_progress_changed)
+        dialog.canceled.connect(lambda: worker.request_cancel())
+        worker.succeeded.connect(on_success)
+        worker.failed.connect(self._zone_failed); worker.cancelled.connect(self._zone_cancelled)
+        worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater); thread.finished.connect(self._zone_finished)
+        self.zone_thread, self.zone_worker, self.zone_progress = thread, worker, dialog
+        thread.start()
+
+    def _plan_route(self):
+        if self._all_pathing is None:
+            try:
+                self._start_zone_worker("pathing", "Computing pathing for every map", {"map_names": self._map_names()},
+                                        self._all_pathing_ready)
+            except Exception as exc:
+                QMessageBox.critical(self, "Route planning failed", str(exc))
+            return
+        try:
+            start = int(self._selected_map()["original_path"].rsplit("/", 2)[1])
+        except ValueError as exc:
+            self.route_text.setPlainText(str(exc)); return
+        end, names = self.route_target.currentData(), self._map_names()
+        legs = plan_route(self._all_pathing, start, end)
+        if legs is None:
+            self.route_text.setPlainText(f"No walk-through route from {names.get(start)} to {names.get(end)}. Many "
+                                         "transitions are driven by map scripts, which are not decoded yet.")
+            return
+        lines = [f"{names.get(start)} → {names.get(end)}: {sum(leg.distance for leg in legs):g} tiles over "
+                 f"{len(legs)} map(s)"]
+        for leg in legs:
+            place = next(p for p in self._all_pathing[leg.map_index].places if p.id == leg.end)
+            lines.append(f"  {names.get(leg.map_index)}: from {leg.start} walk {leg.distance:g} tiles to {place.label}")
+        self.route_text.setPlainText("\n".join(lines) if legs else f"You are already on {names.get(end)}.")
+
+    @Slot(object)
+    def _all_pathing_ready(self, pathing):
+        self._all_pathing = pathing
+        self._plan_route()
+
+    def _export_zones(self):
+        zones = {}
+        for row in self.map_rows.values():
+            label = self.labels.get((row["id"], "area_name"))
+            if label:
+                zones[label["value"]] = zones.get(label["value"], 0) + 1
+        try:
+            current = self.labels.get((self._selected_map()["id"], "area_name"))
+        except ValueError:
+            current = None
+        dialog = ZoneExportDialog(zones, current["value"] if current else None, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.zones()
+        if not chosen:
+            QMessageBox.information(self, "Export zones", "Tick at least one zone."); return
+        name = chosen[0] if len(chosen) == 1 else f"bundle of {len(chosen)} zones"
+        path, _ = QFileDialog.getSaveFileName(self, "Save zone package", f"{zone_slug(name)}{ZONE_SUFFIX}",
+                                              f"Zone package (*{ZONE_SUFFIX})")
+        if not path:
+            return
+        destination = Path(path).with_suffix(ZONE_SUFFIX)
+        repository = Path(__file__).resolve().parents[2]
+        if repository in destination.resolve().parents:
+            QMessageBox.warning(self, "Export zones", "Packages contain game data; save them outside the source tree.")
+            return
+        export = {"destination": destination, "zones": chosen, "map_names": self._map_names(),
+                  "character_names": self._character_names(), "meta": self.catalogue.meta(),
+                  "observations": self._observations(chosen) if dialog.observations.isChecked() else None,
+                  "all_palettes": dialog.palettes.isChecked()}
+        try:
+            self._start_zone_worker("export", f"Exporting {name}", export, self._zones_exported)
+        except Exception as exc:
+            QMessageBox.critical(self, "Zone export failed", str(exc))
+
+    def _observations(self, zones: list[str]) -> dict:
+        indices = {int(row["original_path"].rsplit("/", 2)[1]) for row in self.map_rows.values()
+                   if (label := self.labels.get((row["id"], "area_name"))) and label["value"] in zones}
+        panel, files = self.play_panel, []
+        inspections = [record for record in panel.inspections.list() if record.map_index in indices]
+        for record in inspections:
+            if (screenshot := panel.inspections.screenshot_path(record.id)) is not None:
+                files.append((f"inspections/{record.id}.png", screenshot.read_bytes(), "inspection screenshot"))
+        spawns = [spawn for spawn in panel.spawns.spawns() if spawn.map_index in indices]
+        return {"files": files, "records": {"note": "observed while playing; not decoded data",
+                                            "inspections": [record.__dict__ for record in inspections],
+                                            "item_spawns": [spawn.__dict__ for spawn in spawns]}}
+
+    @Slot(object)
+    def _zones_exported(self, manifest):
+        QMessageBox.information(self, "Zone package written",
+                                f"{manifest['kind'].capitalize()} with {len(manifest['zones'])} zone(s) and "
+                                f"{len(manifest['maps'])} map(s), {len(manifest['files'])} files. It contains game "
+                                "data from your disc: keep it private.")
+
+    @Slot(int, str)
+    def _zone_progress_changed(self, value, message):
+        if self.zone_progress:
+            self.zone_progress.setValue(value); self.zone_progress.setLabelText(message)
+
+    @Slot(str)
+    def _zone_failed(self, message):
+        if not self._closing:
+            QMessageBox.critical(self, "Zone task failed", message)
+
+    @Slot(str)
+    def _zone_cancelled(self, message):
+        pass
+
+    @Slot()
+    def _zone_finished(self):
+        if self.zone_progress:
+            self.zone_progress.close(); self.zone_progress.deleteLater()
+        self.zone_progress = None; self.zone_worker = None; self.zone_thread = None
+        self.background_finished.emit()
+
     def _relations_finished(self):
         if self.relation_progress:
             self.relation_progress.close(); self.relation_progress.deleteLater()
@@ -771,6 +1060,7 @@ class Workspace(QWidget):
             scene = parse_map(self._read_row(scene_row, MAX_MAP_FILE), entry)
             tfs = parse_tfs(self._read_row(tfs_row, MAX_TFS_FILE))
             self._map_scene, self._map_tfs = scene, tfs
+            self._update_pathing(entry, scene)
             self.map_palette.blockSignals(True)
             self.map_palette.addItems([f"Palette {index}" for index in range(len(tfs.palettes))])
             self.map_palette.blockSignals(False)
@@ -826,6 +1116,7 @@ class Workspace(QWidget):
             self.map_details.setPlainText("\n".join(lines))
         except Exception as exc:
             self.map_background.setPixmap(QPixmap()); self.map_floor.setPixmap(QPixmap())
+            self._map_pathing = None; self.path_image.setPixmap(QPixmap()); self.path_result.setText(str(exc))
             self.map_background.setText(f"Preview unavailable:\n{exc}")
             self.map_details.setPlainText(str(exc))
 
@@ -1103,6 +1394,8 @@ class Workspace(QWidget):
     def cancel_background(self):
         self._closing, self._pending_model = True, None
         self.play_panel.close_player()
+        if self.zone_worker:
+            self.zone_worker.request_cancel()
         if self.export_worker:
             self.export_worker.request_cancel()
         if self.model_worker:
@@ -1113,7 +1406,8 @@ class Workspace(QWidget):
     def has_background_work(self):
         return bool((self.export_thread and self.export_thread.isRunning()) or
                     (self.model_thread and self.model_thread.isRunning()) or
-                    (self.relation_thread and self.relation_thread.isRunning()))
+                    (self.relation_thread and self.relation_thread.isRunning()) or
+                    (self.zone_thread and self.zone_thread.isRunning()))
 
     def _hex_selected(self):
         try:
