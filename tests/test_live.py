@@ -47,3 +47,22 @@ def test_reads_on_map_npcs_only():
                     off_map=(0x80111000, struct.pack("<iI", 44, 0x80120000)))  # isOnMap stays 0
     npcs = read_live_state(read).npcs
     assert [(npc.slot, npc.character_id, npc.tile) for npc in npcs] == [(2, 43, (48, 73))]
+
+
+def test_reads_npc_behaviour():
+    from dw1_workbench.live import MAP_DIGIMON_TABLE
+    table = struct.pack("<10I", 0, 0, 0x80110000, 0, 0, 0, 0, 0, 0, 0)
+    npc = bytearray(104)
+    npc[0:8] = struct.pack("<iI", 83, 0x80120000)
+    npc[52] = 1
+    npc[72:74] = npc[76:78] = struct.pack("<h", 300)
+    npc[101], npc[102] = 7, 1
+    entry = bytearray(196)
+    entry[168:174] = struct.pack("<3h", 594, 0, 2347)
+    entry[180:182] = struct.pack("<h", 1000)
+    entry[188], entry[192] = 12, 2
+    read = ram_with(table=(ENTITY_TABLE, table), npc=(0x80110000, bytes(npc)), entry=(MAP_DIGIMON_TABLE, bytes(entry)),
+                    location=(0x80120000 + 120, struct.pack("<3i", 594, 0, 2347)))
+    (npc_state,) = read_live_state(read).npcs
+    assert (npc_state.follow_mode, npc_state.tracking_range, npc_state.post, npc_state.reacting, npc_state.autotalk,
+            npc_state.script_id, npc_state.hp, npc_state.max_hp) == (12, 1000, (594, 0, 2347), True, True, 7, 300, 300)

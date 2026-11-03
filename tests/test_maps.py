@@ -233,3 +233,14 @@ def test_floor_grid_image_colours_triggers_and_exit_slots():
     scene = parse_map(make_map(floor=floor_with_exit(3, (50,), value_fill=128)), entry)
     image = floor_grid_image(scene)
     assert image.getpixel((50, 50)) == EXIT_COLOURS[3] and image.getpixel((0, 0)) == TRIGGER_COLOURS["blocked"]
+
+
+def test_follow_modes_and_tracking_box():
+    from dw1_workbench.maps import follow_description, follow_kind, tracking_box
+    assert [follow_kind(mode) for mode in (1, 2, 12, 16, 0)] == \
+        ["ignores you", "watches you", "chases you", "chases you", "ignores you"]
+    assert follow_description(12, 1000) == "chases you within ±1000 units (±10 tiles) of its post (mode 12)"
+    assert "radius test" in follow_description(16, 2000)
+    # ModokiBetamon in Native Forest (MAYO00): post (594, 0, 2347), range 1000. In the game it reacted as soon as
+    # the Tamer reached row 17, i.e. inside rows 16-36.
+    assert tracking_box((594, 0, 2347), 1000) == ((45, 16), (65, 36))

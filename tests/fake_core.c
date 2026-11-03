@@ -85,6 +85,14 @@ EXPORT void retro_run(void) {
             memcpy(system_ram + 0x110000 + 4, &npc_position, 4);
             system_ram[0x110000 + 52] = 1;
             memcpy(system_ram + 0x120000 + 120, npc_location, sizeof npc_location);
+            {   /* a hostile chaser: HP 300/300, script 7, autotalk; MAP_DIGIMON_TABLE[0] mode 12, range 1000, reacting */
+                int16_t hp = 300, post[3] = {-162, 0, -2352}, range = 1000;
+                memcpy(system_ram + 0x110000 + 72, &hp, 2); memcpy(system_ram + 0x110000 + 76, &hp, 2);
+                system_ram[0x110000 + 101] = 7; system_ram[0x110000 + 102] = 1;
+                memcpy(system_ram + 0x13CB50 + 168, post, sizeof post);
+                memcpy(system_ram + 0x13CB50 + 180, &range, 2);
+                system_ram[0x13CB50 + 188] = 12; system_ram[0x13CB50 + 192] = 2;
+            }
         }
     }
     save_ram[1] = (uint8_t)buttons_seen;

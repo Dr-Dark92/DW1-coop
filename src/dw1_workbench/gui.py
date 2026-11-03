@@ -21,9 +21,10 @@ from .characters import PARTNER_COUNT, STAGES, parse_character_table, parse_move
 from .clip_names import clip_name
 from .errors import Cancelled, DiscFormatError
 from .iso9660 import IsoEntry, safe_export
-from .maps import (EXIT_COLOURS, MAX_MAP_FILE, MAX_TFS_FILE, TRIGGER_COLOURS, export_background,
-                   floor_grid_image, layout_zones, map_exits, map_links, parse_map, parse_map_table, parse_tfs,
-                   render_background, trigger_summary, zone_links)
+from .live import model_tile
+from .maps import (EXIT_COLOURS, FOLLOW_COLOURS, MAX_MAP_FILE, MAX_TFS_FILE, TRIGGER_COLOURS, export_background,
+                   floor_grid_image, floor_grid_with_digimon, follow_description, layout_zones, map_exits, map_links,
+                   parse_map, parse_map_table, parse_tfs, render_background, trigger_summary, zone_links)
 from .relation_view import RelationView
 from .animation import parse_animations
 from .animation_view import ModelAnimationPanel, ModelLoad
@@ -591,7 +592,10 @@ class Workspace(QWidget):
         floor_note = QLabel("100×100 floor grid, one cell per pixel; top is the far edge (north). Values follow the "
                             "game's tile-trigger rules (DW1-SydPatches): 0 walkable, 128 blocked, 50–79 step-on "
                             "script, 80–109 interact script, 110–119 exit through warp slot 0–9, 120 toilet.<br>"
-                            f"{legend}<br>exit slots: {exits}")
+                            f"{legend}<br>exit slots: {exits}<br>Digimon placements: "
+                            f"{swatch(FOLLOW_COLOURS['chases you'])} chases you (box: where it notices you) "
+                            f"{swatch(FOLLOW_COLOURS['watches you'])} watches you "
+                            f"{swatch(FOLLOW_COLOURS['ignores you'])} ignores you")
         floor_note.setWordWrap(True); floor_note.setTextFormat(Qt.TextFormat.RichText)
         floor_layout.addWidget(floor_note); floor_layout.addWidget(self.map_floor, 1)
         self.map_preview_tabs = QTabWidget()
@@ -770,9 +774,7 @@ class Workspace(QWidget):
             self.map_palette.addItems([f"Palette {index}" for index in range(len(tfs.palettes))])
             self.map_palette.blockSignals(False)
             self._render_map_background()
-            floor = QPixmap.fromImage(ImageQt(floor_grid_image(scene)))
-            self.map_floor.setPixmap(floor.scaled(400, 400, Qt.AspectRatioMode.KeepAspectRatio,
-                                                  Qt.TransformationMode.FastTransformation))
+            self.map_floor.setPixmap(QPixmap.fromImage(ImageQt(floor_grid_with_digimon(scene))))
             entries = self._map_entries
             for warp_exit in map_exits(scene):
                 target = entries[warp_exit.warp.map_index]
@@ -804,8 +806,11 @@ class Workspace(QWidget):
                   for kind, values in sorted(triggers.items())),
                 "spawn points:",
                 *(f"  {i}: position {spawn.position}, rotation {spawn.rotation}" for i, spawn in enumerate(scene.spawns)),
-                f"Digimon placements ({len(scene.digimon)}):",
-                *(f"  {self._character_name(d.character_id)} at {d.position}; HP {d.stats['hp']}/{d.stats['max_hp']}, "
+                f"Digimon placements ({len(scene.digimon)}; candidates — the map script chooses which appear, "
+                "and sets whether touching them starts their script, e.g. a battle):",
+                *(f"  {self._character_name(d.character_id)} at {d.position} (tile "
+                  f"{','.join(map(str, model_tile(d.position[0], d.position[2])))}); "
+                  f"{follow_description(d.ai_type, d.tracking_range)}; HP {d.stats['hp']}/{d.stats['max_hp']}, "
                   f"MP {d.stats['mp']}/{d.stats['max_mp']}, off {d.stats['offense']}, def {d.stats['defense']}, "
                   f"spd {d.stats['speed']}, brn {d.stats['brains']}, bits {d.bits}, script {d.script_id}, "
                   f"{len(d.waypoints)} waypoint(s)" for d in scene.digimon),

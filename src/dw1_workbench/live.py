@@ -19,6 +19,14 @@ ENTITY_SLOTS = 10
 FIRST_NPC_SLOT = 2
 TYPE_OFFSET = 0  # Entity.type: the character resource ID
 IS_ON_MAP_OFFSET = 52  # Entity.isOnMap, after type, posData, animPtr and the 40-byte EntityAnim
+# NPCEntity (104 bytes): Entity (56), BaseStats (20: max HP at +16), CurrentStats (12: HP at +0), then
+# flee (8), bits, unk1, unk1_2, unk2, scriptId and autotalk at +102.
+NPC_MAX_HP_OFFSET, NPC_HP_OFFSET, NPC_SCRIPT_OFFSET, NPC_AUTOTALK_OFFSET = 72, 76, 101, 102
+# MAP_DIGIMON_TABLE[slot - 2] (MapDigimonEntity, 196 bytes) drives NPC slot `slot` (NPCEntityTickOverworld).
+MAP_DIGIMON_TABLE = 0x8013CB50
+MAP_DIGIMON_SIZE = 196
+POST_OFFSET, TRACKING_RANGE_OFFSET = 168, 180  # post: posX, posY, posZ (3 x i16)
+FOLLOW_MODE_OFFSET, LOOK_STATE_OFFSET = 188, 192  # lookAtTamerState: nonzero while it reacts to the Tamer
 GRID = 100
 POSITION_POINTER_OFFSET = 4
 # PositionData: GsDOBJ2 (16) + GsCOORDINATE2 (80) + VECTOR scale (16) + SVECTOR rotation (8), then VECTOR location.
@@ -56,6 +64,14 @@ class LiveNpc:
     slot: int  # ENTITY_TABLE index, 2-9
     character_id: int
     position: EntityPosition
+    follow_mode: int = 0
+    tracking_range: int = 0
+    post: tuple[int, int, int] = (0, 0, 0)  # where the map placed it; the centre of its tracking box
+    reacting: bool = False  # lookAtTamerState != 0: turned towards, or chasing, the Tamer
+    autotalk: bool = False  # touching the Tamer starts its script (set by the map script; battles use it)
+    script_id: int = 0
+    hp: int = 0
+    max_hp: int = 0
 
     @property
     def tile(self) -> tuple[int, int]:
@@ -103,9 +119,18 @@ def _npcs(read) -> tuple[LiveNpc, ...]:
         if not _in_ram(pointer, IS_ON_MAP_OFFSET + 1) or not read(ram_offset(pointer + IS_ON_MAP_OFFSET), 1)[0]:
             continue  # empty slot, or an entity the game has taken off the map
         position = _position(read, pointer)
-        if position is not None:
-            character_id = struct.unpack("<i", read(ram_offset(pointer + TYPE_OFFSET), 4))[0]
-            npcs.append(LiveNpc(slot, character_id, position))
+        if position is None:
+            continue
+        character_id = struct.unpack("<i", read(ram_offset(pointer + TYPE_OFFSET), 4))[0]
+        max_hp, hp = struct.unpack("<h", read(ram_offset(pointer + NPC_MAX_HP_OFFSET), 2))[0], \
+            struct.unpack("<h", read(ram_offset(pointer + NPC_HP_OFFSET), 2))[0]
+        script_id, autotalk = read(ram_offset(pointer + NPC_SCRIPT_OFFSET), 2)
+        table = MAP_DIGIMON_TABLE + (slot - FIRST_NPC_SLOT) * MAP_DIGIMON_SIZE
+        post = struct.unpack("<3h", read(ram_offset(table + POST_OFFSET), 6))
+        (tracking_range,) = struct.unpack("<h", read(ram_offset(table + TRACKING_RANGE_OFFSET), 2))
+        follow_mode, _, _, _, look_state = struct.unpack("<5b", read(ram_offset(table + FOLLOW_MODE_OFFSET), 5))
+        npcs.append(LiveNpc(slot, character_id, position, follow_mode, tracking_range, post,
+                            look_state != 0, autotalk == 1, script_id, hp, max_hp))
     return tuple(npcs)
 
 

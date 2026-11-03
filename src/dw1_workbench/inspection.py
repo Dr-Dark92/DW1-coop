@@ -38,7 +38,12 @@ class Inspection:
     note: str
     core: str
     core_version: str
-    npcs: tuple = ()  # (character ID, name, tile) of each NPC the game had on the map
+    npcs: tuple = ()  # (character ID, name, tile, behaviour) of each NPC the game had on the map
+
+
+def _npc(entry) -> tuple:
+    character_id, name, tile, *rest = entry
+    return (int(character_id), str(name), tuple(tile), str(rest[0]) if rest else "")
 
 
 class InspectionStore:
@@ -60,7 +65,7 @@ class InspectionStore:
                             tuple(position) if position else None, tuple(tile) if tile else None, trigger,
                             tuple(partner_tile) if partner_tile else None, grid_differences, category,
                             note.strip(), core, core_version,
-                            tuple((int(cid), str(name), tuple(tile)) for cid, name, tile in npcs))
+                            tuple(_npc(entry) for entry in npcs))
         if screenshot:
             _atomic_write(folder / "screen.png", screenshot)
         if state:
@@ -75,7 +80,7 @@ class InspectionStore:
         try:
             record = json.loads((self._folder(inspection_id) / "inspection.json").read_text())
             fields = {key: record[key] for key in Inspection.__dataclass_fields__ if key != "npcs"}
-            fields["npcs"] = tuple((cid, name, tuple(tile)) for cid, name, tile in record.get("npcs", []))
+            fields["npcs"] = tuple(_npc(entry) for entry in record.get("npcs", []))
         except (OSError, ValueError, KeyError, TypeError):
             return None
         for key in ("position", "tile", "partner_tile"):

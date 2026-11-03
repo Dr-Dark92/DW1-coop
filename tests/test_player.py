@@ -122,14 +122,18 @@ def test_live_map_and_inspection(application, fake_core, tmp_path, monkeypatch):
     wait(application, lambda: window._live is not None)
     assert window.live_label.text().startswith("Test zone · TEST00 (map 7) · tile ")
     assert "1 tiles differ from the decoded MAP" in window.live_label.text()  # the fake core's exit tile
-    assert window.npc_list.text() == "NPCs on this map: Yuramon at 48,73"
-    assert window.live_map.npcs == [((48, 73), "Yuramon")]
+    assert window.npc_list.text() == ("Digimon on this map:\n• Yuramon at 48,73, chases you within ±10 tiles of its post, "
+                                      "starts its script (a battle for enemies) on contact, HP 300/300, REACTING NOW")
+    assert "⚠ Yuramon is after you" in window.live_label.text()
+    npc, name = window.live_map.npcs[0]
+    assert (npc.follow_mode, npc.tracking_range, npc.post, npc.autotalk, npc.script_id, name) == \
+        (12, 1000, (-162, 0, -2352), True, 7, "Yuramon")
     window.worker_inspect()
     store = InspectionStore(tmp_path / "saves" / "inspections")
     wait(application, lambda: store.list())
     record = store.list()[0]
     assert (record.map_index, record.map_name, record.note, record.grid_differences) == (7, "Test zone · TEST00", "exit tile", 1)
-    assert record.npcs == ((43, "Yuramon", (48, 73)),)
+    assert record.npcs[0][:3] == (43, "Yuramon", (48, 73)) and "chases you" in record.npcs[0][3]
     assert record.tile[1] == 52 and store.has_state(record.id) and store.live_grid(record.id)[50 + 52 * 100] == 113
     window.close()
 

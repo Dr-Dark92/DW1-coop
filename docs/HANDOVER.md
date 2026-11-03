@@ -11,6 +11,8 @@ Next milestone after the player, finishing the roadmap's P0 inspection requireme
 
 NPCs (user report: not shown on the live map): `ENTITY_TABLE` slots 2–9 with `isOnMap` are now read (`LiveNpc`), drawn and named on the live map, listed under it and in the inspect dialog, and stored in inspections (`npcs`). Checked from the user's inspection states: live NPC IDs and tiles equal the decoded MAP placements in File City and Green Gym. 112 tests pass.
 
+Hostile Digimon (user request "aggressive spawned digimons / enemies"): `maps.follow_kind`/`follow_description`/`tracking_box`/`floor_grid_with_digimon`; `LiveNpc` gains follow mode, tracking range, post, reacting, autotalk, script ID and HP from `NPC_ENTITIES` and `MAP_DIGIMON_TABLE`; live map colours and boxes, NPC descriptions, threat in the status bar, behaviour stored with inspections. Verified with a scripted walk (scratch harness, not in Git) from the user's Native Forest inspection: spawned ModokiBetamon reacted exactly on entering its decoded box and started its battle script on contact. Not yet: battle state (whether a battle is running) and wandering/waypoint paths. 114 tests pass.
+
 Still to do for P0: the user's own playthrough — two connected zones, a gateway and a toilet inspected with F9 — then record it here and in the roadmap. Later: compare inspections where the live grid differs (script-changed tiles), and use spawn/arrival positions after warps.
 
 ## Python player (2026-11-03, branch `python-player`)

@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 from .inspection import CATEGORIES, InspectionError, InspectionStore
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
                        LibretroError)
-from .live import LiveState, grid_differences, read_live_state
-from .maps import trigger_description, trigger_grid_image
+from .live import LiveNpc, LiveState, grid_differences, read_live_state
+from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
 from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveError, QuickSaveStore
 
 FAST_FORWARD = 4  # speed while fast-forward is held
@@ -350,8 +350,20 @@ class FrameView(QWidget):
         super().focusOutEvent(event)
 
 
+NPC_COLOURS = {"chases you": QColor("#e8413c"), "watches you": QColor("#f2c94c"), "ignores you": QColor("#ff9a1f")}
+
+
+def is_hostile(npc: LiveNpc) -> bool:
+    """Chases the Tamer when it comes near, and starts its script (a battle) on contact."""
+    return follow_kind(npc.follow_mode) == "chases you" and npc.autotalk
+
+
 class LiveMapView(QWidget):
-    """The running game's tile-trigger grid with the player (white), partner (cyan) and NPCs (orange) marked."""
+    """The running game's tile-trigger grid with the player (white), partner (cyan) and NPCs marked.
+
+    NPCs are red when they chase the Tamer, yellow when they only turn to watch, orange otherwise; the box
+    around each chaser or watcher is where the Tamer sets it off, drawn solid while it is reacting.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -359,7 +371,7 @@ class LiveMapView(QWidget):
         self.grid: QImage | None = None
         self._grid_bytes = None
         self.tamer = self.partner = None
-        self.npcs: list[tuple[tuple[int, int], str]] = []
+        self.npcs: list[tuple[LiveNpc, str]] = []
 
     def show_live(self, live: LiveState, npc_names: list[str] | None = None):
         if live.grid != self._grid_bytes:
@@ -367,7 +379,7 @@ class LiveMapView(QWidget):
             self.grid = QImage(ImageQt(trigger_grid_image(live.grid))).copy()
         self.tamer, self.partner = live.tamer_tile, live.partner_tile
         names = npc_names or [f"ID {npc.character_id}" for npc in live.npcs]
-        self.npcs = [(npc.tile, name) for npc, name in zip(live.npcs, names)]
+        self.npcs = list(zip(live.npcs, names))
         self.update()
 
     def paintEvent(self, _event):
@@ -382,13 +394,24 @@ class LiveMapView(QWidget):
         left, top = (self.width() - side) / 2, (self.height() - side) / 2
         painter.drawImage(QRectF(left, top, side, side), self.grid)
         radius = max(3.0, cell * 1.5)
-        markers = [(tile, QColor("#ff9a1f"), name) for tile, name in self.npcs]
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for npc, _ in self.npcs:
+            kind = follow_kind(npc.follow_mode)
+            if not has_tracking_box(npc.follow_mode) or npc.tracking_range <= 0:
+                continue
+            (x0, y0), (x1, y1) = tracking_box(npc.post, npc.tracking_range)
+            pen = QPen(NPC_COLOURS[kind], 2 if npc.reacting else 1,
+                       Qt.PenStyle.SolidLine if npc.reacting else Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawRect(QRectF(left + x0 * cell, top + y0 * cell, (x1 - x0 + 1) * cell, (y1 - y0 + 1) * cell))
+        markers = [(npc.tile, NPC_COLOURS[follow_kind(npc.follow_mode)], name + (" !" if npc.reacting else ""))
+                   for npc, name in self.npcs]
         markers += [(self.partner, QColor("cyan"), None), (self.tamer, QColor("white"), None)]
         for tile, colour, name in markers:
             if tile is None:
                 continue
             x, y = left + (tile[0] + 0.5) * cell, top + (tile[1] + 0.5) * cell
-            # NPCs get a white ring so they stand apart from the orange and yellow exit tiles.
+            # NPCs get a white ring so they stand apart from the coloured exit tiles.
             painter.setPen(QPen(QColor("white" if name else "black"), 1.5 if name else 1)); painter.setBrush(colour)
             painter.drawEllipse(QRectF(x - radius, y - radius, radius * 2, radius * 2))
             if name:
@@ -544,9 +567,30 @@ class PlayWindow(QMainWindow):
     def character_label(self, character_id: int) -> str:
         return self.character_names.get(character_id, f"ID {character_id}")
 
+    def npc_description(self, npc: LiveNpc) -> str:
+        kind = follow_kind(npc.follow_mode)
+        parts = [f"{self.character_label(npc.character_id)} at {npc.tile[0]},{npc.tile[1]}"]
+        if has_tracking_box(npc.follow_mode):
+            parts.append(f"{kind} within ±{npc.tracking_range / 100:g} tiles of its post")
+        elif kind != "ignores you":
+            parts.append(f"{kind} (the game's radius test, range {npc.tracking_range})")
+        if npc.autotalk:
+            parts.append("starts its script (a battle for enemies) on contact")
+        parts.append(f"HP {npc.hp}/{npc.max_hp}")
+        if npc.reacting:
+            parts.append("REACTING NOW")
+        return ", ".join(parts)
+
     def npc_summary(self, live: LiveState) -> str:
         return ", ".join(f"{self.character_label(npc.character_id)} at {npc.tile[0]},{npc.tile[1]}"
                          for npc in live.npcs) or "none"
+
+    def threat_summary(self, live: LiveState) -> str:
+        chasing = [self.character_label(npc.character_id) for npc in live.npcs if npc.reacting and is_hostile(npc)]
+        hostile = sum(is_hostile(npc) for npc in live.npcs)
+        if chasing:
+            return f"⚠ {', '.join(chasing)} {'is' if len(chasing) == 1 else 'are'} after you"
+        return f"{hostile} hostile Digimon on this map" if hostile else ""
 
     def decoded_grid(self, index: int) -> bytes | None:
         if index not in self._decoded_cache:
@@ -575,16 +619,19 @@ class PlayWindow(QMainWindow):
     @Slot(object)
     def _live_changed(self, live: LiveState):
         self._live = live
-        self.live_label.setText(self.live_summary(live))
+        threat = self.threat_summary(live)
+        self.live_label.setText(self.live_summary(live) + (f" · {threat}" if threat else ""))
         self.live_map.show_live(live, [self.character_label(npc.character_id) for npc in live.npcs])
-        self.npc_list.setText(f"NPCs on this map: {self.npc_summary(live)}")
+        self.npc_list.setText("Digimon on this map:\n" + ("\n".join(f"• {self.npc_description(npc)}" for npc in live.npcs)
+                                                         or "none"))
 
     @Slot(object)
     def _inspection_captured(self, capture: dict):
         live: LiveState | None = capture["live"]
         was_paused = self.worker.paused
         self.worker.paused = True
-        summary = (f"{self.live_summary(live)}\nNPCs: {self.npc_summary(live)}" if live is not None
+        summary = (f"{self.live_summary(live)}\n" + "\n".join(self.npc_description(npc) for npc in live.npcs)
+                   if live is not None
                    else "Position unknown (live map is off for this disc)")
         dialog = InspectDialog(summary, self.note.text(), self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -595,8 +642,8 @@ class PlayWindow(QMainWindow):
                     tile=live.tamer_tile if live else None,
                     trigger=live.trigger_at(live.tamer_tile) if live else None,
                     partner_tile=live.partner_tile if live else None,
-                    npcs=[(npc.character_id, self.character_label(npc.character_id), npc.tile)
-                          for npc in live.npcs] if live else [],
+                    npcs=[(npc.character_id, self.character_label(npc.character_id), npc.tile,
+                           self.npc_description(npc)) for npc in live.npcs] if live else [],
                     grid_differences=self.grid_difference_count(live) if live else None,
                     category=dialog.category.currentText(), note=dialog.note.text(), core=capture["core"],
                     core_version=capture["core_version"], screenshot=capture["screenshot"], state=capture["state"],

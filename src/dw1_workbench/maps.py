@@ -7,9 +7,10 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from .errors import DiscFormatError, ValidationError
+from .live import model_tile
 
 # USA SLUS_010.32 file offsets (virtual address - 0x80090000), matching the
 # DW1ModelConverter 17d1a19 SLUS_DATA addresses 0x801292d4/0x801291bc/0x80122e10/0x80122e60.
@@ -325,6 +326,42 @@ def trigger_kind(value: int) -> str:
     return "unknown"
 
 
+# Map Digimon follow modes (MapDigimonEntity.followMode, the MAP file's ai_type), from dw_decomp aaf69a4
+# src/main/overworld.c NPCEntityTickOverworld. The box is the Digimon's post (its MAP position) plus or minus
+# trackingRange on X and Z; the "radius" test is the game's own: (dx + dz) < (trackingRange * 6 / 10)^2.
+WATCH_MODES = frozenset({2, 11})
+CHASE_BOX_MODES = frozenset({3, 4, 5, 8, 9, 12, 13, 14, 17, 18})
+CHASE_RADIUS_MODES = frozenset({6, 7, 15, 16})
+
+
+def follow_kind(mode: int) -> str:
+    if mode in WATCH_MODES:
+        return "watches you"
+    if mode in CHASE_BOX_MODES or mode in CHASE_RADIUS_MODES:
+        return "chases you"
+    return "ignores you"
+
+
+def follow_description(mode: int, tracking_range: int) -> str:
+    kind = follow_kind(mode)
+    if mode in CHASE_RADIUS_MODES:
+        return f"{kind} (mode {mode}: the game's radius test, range {tracking_range})"
+    if kind != "ignores you":
+        return f"{kind} within ±{tracking_range} units (±{tracking_range / 100:g} tiles) of its post (mode {mode})"
+    return f"{kind} (mode {mode})"
+
+
+def has_tracking_box(mode: int) -> bool:
+    """Chasers and watchers that notice the Tamer inside a box; radius-test modes have no box to draw."""
+    return mode in WATCH_MODES or mode in CHASE_BOX_MODES
+
+
+def tracking_box(position: tuple[int, int, int], tracking_range: int) -> tuple[tuple[int, int], tuple[int, int]]:
+    """The floor-grid tiles at the corners of a Digimon's tracking box (left/top, right/bottom)."""
+    x, z = position[0], position[2]
+    return model_tile(x - tracking_range, z + tracking_range), model_tile(x + tracking_range, z - tracking_range)
+
+
 DIRECTIONS = ("north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west")
 
 
@@ -511,6 +548,25 @@ def trigger_grid_image(grid: bytes) -> Image.Image:
     image = Image.frombytes("P", (FLOOR_GRID, FLOOR_GRID), grid)
     image.putpalette(palette)
     return image.convert("RGB")
+
+
+FOLLOW_COLOURS = {"chases you": (232, 65, 60), "watches you": (242, 201, 76), "ignores you": (255, 154, 31)}
+
+
+def floor_grid_with_digimon(scene: MapScene, scale: int = 4) -> Image.Image:
+    """The floor grid enlarged, with each Digimon placement's post and, for chasers and watchers, its box."""
+    image = floor_grid_image(scene).resize((FLOOR_GRID * scale, FLOOR_GRID * scale), Image.Resampling.NEAREST)
+    draw = ImageDraw.Draw(image)
+    for digimon in scene.digimon:
+        colour = FOLLOW_COLOURS[follow_kind(digimon.ai_type)]
+        if has_tracking_box(digimon.ai_type) and digimon.tracking_range > 0:
+            (x0, y0), (x1, y1) = tracking_box(digimon.position, digimon.tracking_range)
+            draw.rectangle((x0 * scale, y0 * scale, (x1 + 1) * scale - 1, (y1 + 1) * scale - 1), outline=colour)
+        x, y = model_tile(digimon.position[0], digimon.position[2])
+        centre = ((x + 0.5) * scale, (y + 0.5) * scale)
+        draw.ellipse((centre[0] - scale, centre[1] - scale, centre[0] + scale, centre[1] + scale),
+                     fill=colour, outline=(255, 255, 255))
+    return image
 
 
 def trigger_description(value: int) -> str:
