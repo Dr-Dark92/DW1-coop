@@ -38,6 +38,7 @@ class Inspection:
     note: str
     core: str
     core_version: str
+    npcs: tuple = ()  # (character ID, name, tile) of each NPC the game had on the map
 
 
 class InspectionStore:
@@ -51,14 +52,15 @@ class InspectionStore:
 
     def add(self, *, map_index: int, map_name: str, position, tile, trigger, partner_tile, grid_differences,
             category: str, note: str, core: str, core_version: str, screenshot: bytes | None,
-            state: bytes | None, live_grid: bytes | None) -> Inspection:
+            state: bytes | None, live_grid: bytes | None, npcs=()) -> Inspection:
         now = datetime.now(timezone.utc)
         inspection_id = now.strftime("%Y%m%d-%H%M%S-%f")
         folder = self._folder(inspection_id)
         record = Inspection(inspection_id, now.isoformat(timespec="seconds"), map_index, map_name,
                             tuple(position) if position else None, tuple(tile) if tile else None, trigger,
                             tuple(partner_tile) if partner_tile else None, grid_differences, category,
-                            note.strip(), core, core_version)
+                            note.strip(), core, core_version,
+                            tuple((int(cid), str(name), tuple(tile)) for cid, name, tile in npcs))
         if screenshot:
             _atomic_write(folder / "screen.png", screenshot)
         if state:
@@ -72,7 +74,8 @@ class InspectionStore:
     def get(self, inspection_id: str) -> Inspection | None:
         try:
             record = json.loads((self._folder(inspection_id) / "inspection.json").read_text())
-            fields = {key: record[key] for key in Inspection.__dataclass_fields__}
+            fields = {key: record[key] for key in Inspection.__dataclass_fields__ if key != "npcs"}
+            fields["npcs"] = tuple((cid, name, tuple(tile)) for cid, name, tile in record.get("npcs", []))
         except (OSError, ValueError, KeyError, TypeError):
             return None
         for key in ("position", "tile", "partner_tile"):

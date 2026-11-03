@@ -9,6 +9,8 @@ Next milestone after the player, finishing the roadmap's P0 inspection requireme
 - `inspection.py`: per-inspection folder under `<saves>/inspections/` with JSON (written last), PNG, zlib-compressed state and the live grid. Play tab lists them (play from, show map, delete); Maps and Zones scene details list a map's inspections; `Workspace.show_map(index)` opens a map on its floor grid.
 - Real-game check (offscreen, from the user's slots): maps 109 `MAYO00` and 112 `TRAI00` read correctly, tiles (54,12) and (54,82), and the live grid equals the decoded floor grid on all tiles of both. An end-to-end run from the Resume slot saved and listed an inspection. 111 tests pass.
 
+NPCs (user report: not shown on the live map): `ENTITY_TABLE` slots 2–9 with `isOnMap` are now read (`LiveNpc`), drawn and named on the live map, listed under it and in the inspect dialog, and stored in inspections (`npcs`). Checked from the user's inspection states: live NPC IDs and tiles equal the decoded MAP placements in File City and Green Gym. 112 tests pass.
+
 Still to do for P0: the user's own playthrough — two connected zones, a gateway and a toilet inspected with F9 — then record it here and in the roadmap. Later: compare inspections where the live grid differs (script-changed tiles), and use spawn/arrival positions after warps.
 
 ## Python player (2026-11-03, branch `python-player`)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import struct
 
-from dw1_workbench.live import (CURRENT_SCREEN, MAP_COLLISION_DATA, PARTNER_ENTITY, TAMER_ENTITY, grid_differences,
+from dw1_workbench.live import (CURRENT_SCREEN, ENTITY_TABLE, MAP_COLLISION_DATA, PARTNER_ENTITY, TAMER_ENTITY, grid_differences,
                                 model_tile, ram_offset, read_live_state)
 
 
@@ -37,3 +37,13 @@ def test_reads_map_positions_and_grid():
 
 def test_grid_differences():
     assert grid_differences(b"\x00\x80\x00", b"\x00\x00\x00") == [(1, 0, 0, 128)]
+
+
+def test_reads_on_map_npcs_only():
+    table = struct.pack("<10I", 0x8015576C, 0x801557A8, 0x80110000, 0, 0x80111000, 0x12345678, 0, 0, 0, 0)
+    read = ram_with(table=(ENTITY_TABLE, table),
+                    npc=(0x80110000, struct.pack("<iI", 43, 0x80120000)), on_map=(0x80110000 + 52, b"\x01"),
+                    npc_location=(0x80120000 + 120, struct.pack("<3i", -162, 0, -2352)),
+                    off_map=(0x80111000, struct.pack("<iI", 44, 0x80120000)))  # isOnMap stays 0
+    npcs = read_live_state(read).npcs
+    assert [(npc.slot, npc.character_id, npc.tile) for npc in npcs] == [(2, 43, (48, 73))]

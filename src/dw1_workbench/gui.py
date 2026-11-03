@@ -285,7 +285,8 @@ class Workspace(QWidget):
         self.maps_page = self._maps()
         self.tabs.addTab(self.maps_page, "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
-        self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid)
+        self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid,
+                                    self._character_names())
         self.play_panel.show_map_requested.connect(self.show_map)
         self.tabs.addTab(self.play_panel, "Play")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
@@ -857,6 +858,17 @@ class Workspace(QWidget):
         if self._select_map(index):
             self.tabs.setCurrentWidget(self.maps_page); self.maps_tabs.setCurrentIndex(0)
             self.map_preview_tabs.setCurrentIndex(2)
+
+    def _character_names(self) -> dict[int, str]:
+        names = {}
+        for row in self.rows:
+            if "#character/" not in row["original_path"]:
+                continue
+            character_id = int(row["original_path"].split("#character/", 1)[1].split("/", 1)[0])
+            label = self.labels.get((row["id"], "display_name"))
+            if label and label["value"]:
+                names.setdefault(character_id, label["value"])
+        return names
 
     def _map_names(self) -> dict[int, str]:
         names = {}

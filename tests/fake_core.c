@@ -77,6 +77,15 @@ EXPORT void retro_run(void) {
         memcpy(system_ram + 0x15576C + 4, &pointer, 4);
         memcpy(system_ram + 0x100000 + 120, location, sizeof location);
         system_ram[0x1AF398 + 50 + 52 * 100] = 113; /* exit through warp slot 3 at tile (50, 52) */
+        {   /* ENTITY_TABLE[2] -> an on-map NPC of type 43 at (-162, 0, -2352), tile (48, 73) */
+            uint32_t npc = 0x80110000u, npc_position = 0x80120000u; int32_t type = 43;
+            int32_t npc_location[3] = {-162, 0, -2352};
+            memcpy(system_ram + 0x12F344 + 2 * 4, &npc, 4);
+            memcpy(system_ram + 0x110000, &type, 4);
+            memcpy(system_ram + 0x110000 + 4, &npc_position, 4);
+            system_ram[0x110000 + 52] = 1;
+            memcpy(system_ram + 0x120000 + 120, npc_location, sizeof npc_location);
+        }
     }
     save_ram[1] = (uint8_t)buttons_seen;
     video(counter % 2 ? NULL : pixels, W, H, W * 4); /* odd frames are dupes */

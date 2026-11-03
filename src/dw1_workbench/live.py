@@ -14,6 +14,11 @@ CURRENT_SCREEN = 0x80134DA8  # u8 map-table index, set by the map loader after t
 TAMER_ENTITY = 0x8015576C  # TamerEntity; starts with Entity {i32 type; PositionData *posData; ...}
 PARTNER_ENTITY = 0x801557A8  # PartnerEntity; starts with the same Entity header
 MAP_COLLISION_DATA = 0x801AF398  # u8[100 * 100], the running map's tile-trigger grid
+ENTITY_TABLE = 0x8012F344  # Entity *[10]: 0 Tamer, 1 partner, 2-9 NPC Digimon on the current map
+ENTITY_SLOTS = 10
+FIRST_NPC_SLOT = 2
+TYPE_OFFSET = 0  # Entity.type: the character resource ID
+IS_ON_MAP_OFFSET = 52  # Entity.isOnMap, after type, posData, animPtr and the 40-byte EntityAnim
 GRID = 100
 POSITION_POINTER_OFFSET = 4
 # PositionData: GsDOBJ2 (16) + GsCOORDINATE2 (80) + VECTOR scale (16) + SVECTOR rotation (8), then VECTOR location.
@@ -47,11 +52,23 @@ class EntityPosition:
 
 
 @dataclass(frozen=True)
+class LiveNpc:
+    slot: int  # ENTITY_TABLE index, 2-9
+    character_id: int
+    position: EntityPosition
+
+    @property
+    def tile(self) -> tuple[int, int]:
+        return self.position.tile
+
+
+@dataclass(frozen=True)
 class LiveState:
     map_index: int
     tamer: EntityPosition | None
     partner: EntityPosition | None
     grid: bytes  # MAP_COLLISION_DATA as the game holds it now (scripts may have changed it)
+    npcs: tuple[LiveNpc, ...] = ()
 
     def trigger_at(self, tile: tuple[int, int] | None) -> int | None:
         if tile is None or not (0 <= tile[0] < GRID and 0 <= tile[1] < GRID):
@@ -67,17 +84,36 @@ class LiveState:
         return self.partner.tile if self.partner else None
 
 
+def _in_ram(pointer: int, size: int) -> bool:
+    return RAM_BASE <= pointer and pointer + size <= RAM_BASE + RAM_SIZE
+
+
 def _position(read, entity_address: int) -> EntityPosition | None:
     pointer = struct.unpack("<I", read(ram_offset(entity_address + POSITION_POINTER_OFFSET), 4))[0]
-    if not RAM_BASE <= pointer < RAM_BASE + RAM_SIZE - LOCATION_OFFSET - 12:
+    if not _in_ram(pointer, LOCATION_OFFSET + 12):
         return None  # not set up yet (title screen, loading)
     return EntityPosition(*struct.unpack("<3i", read(ram_offset(pointer + LOCATION_OFFSET), 12)))
+
+
+def _npcs(read) -> tuple[LiveNpc, ...]:
+    pointers = struct.unpack(f"<{ENTITY_SLOTS}I", read(ram_offset(ENTITY_TABLE), ENTITY_SLOTS * 4))
+    npcs = []
+    for slot in range(FIRST_NPC_SLOT, ENTITY_SLOTS):
+        pointer = pointers[slot]
+        if not _in_ram(pointer, IS_ON_MAP_OFFSET + 1) or not read(ram_offset(pointer + IS_ON_MAP_OFFSET), 1)[0]:
+            continue  # empty slot, or an entity the game has taken off the map
+        position = _position(read, pointer)
+        if position is not None:
+            character_id = struct.unpack("<i", read(ram_offset(pointer + TYPE_OFFSET), 4))[0]
+            npcs.append(LiveNpc(slot, character_id, position))
+    return tuple(npcs)
 
 
 def read_live_state(read) -> LiveState:
     """`read(offset, size)` returns bytes of main RAM (2 MiB, offset from 0x80000000)."""
     return LiveState(read(ram_offset(CURRENT_SCREEN), 1)[0], _position(read, TAMER_ENTITY),
-                     _position(read, PARTNER_ENTITY), read(ram_offset(MAP_COLLISION_DATA), GRID * GRID))
+                     _position(read, PARTNER_ENTITY), read(ram_offset(MAP_COLLISION_DATA), GRID * GRID),
+                     _npcs(read))
 
 
 def grid_differences(live: bytes, decoded: bytes) -> list[tuple[int, int, int, int]]:

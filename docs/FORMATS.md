@@ -223,10 +223,11 @@ While the USA release runs in the player, the workbench reads main RAM through t
 | `TAMER_ENTITY` | `0x8015576C` | `Entity.posData` pointer at +4; `PositionData.location` (3×i32) at +120 |
 | `PARTNER_ENTITY` | `0x801557A8` | same header |
 | `MAP_COLLISION_DATA` | `0x801AF398` (u8[100×100]) | the running map's tile-trigger grid |
+| `ENTITY_TABLE` | `0x8012F344` (Entity*[10]) | slot 0 Tamer, 1 partner, 2–9 NPC Digimon; `Entity.type` (character ID) at +0, `isOnMap` (u8) at +52 |
 
 World position becomes a tile with `getModelTile` (`src/main/map_collision.c`): column `x/100 + 50`, row `50 - z/100`, C truncating division, minus one when `x < 0` or `z > 0`; the grid is indexed `column + row × 100`, the same layout as the decoded MAP floor grid.
 
-Checked on 2026-11-03 with Beetle PSX and the user's two quick saves: map indices 109 (`MAYO00`, Native Forest) and 112 (`TRAI00`, Green Gym), and in both the live grid equals the floor grid decoded from the MAP file on every one of the 10,000 tiles. Scripts can change the live grid (the game has `setImpassableRect`); the player reports any such difference instead of assuming the decoded grid.
+Checked on 2026-11-03 with Beetle PSX and the user's two quick saves: map indices 109 (`MAYO00`, Native Forest) and 112 (`TRAI00`, Green Gym), and in both the live grid equals the floor grid decoded from the MAP file on every one of the 10,000 tiles. NPCs read from `ENTITY_TABLE` slots 2–9 with `isOnMap` set matched the decoded MAP Digimon placements in ID and tile: Yuramon (43) at 48,73 and Tanemon (44) at 41,27 in `TWNA02`, Koromon (2) at 59,80 in `TRAI00`. The other placements in those MAP files were not on the map in the saved games (the game only places Digimon the story or recruitment state allows). Scripts can change the live grid (the game has `setImpassableRect`); the player reports any such difference instead of assuming the decoded grid.
 
 ## Resource association
 

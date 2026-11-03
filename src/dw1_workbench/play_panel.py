@@ -88,10 +88,11 @@ class PlayPanel(QWidget):
     inspections_changed = Signal()
 
     def __init__(self, meta: dict, source_ok: bool, source_message: str, map_names: dict[int, str] | None = None,
-                 decoded_grid=None, parent=None):
+                 decoded_grid=None, character_names: dict[int, str] | None = None, parent=None):
         super().__init__(parent)
         self.meta, self.source_ok = meta, source_ok
         self.map_names, self.decoded_grid = map_names or {}, decoded_grid
+        self.character_names = character_names or {}
         # Live RAM addresses come from the USA executable's decompilation; other releases differ.
         self.live_ram = meta.get("executable") == "SLUS_010.32"
         self.disc = Path(meta.get("source_path", ""))
@@ -294,7 +295,8 @@ class PlayPanel(QWidget):
         start = (f" from slot {slot}" if slot is not None else
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
         self._write_log(f"Launching {config.disc_path.name}{start}")
-        window = PlayWindow(config, self.meta.get("release", "Digimon World"), self.map_names, self.decoded_grid)
+        window = PlayWindow(config, self.meta.get("release", "Digimon World"), self.map_names, self.decoded_grid,
+                            self.character_names)
         window.log.connect(self._write_log)
         window.slots_changed.connect(self.refresh_slots)
         window.inspections_changed.connect(self.refresh_inspections)

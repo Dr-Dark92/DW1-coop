@@ -117,16 +117,19 @@ def test_live_map_and_inspection(application, fake_core, tmp_path, monkeypatch):
     monkeypatch.setattr(player.InspectDialog, "exec", lambda self: (self.note.setText("exit tile"),
                                                                      QDialog.DialogCode.Accepted)[1])
     window = PlayWindow(config(fake_core, tmp_path, live_ram=True), map_names={7: "Test zone · TEST00"},
-                        decoded_grid=lambda index: bytes(10000))
+                        decoded_grid=lambda index: bytes(10000), character_names={43: "Yuramon"})
     window.start()
     wait(application, lambda: window._live is not None)
     assert window.live_label.text().startswith("Test zone · TEST00 (map 7) · tile ")
     assert "1 tiles differ from the decoded MAP" in window.live_label.text()  # the fake core's exit tile
+    assert window.npc_list.text() == "NPCs on this map: Yuramon at 48,73"
+    assert window.live_map.npcs == [((48, 73), "Yuramon")]
     window.worker_inspect()
     store = InspectionStore(tmp_path / "saves" / "inspections")
     wait(application, lambda: store.list())
     record = store.list()[0]
     assert (record.map_index, record.map_name, record.note, record.grid_differences) == (7, "Test zone · TEST00", "exit tile", 1)
+    assert record.npcs == ((43, "Yuramon", (48, 73)),)
     assert record.tile[1] == 52 and store.has_state(record.id) and store.live_grid(record.id)[50 + 52 * 100] == 113
     window.close()
 

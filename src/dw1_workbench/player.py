@@ -13,11 +13,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QBuffer, QCoreApplication, QByteArray, QIODevice, QObject, QRectF, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QBuffer, QCoreApplication, QPointF, QByteArray, QIODevice, QObject, QRectF, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QToolBar, QWidget)
+                               QLineEdit, QMainWindow, QMessageBox, QToolBar, QVBoxLayout, QWidget)
 
 from .inspection import CATEGORIES, InspectionError, InspectionStore
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
@@ -246,7 +246,8 @@ class EmulatorWorker(QObject):
             self.message.emit(f"Live map reading turned off: {exc}")
             self.config = PlayConfig(**{**self.config.__dict__, "live_ram": False})
             return
-        key = (live.map_index, live.tamer_tile, live.partner_tile, hash(live.grid))
+        key = (live.map_index, live.tamer_tile, live.partner_tile, hash(live.grid),
+               tuple((npc.slot, npc.character_id, npc.tile) for npc in live.npcs))
         self.live = live
         if key != self._live_key:
             self._live_key = key
@@ -350,7 +351,7 @@ class FrameView(QWidget):
 
 
 class LiveMapView(QWidget):
-    """The running game's tile-trigger grid with the player (white) and partner (cyan) marked."""
+    """The running game's tile-trigger grid with the player (white), partner (cyan) and NPCs (orange) marked."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -358,12 +359,15 @@ class LiveMapView(QWidget):
         self.grid: QImage | None = None
         self._grid_bytes = None
         self.tamer = self.partner = None
+        self.npcs: list[tuple[tuple[int, int], str]] = []
 
-    def show_live(self, live: LiveState):
+    def show_live(self, live: LiveState, npc_names: list[str] | None = None):
         if live.grid != self._grid_bytes:
             self._grid_bytes = live.grid
             self.grid = QImage(ImageQt(trigger_grid_image(live.grid))).copy()
         self.tamer, self.partner = live.tamer_tile, live.partner_tile
+        names = npc_names or [f"ID {npc.character_id}" for npc in live.npcs]
+        self.npcs = [(npc.tile, name) for npc, name in zip(live.npcs, names)]
         self.update()
 
     def paintEvent(self, _event):
@@ -377,12 +381,18 @@ class LiveMapView(QWidget):
         cell = side / 100
         left, top = (self.width() - side) / 2, (self.height() - side) / 2
         painter.drawImage(QRectF(left, top, side, side), self.grid)
-        for tile, colour in ((self.partner, QColor("cyan")), (self.tamer, QColor("white"))):
-            if tile is not None:
-                painter.setPen(QPen(QColor("black"), 1)); painter.setBrush(colour)
-                radius = max(3.0, cell * 1.5)
-                painter.drawEllipse(QRectF(left + (tile[0] + 0.5) * cell - radius, top + (tile[1] + 0.5) * cell - radius,
-                                           radius * 2, radius * 2))
+        radius = max(3.0, cell * 1.5)
+        markers = [(tile, QColor("#ff9a1f"), name) for tile, name in self.npcs]
+        markers += [(self.partner, QColor("cyan"), None), (self.tamer, QColor("white"), None)]
+        for tile, colour, name in markers:
+            if tile is None:
+                continue
+            x, y = left + (tile[0] + 0.5) * cell, top + (tile[1] + 0.5) * cell
+            # NPCs get a white ring so they stand apart from the orange and yellow exit tiles.
+            painter.setPen(QPen(QColor("white" if name else "black"), 1.5 if name else 1)); painter.setBrush(colour)
+            painter.drawEllipse(QRectF(x - radius, y - radius, radius * 2, radius * 2))
+            if name:
+                painter.setPen(QColor("#ffd9a8")); painter.drawText(QPointF(x + radius + 2, y + 4), name)
 
 
 class InspectDialog(QDialog):
@@ -409,7 +419,7 @@ class PlayWindow(QMainWindow):
     closed = Signal()
 
     def __init__(self, config: PlayConfig, title: str = "Digimon World", map_names: dict[int, str] | None = None,
-                 decoded_grid=None, parent=None):
+                 decoded_grid=None, character_names: dict[int, str] | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"{title} — DW1-coop player")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -423,6 +433,7 @@ class PlayWindow(QMainWindow):
         self._build_toolbar()
         self.status = QLabel("Starting the core…"); self.statusBar().addWidget(self.status, 1)
         self.map_names = map_names or {}
+        self.character_names = character_names or {}
         self._decoded_grid = decoded_grid or (lambda index: None)
         self._decoded_cache: dict[int, bytes | None] = {}
         self.inspections = InspectionStore(config.store_dir / "inspections")
@@ -430,7 +441,10 @@ class PlayWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.live_label)
         self.statusBar().addPermanentWidget(QLabel("F1: controls"))
         self.live_map = LiveMapView()
-        self.live_dock = QDockWidget("Live map", self); self.live_dock.setWidget(self.live_map)
+        self.npc_list = QLabel("NPCs on this map: —"); self.npc_list.setWordWrap(True)
+        live_panel = QWidget(); live_layout = QVBoxLayout(live_panel)
+        live_layout.addWidget(self.live_map, 1); live_layout.addWidget(self.npc_list)
+        self.live_dock = QDockWidget("Live map", self); self.live_dock.setWidget(live_panel)
         self.live_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.live_dock)
         self.live_dock.setVisible(config.live_ram)
@@ -527,6 +541,13 @@ class PlayWindow(QMainWindow):
     def map_label(self, index: int) -> str:
         return self.map_names.get(index, f"map {index}")
 
+    def character_label(self, character_id: int) -> str:
+        return self.character_names.get(character_id, f"ID {character_id}")
+
+    def npc_summary(self, live: LiveState) -> str:
+        return ", ".join(f"{self.character_label(npc.character_id)} at {npc.tile[0]},{npc.tile[1]}"
+                         for npc in live.npcs) or "none"
+
     def decoded_grid(self, index: int) -> bytes | None:
         if index not in self._decoded_cache:
             try:
@@ -555,14 +576,16 @@ class PlayWindow(QMainWindow):
     def _live_changed(self, live: LiveState):
         self._live = live
         self.live_label.setText(self.live_summary(live))
-        self.live_map.show_live(live)
+        self.live_map.show_live(live, [self.character_label(npc.character_id) for npc in live.npcs])
+        self.npc_list.setText(f"NPCs on this map: {self.npc_summary(live)}")
 
     @Slot(object)
     def _inspection_captured(self, capture: dict):
         live: LiveState | None = capture["live"]
         was_paused = self.worker.paused
         self.worker.paused = True
-        summary = self.live_summary(live) if live is not None else "Position unknown (live map is off for this disc)"
+        summary = (f"{self.live_summary(live)}\nNPCs: {self.npc_summary(live)}" if live is not None
+                   else "Position unknown (live map is off for this disc)")
         dialog = InspectDialog(summary, self.note.text(), self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             try:
@@ -572,6 +595,8 @@ class PlayWindow(QMainWindow):
                     tile=live.tamer_tile if live else None,
                     trigger=live.trigger_at(live.tamer_tile) if live else None,
                     partner_tile=live.partner_tile if live else None,
+                    npcs=[(npc.character_id, self.character_label(npc.character_id), npc.tile)
+                          for npc in live.npcs] if live else [],
                     grid_differences=self.grid_difference_count(live) if live else None,
                     category=dialog.category.currentText(), note=dialog.note.text(), core=capture["core"],
                     core_version=capture["core_version"], screenshot=capture["screenshot"], state=capture["state"],
