@@ -22,7 +22,7 @@ BYTES_PER_PIXEL = {PIXEL_0RGB1555: 2, PIXEL_XRGB8888: 4, PIXEL_RGB565: 2}
 
 DEVICE_JOYPAD, DEVICE_ANALOG = 1, 5
 JOYPAD_MASK = 256  # RETRO_DEVICE_ID_JOYPAD_MASK: ask for every button as one bitmask
-MEMORY_SAVE_RAM = 0
+MEMORY_SAVE_RAM, MEMORY_SYSTEM_RAM = 0, 2
 
 # Joypad button IDs (RETRO_DEVICE_ID_JOYPAD_*). On a PlayStation core B is Cross, A Circle, Y Square, X Triangle.
 BUTTONS = ("B", "Y", "Select", "Start", "Up", "Down", "Left", "Right", "A", "X", "L", "R", "L2", "R2", "L3", "R3")
@@ -300,6 +300,16 @@ class LibretroCore:
             return False
         ctypes.memmove(pointer, data, min(size, len(data)))
         return True
+
+    def memory_size(self, kind: int = MEMORY_SYSTEM_RAM) -> int:
+        return self._lib.retro_get_memory_size(kind) if self._lib.retro_get_memory_data(kind) else 0
+
+    def read_memory(self, offset: int, size: int, kind: int = MEMORY_SYSTEM_RAM) -> bytes:
+        """A copy of `size` bytes of the core's memory region (main RAM by default)."""
+        pointer, total = self._lib.retro_get_memory_data(kind), self._lib.retro_get_memory_size(kind)
+        if not pointer or offset < 0 or size < 0 or offset + size > total:
+            raise LibretroError(f"Memory region {kind} has no bytes {offset:#x}+{size:#x} (size {total:#x}).")
+        return ctypes.string_at(pointer + offset, size)
 
     # -- callbacks (run on the core's thread) --------------------------------------------------------------
 

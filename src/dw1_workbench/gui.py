@@ -282,9 +282,11 @@ class Workspace(QWidget):
         self.tabs.addTab(self._characters(), "Characters and Digimon")
         self.tabs.addTab(self._animations(), "Animations")
         self.tabs.addTab(self._textures(), "Textures")
-        self.tabs.addTab(self._maps(), "Maps and Zones")
+        self.maps_page = self._maps()
+        self.tabs.addTab(self.maps_page, "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
-        self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue))
+        self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid)
+        self.play_panel.show_map_requested.connect(self.show_map)
         self.tabs.addTab(self.play_panel, "Play")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
 
@@ -806,6 +808,7 @@ class Workspace(QWidget):
                   f"MP {d.stats['mp']}/{d.stats['max_mp']}, off {d.stats['offense']}, def {d.stats['defense']}, "
                   f"spd {d.stats['speed']}, brn {d.stats['brains']}, bits {d.bits}, script {d.script_id}, "
                   f"{len(d.waypoints)} waypoint(s)" for d in scene.digimon),
+                *self._inspection_lines(entry.index),
                 f"parser: {row['decoder']} {row['decoder_version']}; MAP {scene_row['decoder_version']}; "
                 f"TFS {tfs_row['decoder_version']}",
                 f"evidence: {row['mapping_evidence']}",
@@ -816,6 +819,15 @@ class Workspace(QWidget):
             self.map_background.setText(f"Preview unavailable:\n{exc}")
             self.map_details.setPlainText(str(exc))
 
+    def _inspection_lines(self, index):
+        panel = getattr(self, "play_panel", None)
+        records = panel.inspections.list(map_index=index) if panel is not None else []
+        if not records:
+            return ["inspections while playing: none (press F9 in the game window)"]
+        return [f"inspections while playing ({len(records)}; observations, not decoded data):",
+                *(f"  {record.created} {record.category} at tile {record.tile}: {record.note or '(no note)'}"
+                  for record in records)]
+
     def _render_map_background(self, *_):
         if self._map_scene is None or self._map_tfs is None or self.map_palette.currentIndex() < 0:
             return
@@ -823,13 +835,44 @@ class Workspace(QWidget):
         self.map_background.setPixmap(QPixmap.fromImage(ImageQt(image)))
 
     def _follow_warp(self, item):
-        index = item.data(Qt.ItemDataRole.UserRole)
-        target = next((row_id for row_id, row in self.map_rows.items()
-                       if int(row["original_path"].rsplit("/", 2)[1]) == index), None) if index is not None else None
-        if target is not None:
-            if self._map_items[target].isHidden() or self._map_items[target].parent().isHidden():
-                self.map_search.clear()
-            self.map_tree.setCurrentItem(self._map_items[target])
+        self._select_map(item.data(Qt.ItemDataRole.UserRole))
+
+    def _map_row_by_index(self, index):
+        return next((row for row in self.map_rows.values()
+                     if int(row["original_path"].rsplit("/", 2)[1]) == index), None) if index is not None else None
+
+    def _select_map(self, index) -> bool:
+        row = self._map_row_by_index(index)
+        if row is None or row["id"] not in self._map_items:
+            return False
+        item = self._map_items[row["id"]]
+        if item.isHidden() or item.parent().isHidden():
+            self.map_search.clear()
+        self.map_tree.setCurrentItem(item)
+        return True
+
+    @Slot(int)
+    def show_map(self, index):
+        """Open a map (by table index) in the Maps and Zones browser, on its floor grid."""
+        if self._select_map(index):
+            self.tabs.setCurrentWidget(self.maps_page); self.maps_tabs.setCurrentIndex(0)
+            self.map_preview_tabs.setCurrentIndex(2)
+
+    def _map_names(self) -> dict[int, str]:
+        names = {}
+        for row in self.map_rows.values():
+            _, index, name = row["original_path"].rsplit("/", 2)
+            zone = self.labels.get((row["id"], "area_name"))
+            names[int(index)] = f"{zone['value']} · {name}" if zone else name
+        return names
+
+    def _decoded_grid(self, index) -> bytes | None:
+        """The floor grid decoded from a map's MAP file, for comparison with the running game."""
+        row = self._map_row_by_index(index)
+        scene_row = self._character_related(row, "scene") if row is not None else None
+        if scene_row is None:
+            return None
+        return parse_map(self._read_row(scene_row, MAX_MAP_FILE), self._map_entry(row)).floor_grid
 
     def _export_map_background(self):
         try:

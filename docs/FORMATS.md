@@ -213,6 +213,21 @@ The game stores no clip names; each animation ID's meaning comes from where the 
 
 Coverage on the USA disc: 4,543 of 4,843 clips are named (3,760 confirmed, 783 likely). The rest are mostly IDs 21 and 23–26, which no game function starts by number; they are presumably used by map or event scripts, which are not decoded, and stay unnamed rather than guessed.
 
+### Live game state (player)
+
+While the USA release runs in the player, the workbench reads main RAM through the core's `retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM)` (2 MiB from `0x80000000`). Addresses are from `jype0/dw_decomp` `aaf69a4` (`config/us/symbols.txt`) and are used only when the project's executable is `SLUS_010.32`:
+
+| Symbol | Address | Use |
+|---|---|---|
+| `CURRENT_SCREEN` | `0x80134DA8` (u8) | map-table index; `src/main/map.c` sets it after copying the floor grid |
+| `TAMER_ENTITY` | `0x8015576C` | `Entity.posData` pointer at +4; `PositionData.location` (3×i32) at +120 |
+| `PARTNER_ENTITY` | `0x801557A8` | same header |
+| `MAP_COLLISION_DATA` | `0x801AF398` (u8[100×100]) | the running map's tile-trigger grid |
+
+World position becomes a tile with `getModelTile` (`src/main/map_collision.c`): column `x/100 + 50`, row `50 - z/100`, C truncating division, minus one when `x < 0` or `z > 0`; the grid is indexed `column + row × 100`, the same layout as the decoded MAP floor grid.
+
+Checked on 2026-11-03 with Beetle PSX and the user's two quick saves: map indices 109 (`MAYO00`, Native Forest) and 112 (`TRAI00`, Green Gym), and in both the live grid equals the floor grid decoded from the MAP file on every one of the 10,000 tiles. Scripts can change the live grid (the game has `setImpassableRect`); the player reports any such difference instead of assuming the decoded grid.
+
 ## Resource association
 
 The catalogue contains 180 confirmed numeric character-resource records. Each is associated with its same-index ALLTIM texture; 178 are associated with a path-present, boundary-validated MMD container. Display names are stored as separate labels with executable offsets and evidence, not derived from appearance. This proves resource-table relationships, not playable-character semantics or animation labels. Static model correctness is compared for the 151 models the parser accepts, as described above. Empty/unsupported categories state their limits explicitly.

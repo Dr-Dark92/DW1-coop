@@ -502,10 +502,22 @@ def trigger_colour(value: int) -> tuple[int, int, int]:
 
 def floor_grid_image(scene: MapScene) -> Image.Image:
     """The 100x100 floor grid, one pixel per cell, coloured by trigger kind (exits by warp slot)."""
+    return trigger_grid_image(scene.floor_grid)
+
+
+def trigger_grid_image(grid: bytes) -> Image.Image:
+    """Any 100x100 tile-trigger grid (decoded from a MAP file or read from the running game) as an image."""
     palette = bytes(channel for value in range(256) for channel in trigger_colour(value))
-    image = Image.frombytes("P", (FLOOR_GRID, FLOOR_GRID), scene.floor_grid)
+    image = Image.frombytes("P", (FLOOR_GRID, FLOOR_GRID), grid)
     image.putpalette(palette)
     return image.convert("RGB")
+
+
+def trigger_description(value: int) -> str:
+    kind = trigger_kind(value)
+    if kind == "exit":
+        return f"exit through warp slot {value - WARP_TRIGGER}"
+    return kind if kind in ("walkable", "blocked", "toilet") else f"{kind} {value}"
 
 
 class _Reader:

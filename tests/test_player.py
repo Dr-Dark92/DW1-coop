@@ -97,7 +97,8 @@ def test_play_panel_checks_launches_and_lists_slots(application, fake_core, tmp_
     assert not panel.play.isEnabled()
     panel.core.setText(str(fake_core)); panel.bios.setText(str(bios)); panel._check()
     assert panel.core_status.text() == "Fake Core 1.0"
-    assert "scph5501.bin is missing (scph1001.bin found)" in panel.bios_status.text()
+    assert "Found scph1001.bin" in panel.bios_status.text()
+    assert not play_panel.bios_report(tmp_path / "nothing")[0]
     assert panel.play.isEnabled() and panel.store.directory == tmp_path / "root" / ("ab" * 8)
     panel.launch(None)
     assert not panel.play.isEnabled()
@@ -107,3 +108,29 @@ def test_play_panel_checks_launches_and_lists_slots(application, fake_core, tmp_
     assert panel.slots.rowCount() == 1 and panel.slots.item(0, 0).text() == "Resume"
     assert "Game closed" in panel.log.toPlainText()
     assert (panel.store.directory / "launch.log").is_file()
+
+
+def test_live_map_and_inspection(application, fake_core, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    from dw1_workbench.inspection import InspectionStore
+    import dw1_workbench.player as player
+    monkeypatch.setattr(player.InspectDialog, "exec", lambda self: (self.note.setText("exit tile"),
+                                                                     QDialog.DialogCode.Accepted)[1])
+    window = PlayWindow(config(fake_core, tmp_path, live_ram=True), map_names={7: "Test zone · TEST00"},
+                        decoded_grid=lambda index: bytes(10000))
+    window.start()
+    wait(application, lambda: window._live is not None)
+    assert window.live_label.text().startswith("Test zone · TEST00 (map 7) · tile ")
+    assert "1 tiles differ from the decoded MAP" in window.live_label.text()  # the fake core's exit tile
+    window.worker_inspect()
+    store = InspectionStore(tmp_path / "saves" / "inspections")
+    wait(application, lambda: store.list())
+    record = store.list()[0]
+    assert (record.map_index, record.map_name, record.note, record.grid_differences) == (7, "Test zone · TEST00", "exit tile", 1)
+    assert record.tile[1] == 52 and store.has_state(record.id) and store.live_grid(record.id)[50 + 52 * 100] == 113
+    window.close()
+
+    again = PlayWindow(config(fake_core, tmp_path, launch_inspection=record.id, resume_on_close=False))
+    again.start()
+    wait(application, lambda: again.view.image is not None)
+    again.close()

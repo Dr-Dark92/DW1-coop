@@ -124,3 +124,17 @@ def test_only_one_core_runs_at_a_time(fake_core, tmp_path, game):
             LibretroCore(fake_core, tmp_path, tmp_path).start(game)
     finally:
         first.stop()
+
+
+def test_reads_system_ram(fake_core, tmp_path, game):
+    from dw1_workbench.live import read_live_state
+    core = start(fake_core, tmp_path, game)
+    try:
+        core.run_frame(); core.run_frame()
+        state = read_live_state(core.read_memory)
+        assert (state.map_index, state.tamer.x, state.tamer.z, state.tamer_tile) == (7, 10, -250, (50, 52))
+        assert state.trigger_at((50, 52)) == 113
+        with pytest.raises(LibretroError, match="no bytes"):
+            core.read_memory(0x1FFFFF, 2)
+    finally:
+        core.stop()

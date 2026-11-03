@@ -1,5 +1,16 @@
 # Handover
 
+## Live zone inspection (2026-11-03, branch `python-player`)
+
+Next milestone after the player, finishing the roadmap's P0 inspection requirement. The user had confirmed boot, quick save/load, Resume and the memory card with Beetle PSX and `SCPH1001.BIN` (Beetle logs `scph5501.bin` missing but boots; the BIOS check now accepts any North American BIOS).
+
+- `live.py`: USA RAM addresses from dw_decomp (`CURRENT_SCREEN`, `TAMER_ENTITY`, `PARTNER_ENTITY`, `MAP_COLLISION_DATA`), `getModelTile` rounding, `grid_differences`. Enabled only when the project's executable is `SLUS_010.32`. `LibretroCore.read_memory` reads ranges of the core's system RAM.
+- Worker reads live state every 10 frames and emits on change; `inspect` captures state, screenshot and live state at the keypress. `PlayWindow`: status-bar summary (map label, tile, trigger, grid vs decoded MAP), F10 live-map dock, F9 `InspectDialog`; the game pauses while the dialog is open.
+- `inspection.py`: per-inspection folder under `<saves>/inspections/` with JSON (written last), PNG, zlib-compressed state and the live grid. Play tab lists them (play from, show map, delete); Maps and Zones scene details list a map's inspections; `Workspace.show_map(index)` opens a map on its floor grid.
+- Real-game check (offscreen, from the user's slots): maps 109 `MAYO00` and 112 `TRAI00` read correctly, tiles (54,12) and (54,82), and the live grid equals the decoded floor grid on all tiles of both. An end-to-end run from the Resume slot saved and listed an inspection. 111 tests pass.
+
+Still to do for P0: the user's own playthrough — two connected zones, a gateway and a toilet inspected with F9 — then record it here and in the roadmap. Later: compare inspections where the live grid differs (script-changed tiles), and use spawn/arrival positions after warps.
+
 ## Python player (2026-11-03, branch `python-player`)
 
 `docs/ROADMAP.md` on `main` (`812f191`) makes a playable inspection build P0. The user asked for a Python-based player that works on Linux now and Windows later, with quick saves, rather than an external emulator. Branched from `animations`.

@@ -7,20 +7,23 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QStandardPaths, Qt, QUrl, Slot
+from PySide6.QtCore import QSettings, QStandardPaths, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
+                               QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
+from .inspection import InspectionStore
 from .libretro import LibretroError, core_info
+from .maps import trigger_description
 from .player import KEY_HELP, PlayConfig, PlayWindow
 from .quicksave import QuickSaveStore
 
 LIBRARY_SUFFIX = ".dll" if sys.platform == "win32" else ".dylib" if sys.platform == "darwin" else ".so"
 CORE_NAMES = ("mednafen_psx_libretro", "swanstation_libretro", "pcsx_rearmed_libretro")
-# Beetle PSX (mednafen_psx) picks its firmware by disc region; USA discs need scph5501.bin.
-BIOS_FOR_REGION = {"USA": "scph5501.bin", "Japan": "scph5500.bin", "Europe": "scph5502.bin"}
+# North American BIOS files. Beetle PSX looks for scph5501.bin first; the game also booted with SCPH1001.BIN
+# on the development machine (2026-11-03).
+USA_BIOS = ("scph5501.bin", "scph1001.bin", "scph7003.bin", "scph7001.bin", "scph101.bin")
 
 
 def _core_folders() -> list[Path]:
@@ -55,19 +58,45 @@ def bios_report(folder: Path | None) -> tuple[bool, str]:
         return False, "Choose the folder that holds your PlayStation BIOS file."
     found = sorted(path.name for path in folder.iterdir() if path.is_file() and path.suffix.lower() == ".bin"
                    and path.name.lower().startswith(("scph", "ps1_rom", "psxonpsp")))
-    wanted = BIOS_FOR_REGION["USA"]
-    if wanted in (name.lower() for name in found):
-        return True, f"Found {wanted} (needed for the USA disc)."
+    usable = [name for name in found if name.lower() in USA_BIOS]
+    if usable:
+        return True, f"Found {', '.join(usable)} (a North American BIOS, for the USA disc)."
     listed = ", ".join(found) if found else "no BIOS files"
-    return False, f"{wanted} is missing ({listed} found). Beetle PSX needs it for the USA disc; other cores may differ."
+    return False, (f"No North American BIOS found ({listed}). The USA disc needs one of "
+                   f"{', '.join(USA_BIOS)}; Beetle PSX looks for scph5501.bin first.")
+
+
+def _table(headers: list[str], stretch: int) -> QTableWidget:
+    table = QTableWidget(0, len(headers))
+    table.setHorizontalHeaderLabels(headers)
+    table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+    table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+    table.verticalHeader().setVisible(False)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    table.horizontalHeader().setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
+    table.setIconSize(QPixmap(64, 48).size())
+    return table
+
+
+def _local_time(created: str) -> str:
+    return datetime.fromisoformat(created).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class PlayPanel(QWidget):
-    def __init__(self, meta: dict, source_ok: bool, source_message: str, parent=None):
+    show_map_requested = Signal(int)  # map-table index
+    inspections_changed = Signal()
+
+    def __init__(self, meta: dict, source_ok: bool, source_message: str, map_names: dict[int, str] | None = None,
+                 decoded_grid=None, parent=None):
         super().__init__(parent)
         self.meta, self.source_ok = meta, source_ok
+        self.map_names, self.decoded_grid = map_names or {}, decoded_grid
+        # Live RAM addresses come from the USA executable's decompilation; other releases differ.
+        self.live_ram = meta.get("executable") == "SLUS_010.32"
         self.disc = Path(meta.get("source_path", ""))
         self.store = QuickSaveStore(saves_root() / disc_key(meta))
+        self.inspections = InspectionStore(self.store.directory / "inspections")
         self.settings = QSettings("DW1-coop", "workbench")
         self.window: PlayWindow | None = None
 
@@ -94,19 +123,12 @@ class PlayPanel(QWidget):
         form.addRow("", self.resume)
         self.core.editingFinished.connect(self._check); self.bios.editingFinished.connect(self._check)
 
-        self.slots = QTableWidget(0, 4)
-        self.slots.setHorizontalHeaderLabels(["Slot", "Saved", "Note", "Core"])
-        self.slots.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.slots.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.slots.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.slots.verticalHeader().setVisible(False)
-        self.slots.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.slots.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.slots.setIconSize(QPixmap(64, 48).size())
+        self.slots = _table(["Slot", "Saved", "Note", "Core"], 2)
         self.slots.itemSelectionChanged.connect(self._update_buttons)
         self.slots.itemDoubleClicked.connect(lambda *_: self.launch(self._selected_slot()))
-        layout.addWidget(QLabel("Quick saves")); layout.addWidget(self.slots, 1)
-        buttons = QHBoxLayout(); layout.addLayout(buttons)
+        slots_page = QWidget(); slots_layout = QVBoxLayout(slots_page); slots_layout.setContentsMargins(0, 0, 0, 0)
+        slots_layout.addWidget(QLabel("Quick saves")); slots_layout.addWidget(self.slots, 1)
+        buttons = QHBoxLayout(); slots_layout.addLayout(buttons)
         self.play = QPushButton("Play"); self.play.clicked.connect(lambda: self.launch(None))
         self.play_slot = QPushButton("Play from selected slot")
         self.play_slot.clicked.connect(lambda: self.launch(self._selected_slot()))
@@ -114,11 +136,31 @@ class PlayPanel(QWidget):
         for button in (self.play, self.play_slot, self.delete):
             buttons.addWidget(button)
         buttons.addStretch()
+
+        self.inspection_table = _table(["Inspected", "Map", "Tile", "Trigger there", "What", "Note", "Grid vs MAP"], 5)
+        self.inspection_table.itemSelectionChanged.connect(self._update_buttons)
+        self.inspection_table.itemDoubleClicked.connect(lambda *_: self.launch_inspection(self._selected_inspection()))
+        inspections_page = QWidget(); inspections_layout = QVBoxLayout(inspections_page)
+        inspections_layout.setContentsMargins(0, 0, 0, 0)
+        inspections_layout.addWidget(QLabel("Zone inspections (F9 while playing): what you observed, kept apart from "
+                                            "the decoded data, with a save state to return to the spot"))
+        inspections_layout.addWidget(self.inspection_table, 1)
+        inspection_buttons = QHBoxLayout(); inspections_layout.addLayout(inspection_buttons)
+        self.play_inspection = QPushButton("Play from inspection")
+        self.play_inspection.clicked.connect(lambda: self.launch_inspection(self._selected_inspection()))
+        self.show_map = QPushButton("Show map in Maps and Zones")
+        self.show_map.clicked.connect(self._show_inspection_map)
+        self.delete_inspection = QPushButton("Delete inspection"); self.delete_inspection.clicked.connect(self._delete_inspection)
+        for button in (self.play_inspection, self.show_map, self.delete_inspection):
+            inspection_buttons.addWidget(button)
+        inspection_buttons.addStretch()
+        lists = QSplitter(Qt.Orientation.Vertical); lists.addWidget(slots_page); lists.addWidget(inspections_page)
+        layout.addWidget(lists, 1)
         controls = QLabel(KEY_HELP); controls.setWordWrap(True); layout.addWidget(controls)
         layout.addWidget(QLabel("Launch log"))
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(150)
         layout.addWidget(self.log)
-        self._check(); self.refresh_slots()
+        self._check(); self.refresh_slots(); self.refresh_inspections()
 
     @staticmethod
     def _with_browse(edit: QLineEdit, handler):
@@ -164,11 +206,47 @@ class PlayPanel(QWidget):
         self._update_buttons()
         return core_ok
 
+    def refresh_inspections(self):
+        records = list(reversed(self.inspections.list()))
+        table = self.inspection_table
+        table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            differences = ("unknown" if record.grid_differences is None else
+                           "matches" if record.grid_differences == 0 else f"{record.grid_differences} tiles differ")
+            values = (_local_time(record.created), f"{record.map_name} ({record.map_index})",
+                      f"{record.tile[0]},{record.tile[1]}" if record.tile else "—",
+                      trigger_description(record.trigger) if record.trigger is not None else "—",
+                      record.category, record.note, differences)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value); item.setData(Qt.ItemDataRole.UserRole, record.id)
+                table.setItem(row, column, item)
+            if (image := self.inspections.screenshot_path(record.id)) is not None:
+                table.item(row, 0).setIcon(QIcon(QPixmap(str(image))))
+        table.resizeRowsToContents()
+        self._update_buttons()
+        self.inspections_changed.emit()
+
+    def _selected_inspection(self) -> str | None:
+        items = self.inspection_table.selectedItems()
+        return items[0].data(Qt.ItemDataRole.UserRole) if items else None
+
+    def _show_inspection_map(self):
+        record = self.inspections.get(self._selected_inspection() or "")
+        if record is not None and record.map_index >= 0:
+            self.show_map_requested.emit(record.map_index)
+
+    def _delete_inspection(self):
+        record = self.inspections.get(self._selected_inspection() or "")
+        if record and QMessageBox.question(self, "Delete inspection",
+                                           f"Delete the {record.category.lower()} inspection at {record.map_name}?") \
+                == QMessageBox.StandardButton.Yes:
+            self.inspections.delete(record.id); self.refresh_inspections()
+
     def refresh_slots(self):
         slots = self.store.slots()
         self.slots.setRowCount(len(slots))
         for row, info in enumerate(slots):
-            saved = datetime.fromisoformat(info.created).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            saved = _local_time(info.created)
             for column, value in enumerate((info.label, saved, info.note, f"{info.core} {info.core_version}")):
                 item = QTableWidgetItem(value); item.setData(Qt.ItemDataRole.UserRole, info.slot)
                 self.slots.setItem(row, column, item)
@@ -187,6 +265,11 @@ class PlayPanel(QWidget):
         self.play.setEnabled(ready)
         self.play_slot.setEnabled(ready and self._selected_slot() is not None)
         self.delete.setEnabled(not running and self._selected_slot() is not None)
+        if hasattr(self, "inspection_table"):
+            selected = self._selected_inspection() is not None
+            self.play_inspection.setEnabled(ready and selected and self.inspections.has_state(self._selected_inspection()))
+            self.show_map.setEnabled(selected)
+            self.delete_inspection.setEnabled(selected and not running)
 
     def _delete_slot(self):
         slot = self._selected_slot()
@@ -194,7 +277,11 @@ class PlayPanel(QWidget):
         if info and QMessageBox.question(self, "Delete quick save", f"Delete {info.label}?") == QMessageBox.StandardButton.Yes:
             self.store.delete(slot); self.refresh_slots()
 
-    def launch(self, slot: int | None):
+    def launch_inspection(self, inspection_id: str | None):
+        if inspection_id is not None:
+            self.launch(None, inspection_id)
+
+    def launch(self, slot: int | None, inspection_id: str | None = None):
         if self.window is not None:
             self.window.raise_(); self.window.activateWindow()
             return
@@ -202,11 +289,15 @@ class PlayPanel(QWidget):
             QMessageBox.warning(self, "Cannot play yet", "Choose a working core and make sure the disc image is available.")
             return
         config = PlayConfig(Path(self.core.text()), Path(self.bios.text() or "."), self.disc, self.store.directory,
-                            launch_slot=slot, resume_on_close=self.resume.isChecked())
-        self._write_log(f"Launching {config.disc_path.name}" + (f" from slot {slot}" if slot is not None else ""))
-        window = PlayWindow(config, self.meta.get("release", "Digimon World"))
+                            launch_slot=slot, launch_inspection=inspection_id,
+                            resume_on_close=self.resume.isChecked(), live_ram=self.live_ram)
+        start = (f" from slot {slot}" if slot is not None else
+                 f" from inspection {inspection_id}" if inspection_id is not None else "")
+        self._write_log(f"Launching {config.disc_path.name}{start}")
+        window = PlayWindow(config, self.meta.get("release", "Digimon World"), self.map_names, self.decoded_grid)
         window.log.connect(self._write_log)
         window.slots_changed.connect(self.refresh_slots)
+        window.inspections_changed.connect(self.refresh_inspections)
         window.closed.connect(self._window_closed)
         self.window = window
         self._update_buttons()

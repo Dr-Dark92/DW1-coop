@@ -32,6 +32,7 @@ typedef int16_t (*state_t)(unsigned, unsigned, unsigned, unsigned);
 static env_t env; static video_t video; static batch_t batch; static poll_t poll; static state_t input;
 static uint32_t pixels[W * H];
 static uint8_t save_ram[16];
+static uint8_t system_ram[0x200000]; /* laid out like the USA game's RAM where tests need it */
 static uint32_t counter, buttons_seen;
 static char system_dir[512], option[64], first_byte;
 
@@ -70,6 +71,13 @@ EXPORT void retro_run(void) {
     for (int i = 0; i < W * H; i++) pixels[i] = 0xFF000000u | counter;
     for (int i = 0; i < SAMPLES * 2; i++) audio[i] = (int16_t)counter;
     save_ram[0] = (uint8_t)counter;
+    {   /* CURRENT_SCREEN = 7; TAMER_ENTITY.posData -> 0x80100000 with location (counter * 10, 0, -250) */
+        uint32_t pointer = 0x80100000u; int32_t location[3] = {(int32_t)counter * 10, 0, -250};
+        system_ram[0x134DA8] = 7;
+        memcpy(system_ram + 0x15576C + 4, &pointer, 4);
+        memcpy(system_ram + 0x100000 + 120, location, sizeof location);
+        system_ram[0x1AF398 + 50 + 52 * 100] = 113; /* exit through warp slot 3 at tile (50, 52) */
+    }
     save_ram[1] = (uint8_t)buttons_seen;
     video(counter % 2 ? NULL : pixels, W, H, W * 4); /* odd frames are dupes */
     batch(audio, SAMPLES);
@@ -97,8 +105,8 @@ EXPORT bool retro_load_game_special(unsigned type, const struct retro_game_info 
 }
 EXPORT void retro_unload_game(void) {}
 EXPORT unsigned retro_get_region(void) { return 0; }
-EXPORT void *retro_get_memory_data(unsigned id) { return id == 0 ? save_ram : NULL; }
-EXPORT size_t retro_get_memory_size(unsigned id) { return id == 0 ? sizeof save_ram : 0; }
+EXPORT void *retro_get_memory_data(unsigned id) { return id == 0 ? (void *)save_ram : id == 2 ? (void *)system_ram : NULL; }
+EXPORT size_t retro_get_memory_size(unsigned id) { return id == 0 ? sizeof save_ram : id == 2 ? sizeof system_ram : 0; }
 EXPORT void retro_cheat_reset(void) {}
 EXPORT void retro_cheat_set(unsigned index, bool enabled, const char *code) { (void)index; (void)enabled; (void)code; }
 

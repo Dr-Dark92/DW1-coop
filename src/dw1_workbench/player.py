@@ -12,18 +12,23 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QBuffer, QCoreApplication, QByteArray, QIODevice, QObject, QRectF, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter
+from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QLabel, QLineEdit, QMainWindow, QMessageBox, QToolBar,
-                               QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QLabel,
+                               QLineEdit, QMainWindow, QMessageBox, QToolBar, QWidget)
 
+from .inspection import CATEGORIES, InspectionError, InspectionStore
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
                        LibretroError)
+from .live import LiveState, grid_differences, read_live_state
+from .maps import trigger_description, trigger_grid_image
 from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveError, QuickSaveStore
 
 FAST_FORWARD = 4  # speed while fast-forward is held
 MEMORY_CARD_FLUSH_FRAMES = 600  # write a changed memory card about every 10 s
+LIVE_FRAMES = 10  # read the live map, positions and grid about six times a second
 IMAGE_FORMATS = {PIXEL_XRGB8888: QImage.Format.Format_RGB32, PIXEL_RGB565: QImage.Format.Format_RGB16,
                  PIXEL_0RGB1555: QImage.Format.Format_RGB555}
 
@@ -36,7 +41,7 @@ DEFAULT_KEYS = {
 }
 KEY_HELP = ("Arrows: D-pad  •  Z Cross  X Circle  A Square  S Triangle  •  Q/W L1/R1  E/R L2/R2  •  "
             "Enter Start  Backspace Select  •  F5 quick save  F8 quick load  F6/F7 slot  •  "
-            "hold Tab fast-forward  •  P pause  •  F11 full screen")
+            "F9 inspect here  F10 live map  •  hold Tab fast-forward  •  P pause  •  F11 full screen")
 
 
 @dataclass(frozen=True)
@@ -46,7 +51,9 @@ class PlayConfig:
     disc_path: Path
     store_dir: Path
     launch_slot: int | None = None
+    launch_inspection: str | None = None  # start from an inspection's save state instead of a slot
     resume_on_close: bool = True
+    live_ram: bool = False  # read map/position/grid from RAM; the addresses are only valid for USA SLUS_010.32
     options: dict[str, str] = field(default_factory=dict)
 
 
@@ -71,6 +78,8 @@ class EmulatorWorker(QObject):
     slot_saved = Signal(object)  # SlotInfo
     slot_loaded = Signal(int)
     command_failed = Signal(str)
+    live_changed = Signal(object)  # LiveState
+    inspection_captured = Signal(object)  # dict: state, screenshot, live
     finished = Signal()
 
     def __init__(self, config: PlayConfig):
@@ -87,6 +96,8 @@ class EmulatorWorker(QObject):
         self._image_pending = False
         self._last_image: QImage | None = None
         self._card_hash = None
+        self._live_key = None
+        self.live: LiveState | None = None
         self.core: LibretroCore | None = None
 
     # -- called from the GUI thread ------------------------------------------------------------------------
@@ -102,6 +113,9 @@ class EmulatorWorker(QObject):
 
     def reset(self):
         self._commands.put(("reset",))
+
+    def inspect(self):
+        self._commands.put(("inspect",))
 
     def take_frame(self) -> QImage | None:
         with self._image_lock:
@@ -127,8 +141,13 @@ class EmulatorWorker(QObject):
             if card is not None:
                 core.load_save_ram(card); self._card_hash = hashlib.sha256(card).digest()
                 self.message.emit(f"Memory card loaded from {self.store.memory_card_path}")
-            if config.launch_slot is not None:
-                self._load(config.launch_slot)
+            try:
+                if config.launch_slot is not None:
+                    self._load(config.launch_slot)
+                elif config.launch_inspection is not None:
+                    self._load_inspection(config.launch_inspection)
+            except (LibretroError, QuickSaveError, InspectionError, OSError) as exc:
+                self.command_failed.emit(f"Started from power-on instead: {exc}")
             self.started_ok.emit({"core": core.info.name, "version": core.info.version, "fps": core.fps,
                                   "sample_rate": core.sample_rate, "aspect": core.aspect_ratio})
             self._loop(core)
@@ -156,6 +175,8 @@ class EmulatorWorker(QObject):
                 self.audio_ready.emit(audio)
             if frames % MEMORY_CARD_FLUSH_FRAMES == 0:
                 self._flush_memory_card(core)
+            if self.config.live_ram and frames % LIVE_FRAMES == 0:
+                self._read_live(core)
             # core.fps is read every frame: cores may change timing (Beetle PSX settles on 59.826 fps after boot).
             deadline += 1.0 / (core.fps * (FAST_FORWARD if fast else 1))
             delay = deadline - time.perf_counter()
@@ -185,7 +206,13 @@ class EmulatorWorker(QObject):
                     self._load(command[1]); self.slot_loaded.emit(command[1])
                 elif command[0] == "reset":
                     core.reset(); self.message.emit("Console reset")
-            except (LibretroError, QuickSaveError, OSError) as exc:
+                elif command[0] == "inspect":
+                    if self.config.live_ram:
+                        self._read_live(core)
+                    self.inspection_captured.emit({"state": core.serialize(), "screenshot": png_bytes(self._last_image),
+                                                   "live": self.live, "core": core.info.name,
+                                                   "core_version": core.info.version})
+            except (LibretroError, QuickSaveError, InspectionError, OSError) as exc:
                 self.command_failed.emit(str(exc))
 
     def _save(self, slot: int, note: str = ""):
@@ -203,6 +230,27 @@ class EmulatorWorker(QObject):
             self.message.emit(f"{info.label} was made by core version {info.core_version}; "
                               f"running {core.info.version}")
         self.message.emit(f"{info.label if info else f'Slot {slot}'} loaded")
+
+    def _load_inspection(self, inspection_id: str):
+        store = InspectionStore(self.config.store_dir / "inspections")
+        record = store.get(inspection_id)
+        if record is not None and record.core != self.core.info.name:
+            raise InspectionError(f"That inspection was saved by {record.core}, not {self.core.info.name}.")
+        self.core.unserialize(store.state(inspection_id))
+        self.message.emit(f"Started from the inspection at {record.map_name if record else inspection_id}")
+
+    def _read_live(self, core: LibretroCore):
+        try:
+            live = read_live_state(core.read_memory)
+        except LibretroError as exc:
+            self.message.emit(f"Live map reading turned off: {exc}")
+            self.config = PlayConfig(**{**self.config.__dict__, "live_ram": False})
+            return
+        key = (live.map_index, live.tamer_tile, live.partner_tile, hash(live.grid))
+        self.live = live
+        if key != self._live_key:
+            self._live_key = key
+            self.live_changed.emit(live)
 
     def _flush_memory_card(self, core: LibretroCore):
         card = core.save_ram()
@@ -301,14 +349,67 @@ class FrameView(QWidget):
         super().focusOutEvent(event)
 
 
+class LiveMapView(QWidget):
+    """The running game's tile-trigger grid with the player (white) and partner (cyan) marked."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(300, 300)
+        self.grid: QImage | None = None
+        self._grid_bytes = None
+        self.tamer = self.partner = None
+
+    def show_live(self, live: LiveState):
+        if live.grid != self._grid_bytes:
+            self._grid_bytes = live.grid
+            self.grid = QImage(ImageQt(trigger_grid_image(live.grid))).copy()
+        self.tamer, self.partner = live.tamer_tile, live.partner_tile
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#20242b"))
+        if self.grid is None:
+            painter.setPen(QColor("#d0d4da"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Waiting for the game")
+            return
+        side = min(self.width(), self.height())
+        cell = side / 100
+        left, top = (self.width() - side) / 2, (self.height() - side) / 2
+        painter.drawImage(QRectF(left, top, side, side), self.grid)
+        for tile, colour in ((self.partner, QColor("cyan")), (self.tamer, QColor("white"))):
+            if tile is not None:
+                painter.setPen(QPen(QColor("black"), 1)); painter.setBrush(colour)
+                radius = max(3.0, cell * 1.5)
+                painter.drawEllipse(QRectF(left + (tile[0] + 0.5) * cell - radius, top + (tile[1] + 0.5) * cell - radius,
+                                           radius * 2, radius * 2))
+
+
+class InspectDialog(QDialog):
+    def __init__(self, summary: str, note: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Inspect here")
+        form = QFormLayout(self)
+        where = QLabel(summary); where.setWordWrap(True); form.addRow("Where", where)
+        self.category = QComboBox(); self.category.addItems(CATEGORIES); form.addRow("What", self.category)
+        self.note = QLineEdit(note)
+        self.note.setPlaceholderText("What you see, e.g. gateway south to Native Forest, toilet behind the gym")
+        form.addRow("Note", self.note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); form.addRow(buttons)
+        self.resize(520, self.sizeHint().height())
+
+
 class PlayWindow(QMainWindow):
     """One game session. Closing the window stops the core, writes the resume slot and the memory card."""
 
     slots_changed = Signal()
+    inspections_changed = Signal()
     log = Signal(str)
     closed = Signal()
 
-    def __init__(self, config: PlayConfig, title: str = "Digimon World", parent=None):
+    def __init__(self, config: PlayConfig, title: str = "Digimon World", map_names: dict[int, str] | None = None,
+                 decoded_grid=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"{title} — DW1-coop player")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -321,7 +422,19 @@ class PlayWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self._build_toolbar()
         self.status = QLabel("Starting the core…"); self.statusBar().addWidget(self.status, 1)
+        self.map_names = map_names or {}
+        self._decoded_grid = decoded_grid or (lambda index: None)
+        self._decoded_cache: dict[int, bytes | None] = {}
+        self.inspections = InspectionStore(config.store_dir / "inspections")
+        self.live_label = QLabel("Live map: off (USA release only)" if not config.live_ram else "Live map: waiting")
+        self.statusBar().addPermanentWidget(self.live_label)
         self.statusBar().addPermanentWidget(QLabel("F1: controls"))
+        self.live_map = LiveMapView()
+        self.live_dock = QDockWidget("Live map", self); self.live_dock.setWidget(self.live_map)
+        self.live_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.live_dock)
+        self.live_dock.setVisible(config.live_ram)
+        self._live: LiveState | None = None
         self.thread = QThread(self)
         self.worker = EmulatorWorker(config)
         self.worker.moveToThread(self.thread)
@@ -334,6 +447,8 @@ class PlayWindow(QMainWindow):
         self.worker.slot_saved.connect(self._slot_saved)
         self.worker.slot_loaded.connect(self._slot_loaded)
         self.worker.command_failed.connect(self._command_failed)
+        self.worker.live_changed.connect(self._live_changed)
+        self.worker.inspection_captured.connect(self._inspection_captured)
         # Direct: stop() blocks the GUI thread in wait(), so a queued quit would never be delivered.
         self.worker.finished.connect(self.thread.quit, Qt.ConnectionType.DirectConnection)
         self._finished = False
@@ -367,6 +482,10 @@ class PlayWindow(QMainWindow):
         self.full = action("Full screen", "F11", self._toggle_full_screen, checkable=True)
         smooth = QCheckBox("Smooth"); smooth.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         smooth.toggled.connect(self._set_smooth); bar.addWidget(smooth)
+        inspect = QAction(self); inspect.setShortcut(QKeySequence("F9")); inspect.triggered.connect(self.worker_inspect)
+        live_toggle = QAction(self); live_toggle.setShortcut(QKeySequence("F10"))
+        live_toggle.triggered.connect(lambda: self.live_dock.setVisible(not self.live_dock.isVisible()))
+        self.addAction(inspect); self.addAction(live_toggle)
         help_action = QAction(self); help_action.setShortcut(QKeySequence("F1")); help_action.triggered.connect(self._show_help)
         self.addAction(help_action)
         for widget in (self.slot,):
@@ -401,6 +520,70 @@ class PlayWindow(QMainWindow):
 
     def focusNextPrevChild(self, _next):
         return False  # Tab is the fast-forward key, not focus navigation
+
+    def worker_inspect(self):
+        self.worker.inspect()
+
+    def map_label(self, index: int) -> str:
+        return self.map_names.get(index, f"map {index}")
+
+    def decoded_grid(self, index: int) -> bytes | None:
+        if index not in self._decoded_cache:
+            try:
+                self._decoded_cache[index] = self._decoded_grid(index)
+            except Exception:
+                self._decoded_cache[index] = None
+        return self._decoded_cache[index]
+
+    def grid_difference_count(self, live: LiveState) -> int | None:
+        decoded = self.decoded_grid(live.map_index)
+        return None if decoded is None else len(grid_differences(live.grid, decoded))
+
+    def live_summary(self, live: LiveState) -> str:
+        parts = [f"{self.map_label(live.map_index)} (map {live.map_index})"]
+        if live.tamer_tile is not None:
+            trigger = live.trigger_at(live.tamer_tile)
+            parts.append(f"tile {live.tamer_tile[0]},{live.tamer_tile[1]}"
+                         + (f" — {trigger_description(trigger)}" if trigger is not None else ""))
+        differences = self.grid_difference_count(live)
+        parts.append("grid: no decoded MAP" if differences is None else
+                     "grid matches the decoded MAP" if differences == 0 else
+                     f"grid: {differences} tiles differ from the decoded MAP")
+        return " · ".join(parts)
+
+    @Slot(object)
+    def _live_changed(self, live: LiveState):
+        self._live = live
+        self.live_label.setText(self.live_summary(live))
+        self.live_map.show_live(live)
+
+    @Slot(object)
+    def _inspection_captured(self, capture: dict):
+        live: LiveState | None = capture["live"]
+        was_paused = self.worker.paused
+        self.worker.paused = True
+        summary = self.live_summary(live) if live is not None else "Position unknown (live map is off for this disc)"
+        dialog = InspectDialog(summary, self.note.text(), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            try:
+                record = self.inspections.add(
+                    map_index=live.map_index if live else -1, map_name=self.map_label(live.map_index) if live else "unknown",
+                    position=(live.tamer.x, live.tamer.y, live.tamer.z) if live and live.tamer else None,
+                    tile=live.tamer_tile if live else None,
+                    trigger=live.trigger_at(live.tamer_tile) if live else None,
+                    partner_tile=live.partner_tile if live else None,
+                    grid_differences=self.grid_difference_count(live) if live else None,
+                    category=dialog.category.currentText(), note=dialog.note.text(), core=capture["core"],
+                    core_version=capture["core_version"], screenshot=capture["screenshot"], state=capture["state"],
+                    live_grid=live.grid if live else None)
+                self._message(f"Inspection saved: {record.category} at {record.map_name}"
+                              + (f" — {record.note}" if record.note else ""))
+                self.note.clear()
+                self.inspections_changed.emit()
+            except (InspectionError, OSError) as exc:
+                QMessageBox.warning(self, "Inspection", f"The inspection could not be saved: {exc}")
+        self.worker.paused = was_paused
+        self.view.setFocus()
 
     def _toggle_pause(self, paused: bool):
         self.worker.paused = paused
