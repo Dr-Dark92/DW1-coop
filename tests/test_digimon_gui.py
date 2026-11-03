@@ -87,3 +87,51 @@ def test_window_close_delivers_cancellation_to_busy_digimon_worker(application, 
     wait(application, lambda: workspace.digimon_thread is None)
     wait(application, lambda: not window.isVisible())
     assert not (tmp_path / 'never.dw1digimon').exists()
+
+
+def test_gui_stage_bundle_export_review_and_apply(application, workspace, tmp_path, monkeypatch):
+    from test_digimon_package import BundleCatalogue, character_source
+    import dw1_workbench.digimon_package as package
+    sources = BundleCatalogue([source(), character_source(5, 'BETA')])
+    monkeypatch.setattr(package, 'stage_characters', lambda cat, stages: sources.resources())
+    monkeypatch.setattr(package, 'load_source', lambda cat, row_id, cancelled=None: sources.sources[row_id])
+    monkeypatch.setattr(gui, 'export_digimon_bundle', lambda path, cat, *args, **kwargs:
+                        package.export_bundle(path, sources, *args, **kwargs))
+    monkeypatch.setattr(gui, 'prepare_digimon_bundle', lambda path, cat, **kwargs:
+                        package.prepare_bundle_import(path, sources, **kwargs))
+    messages, reviewed = [], []
+    monkeypatch.setattr(gui.QMessageBox, 'information', staticmethod(lambda *args: messages.append(args[1])))
+    monkeypatch.setattr(gui.QMessageBox, 'critical', staticmethod(lambda *args: pytest.fail(str(args))))
+    monkeypatch.setattr(QDialog, 'exec', lambda self: reviewed.append(self.windowTitle()) or QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(workspace, '_digimon_changed', lambda: messages.append('changed'))
+    monkeypatch.setattr(workspace, '_selected_character', lambda: pytest.fail('bundles need no selected character'))
+    destination = tmp_path / 'rookie.dw1digimons'
+    workspace._start_digimon('export-bundle', destination, stages=('Rookie',))
+    wait(application, lambda: workspace.digimon_thread is None)
+    assert destination.is_file() and 'Digimon bundle exported' in messages
+    workspace._start_digimon('validate-bundle', destination)
+    wait(application, lambda: workspace.digimon_thread is None and 'Digimon bundle imported' in messages)
+    assert 'Review Digimon bundle import' in reviewed and 'changed' in messages
+    workspace.cancel_background(); workspace.close()
+
+
+def test_class_filters_and_class_bundle_export(application, workspace, tmp_path, monkeypatch):
+    rows = [{'id': f'c{i}'} for i in range(4)]
+    stages = {'c0': 'Fresh', 'c1': 'Rookie', 'c2': 'Rookie', 'c3': None}
+    workspace.character_rows = rows
+    workspace.character_table = gui.QTableWidget(4, 1)
+    workspace.character_stage = workspace._class_filter(workspace._filter_characters)
+    monkeypatch.setattr(workspace, '_character_stages', lambda: stages)
+    titles = [workspace.character_stage.itemText(i) for i in range(workspace.character_stage.count())]
+    assert titles == ['All classes', 'Newborn (Fresh)', 'In-Training', 'Rookie', 'Champion', 'Ultimate', 'No class']
+    shown = lambda: [i for i in range(4) if not workspace.character_table.isRowHidden(i)]
+    for title, expected in (('Rookie', [1, 2]), ('Newborn (Fresh)', [0]), ('No class', [3]), ('All classes', [0, 1, 2, 3])):
+        workspace.character_stage.setCurrentText(title)
+        assert shown() == expected, title
+    started = []
+    monkeypatch.setattr(workspace, '_start_digimon', lambda task, path, stages=(): started.append((task, path.name, stages)))
+    monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', staticmethod(lambda *a: (str(tmp_path / a[2]), '')))
+    workspace._export_digimon_bundle('Fresh')
+    workspace._export_digimon_bundle(workspace.ALL_CLASSES)
+    assert started == [('export-bundle', 'newborn.dw1digimons', ('Fresh',)),
+                       ('export-bundle', 'all-classes.dw1digimons', tuple(gui.STAGES.values()))]

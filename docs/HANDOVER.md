@@ -1,5 +1,11 @@
 # Handover
 
+## P4 in-game check and stage bundles (2026-11-03, Claude, branch `python-player`)
+
+- In-game gate passed: Koromon (ID 2) with palette 0 inverted, imported through `DigimonOverrides`, played from the patched disc; from the Native Forest inspection, walking into Green Gym loaded Koromon from disc and VRAM held only the inverted palette (original disc: only the original). Screenshot comparison differs only on Koromon's face. The partner was Agumon, so it did not keep Koromon resident. The game loads textures per model load (`loadDigimonTexture`), so changes show on entering a map that uses the Digimon. Harness: `DW1-coop-data/dev-tools/digimon_ingame.py` (uses a BIOS folder holding only `SCPH1001.BIN`, since the inspections were made with it); outputs in `DW1-coop-data/digimon-import-validation/koromon/`.
+- Stage bundles: `export_bundle`, `read_bundle`, `prepare_bundle_import`, `BundleImport`, `DigimonOverrides.apply_many` (single `apply` now calls it); `_package_bytes`/`_publish` split out of `export_package`. GUI: class filter (Newborn = Fresh) in Characters and Digimon and in Animations, each with **Export class bundle…** for the filtered class, **Import Digimon package…** accepts bundles, review table, re-validation before apply. Tests: two package tests and one GUI test (164 pass).
+- Next for P4: the 24 skipped models need the MMD parser to accept their primitive modes (`0x3e`, `0x36`, `0x2c`, `0x2e`, `0x2d`, one bad index on Tanemon). A model edit (not only a texture) has not been checked in game.
+
 ## World zoom switched off (2026-11-03)
 
 After committing `74b09ff`, the user played with the zoom on the desktop: it **crashed the game and misplaced the player and NPCs**. At their request it is disabled (`player.WORLD_ZOOM_ENABLED = False`: slider disabled, `_ensure_camera` never installs). `camera.py`, `camera_engine.c` and their tests are kept. Not yet investigated; likely areas: entity culling/positions computed from screen bounds or `DRAWING_OFFSET` (e.g. `isOffScreen`, NPC AI using screen coordinates), the `VIEWPORT_DISTANCE` change affecting game logic beyond projection, state changes during map transitions or battles while patched, and RAM assumed free (`0x801C0000`–`0x801D3100`) being used in situations not sampled. Reproduce with the user's description before re-enabling.

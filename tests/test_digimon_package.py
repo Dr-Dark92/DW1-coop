@@ -4,14 +4,17 @@ import io
 import json
 import struct
 import zipfile
+from dataclasses import replace
 
 import pytest
 from PIL import Image
 
 from dw1_workbench.alltim import SLOT_SIZE
 from dw1_workbench.characters import CharacterEntry
-from dw1_workbench.digimon_package import (DigimonImportError, DigimonOverrides, DigimonSource, digest,
-                                           export_package, prepare_import, read_package)
+from dw1_workbench import digimon_package
+from dw1_workbench.digimon_package import (DigimonImportError, DigimonOverrides, DigimonSource, digest, export_bundle,
+                                           export_package, prepare_bundle_import, prepare_import, read_bundle,
+                                           read_package)
 from dw1_workbench.errors import Cancelled, DiscFormatError
 from dw1_workbench.tim import decode_tim
 from test_mmd import make_executable, make_mmd
@@ -241,3 +244,98 @@ def test_animation_decode_can_cancel_inside_a_clip():
     with pytest.raises(Cancelled, match='Animation parsing'):
         parse_animations(data, offset, 2, cancelled)
     assert checks == 11
+
+
+def character_source(resource_id, name, model=None):
+    """source() moved to another character slot, so a bundle can hold several."""
+    base = source()
+    character = replace(base.character, resource_id=resource_id, internal_name=name, raw=name.encode().ljust(8, b'\0'),
+                        model_path=f'CHDAT/MMD0/{name}.MMD', texture_slot=resource_id, display_name=name.title())
+    model = base.model if model is None else model
+    executable = bytearray(base.executable)  # give this slot the same two-bone skeleton as ID 3
+    struct.pack_into("<I", executable, 0x9CEB4 + resource_id * 52 + 20, 2)
+    struct.pack_into("<I", executable, 0x8CE60 + resource_id * 4, 0x80090000 + 0x1000)
+    return replace(base, character=character, model=model, executable=bytes(executable),
+                   model_row={**base.model_row, 'id': f'model-{resource_id}', 'original_path': character.model_path,
+                              'size': len(model), 'content_hash': digest(model)},
+                   texture_row={**base.texture_row, 'id': f'texture-{resource_id}', 'offset': SLOT_SIZE * resource_id,
+                                'original_path': f'CHDAT/ALLTIM.TIM#{resource_id:03d}'})
+
+
+class BundleCatalogue:
+    def __init__(self, sources):
+        self.sources = {f'char-{s.character.resource_id}': s for s in sources}
+
+    def meta(self):
+        return next(iter(self.sources.values())).meta
+
+    def resources(self):
+        return [{'id': key, 'detected_format': 'DW1 character resource entry',
+                 'original_path': f'SLUS_010.32#character/{s.character.resource_id:03d}/{s.character.internal_name}'}
+                for key, s in self.sources.items()]
+
+
+@pytest.fixture
+def bundle_catalogue(monkeypatch):
+    broken = make_mmd()[:24]  # truncated: cannot be validated, so it is skipped rather than packaged
+    catalogue = BundleCatalogue([character_source(3, 'AGUM'), character_source(5, 'BETA'),
+                                 character_source(7, 'BROK', broken)])
+    monkeypatch.setattr(digimon_package, 'stage_characters', lambda cat, stages: cat.resources())
+    monkeypatch.setattr(digimon_package, 'load_source', lambda cat, row_id, cancelled=None: cat.sources[row_id])
+    return catalogue
+
+
+def test_stage_bundle_round_trip_skips_unsupported_and_applies_atomically(tmp_path, bundle_catalogue):
+    path, count, skipped = export_bundle(tmp_path / 'rookie', bundle_catalogue, ('Rookie',))
+    assert path.suffix == ".dw1digimons" and count == 2, skipped
+    assert [item['character'] for item in skipped] == ['character/007/BROK']
+    manifest, members = read_bundle(path)
+    assert manifest['stages'] == ['Rookie'] and sorted(rid for rid, _ in members.values()) == [3, 5]
+    unchanged = prepare_bundle_import(path, bundle_catalogue)
+    assert [r.source.character.resource_id for r in unchanged.reports] == [3, 5] and unchanged.changed == ()
+
+    # Edit BETA's palette inside its member package, as a user would with the extracted file.
+    member = 'packages/005-BETA.dw1digimon'
+    with zipfile.ZipFile(io.BytesIO(members[member][1])) as package:
+        texture = bytearray(package.read('texture.TIM'))
+    texture[22:24] = struct.pack('<H', 0x7C00)
+    inner = rewrite(io.BytesIO(members[member][1]), io.BytesIO(), {'texture.TIM': bytes(texture)}).getvalue()
+    listed = [{**item, **({'size': len(inner), 'sha256': digest(inner)} if item['path'] == member else {})}
+              for item in manifest['packages']]
+    edited = rewrite(path, tmp_path / 'edited.dw1digimons',
+                     {member: inner, 'bundle.json': json.dumps({**manifest, 'packages': listed}).encode()})
+    report = prepare_bundle_import(edited, bundle_catalogue)
+    assert [r.source.character.resource_id for r in report.changed] == [5]
+    store = DigimonOverrides(tmp_path / 'project', 'a' * 64)
+    store.apply_many(report.reports)
+    assert list(store.records()) == [5] and store.file(5, 'TIM') == bytes(texture)
+
+    # A member that fails validation rejects the whole bundle; nothing earlier in it is applied.
+    bad_inner = rewrite(io.BytesIO(members['packages/003-AGUM.dw1digimon'][1]), io.BytesIO(),
+                        {'texture.TIM': b'short'}).getvalue()
+    bad = rewrite(edited, tmp_path / 'bad.dw1digimons', {'packages/003-AGUM.dw1digimon': bad_inner})
+    with pytest.raises(DigimonImportError, match='003-AGUM'):
+        prepare_bundle_import(bad, bundle_catalogue)
+    assert list(store.records()) == [5]
+
+
+def test_bundle_rejects_unlisted_duplicate_and_foreign_members(tmp_path, bundle_catalogue):
+    path, _, _ = export_bundle(tmp_path / 'all', bundle_catalogue, ('Rookie', 'Champion'))
+    manifest, members = read_bundle(path)
+    extra = rewrite(path, tmp_path / 'extra.dw1digimons', {})
+    with zipfile.ZipFile(extra, 'a') as archive:
+        archive.writestr('packages/009-EXTR.dw1digimon', b'x')
+    with pytest.raises(DigimonImportError, match='does not match'):
+        read_bundle(extra)
+    duplicate = {**manifest, 'packages': manifest['packages'] + [dict(manifest['packages'][0])]}
+    with pytest.raises(DigimonImportError, match='more than once|does not match'):
+        read_bundle(rewrite(path, tmp_path / 'dup.dw1digimons', {'bundle.json': json.dumps(duplicate).encode()}))
+    unsafe = rewrite(path, tmp_path / 'unsafe.dw1digimons', {})
+    with zipfile.ZipFile(unsafe, 'a') as archive:
+        archive.writestr('../escape.dw1digimon', b'x')
+    with pytest.raises(DigimonImportError, match='Unsupported or oversized'):
+        read_bundle(unsafe)
+    other = rewrite(path, tmp_path / 'other.dw1digimons',
+                    {'bundle.json': json.dumps({**manifest, 'source': {**manifest['source'], 'source_sha256': 'b' * 64}}).encode()})
+    with pytest.raises(DigimonImportError, match='different disc'):
+        prepare_bundle_import(other, bundle_catalogue)

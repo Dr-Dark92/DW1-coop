@@ -33,8 +33,11 @@ from .items import parse_item_names
 from .pathing import map_pathing, plan_route
 from .play_panel import PlayPanel
 from .disc_patch import build_patched_image
-from .digimon_package import (DigimonOverrides, export_package as export_digimon_package,
-                              load_source as load_digimon_source, prepare_import as prepare_digimon_import)
+from .digimon_package import (BUNDLE_SUFFIX as DIGIMON_BUNDLE_SUFFIX, DigimonOverrides,
+                              export_bundle as export_digimon_bundle, export_package as export_digimon_package,
+                              load_source as load_digimon_source, prepare_bundle_import as prepare_digimon_bundle,
+                              prepare_import as prepare_digimon_import)
+from .characters import STAGES
 from .zone_import import OverrideStore, check_package
 from .zone_export import SUFFIX as ZONE_SUFFIX, MapSource, export_package, pathing_image, slug as zone_slug
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
@@ -187,10 +190,10 @@ class DigimonWorker(QObject):
     cancelled = Signal(str)
     finished = Signal()
 
-    def __init__(self, catalogue, character_id, task, path=None, report=None):
+    def __init__(self, catalogue, character_id, task, path=None, report=None, stages=()):
         super().__init__()
         self.catalogue, self.character_id, self.task = catalogue, character_id, task
-        self.path, self.report = path, report
+        self.path, self.report, self.stages = path, report, stages
         self.cancel_event = threading.Event()
 
     def request_cancel(self):
@@ -201,7 +204,24 @@ class DigimonWorker(QObject):
         try:
             store = DigimonOverrides(self.catalogue.project_dir, self.catalogue.meta().get('source_sha256'))
             options = {'cancelled': self.cancel_event.is_set, 'progress': self.progress.emit}
-            if self.task == 'apply':
+            if self.task == 'export-bundle':
+                result = export_digimon_bundle(self.path, self.catalogue, self.stages, store, **options)
+            elif self.task == 'validate-bundle':
+                result = prepare_digimon_bundle(self.path, self.catalogue, **options)
+            elif self.task == 'apply-bundle':
+                # Validate again so the bundle and the disc are exactly what was reviewed.
+                fresh = prepare_digimon_bundle(self.path, self.catalogue, **options)
+                if [(r.source.character, r.model, r.texture) for r in fresh.reports] != \
+                        [(r.source.character, r.model, r.texture) for r in self.report.reports]:
+                    raise ValueError('The bundle or its characters changed since review; validate it again.')
+                store.apply_many(fresh.reports, **options)
+                result = fresh
+                try:
+                    self.catalogue.log('INFO', f"Digimon bundle import: {len(fresh.changed)} of {len(fresh.reports)} "
+                                       f"characters changed; {fresh.package}")
+                except Exception as exc:
+                    self.progress.emit(100, f'Import applied; catalogue log unavailable: {exc}')
+            elif self.task == 'apply':
                 fresh = load_digimon_source(self.catalogue, self.character_id, **options)
                 if fresh.character != self.report.source.character or fresh.meta.get('source_sha256') != self.report.source.meta.get('source_sha256'):
                     raise ValueError('The selected character/source changed since validation; validate the package again.')
@@ -584,9 +604,7 @@ class Workspace(QWidget):
         info.setWordWrap(True); layout.addWidget(info)
         self.animation_search = QLineEdit(); self.animation_search.setPlaceholderText("Find a Digimon (e.g. Agumon, AGUM)")
         self.animation_search.setClearButtonEnabled(True); self.animation_search.textChanged.connect(self._filter_animation_models)
-        self.animation_stage = QComboBox()
-        self.animation_stage.addItems(["All stages", *STAGES.values(), "No stage"])
-        self.animation_stage.currentIndexChanged.connect(self._filter_animation_models)
+        self.animation_stage = self._class_filter(self._filter_animation_models)
         self.animation_partner = QCheckBox("Partner range only (IDs 1–65)")
         self.animation_partner.setToolTip("Resource IDs below dw_decomp's NUM_PARTNER_DIGIMON (66); ID 0 is the player character.")
         self.animation_partner.toggled.connect(self._filter_animation_models)
@@ -604,14 +622,19 @@ class Workspace(QWidget):
         for index, row in enumerate(animated):
             label = self.labels.get((row["id"], "display_name"))
             values = (row["original_path"].split("/")[-2], label["value"] if label else "not recorded",
-                      row["original_path"].split("/")[-1], stages.get(row["id"]) or "—")
+                      row["original_path"].split("/")[-1], self._class_title(stages.get(row["id"])))
             for column, value in enumerate(values):
                 self.animation_models.setItem(index, column, QTableWidgetItem(value))
         self.animation_models.currentCellChanged.connect(self._animation_model_selected)
         self.animation_panel = ModelAnimationPanel(clip_table=True)
         self.animation_panel.model_status.setText("Select a Digimon to load its model and animation clips.")
         left = QWidget(); left_layout = QVBoxLayout(left); left_layout.setContentsMargins(0, 0, 0, 0)
+        animation_bundle = QPushButton("Export class bundle…")
+        animation_bundle.setToolTip("Export every Digimon of the selected class (models with their animations and "
+                                    "textures) as one .dw1digimons bundle.")
+        animation_bundle.clicked.connect(lambda: self._export_digimon_bundle(self.animation_stage.currentData()))
         filters = QHBoxLayout(); filters.addWidget(self.animation_stage); filters.addWidget(self.animation_partner)
+        filters.addWidget(animation_bundle)
         left_layout.addWidget(self.animation_search); left_layout.addLayout(filters)
         left_layout.addWidget(self.animation_models)
         split = QSplitter(); split.addWidget(left); split.addWidget(self.animation_panel)
@@ -625,14 +648,36 @@ class Workspace(QWidget):
 
     def _filter_animation_models(self, *_):
         needle = self.animation_search.text().strip().lower()
-        stage = self.animation_stage.currentText()
+        chosen = self.animation_stage.currentData()
         partner_only = self.animation_partner.isChecked()
+        stages = self._character_stages()
         for index in range(self.animation_models.rowCount()):
             cells = [self.animation_models.item(index, column).text() for column in range(4)]
             visible = (not needle or any(needle in cell.lower() for cell in cells[:3]))
-            visible &= stage == "All stages" or cells[3] == stage or (stage == "No stage" and cells[3] == "—")
+            visible &= self._class_matches(chosen, stages.get(self._animation_rows[index]["id"]))
             visible &= not partner_only or 0 < int(cells[0]) < PARTNER_COUNT
             self.animation_models.setRowHidden(index, not visible)
+
+    ALL_CLASSES, NO_CLASS = "All classes", "No class"
+
+    @staticmethod
+    def _class_title(stage):
+        """How an evolution stage is shown: Fresh is the newborn class."""
+        return {"Fresh": "Newborn (Fresh)"}.get(stage, stage) if stage else "—"
+
+    def _class_filter(self, changed):
+        """Class (evolution-stage) picker; item data is the catalogue stage, or a marker for all / none."""
+        box = QComboBox()
+        box.addItem(self.ALL_CLASSES, self.ALL_CLASSES)
+        for stage in STAGES.values():
+            box.addItem(self._class_title(stage), stage)
+        box.addItem(self.NO_CLASS, self.NO_CLASS)
+        box.currentIndexChanged.connect(changed)
+        return box
+
+    @classmethod
+    def _class_matches(cls, chosen, stage):
+        return chosen == cls.ALL_CLASSES or (stage or cls.NO_CLASS) == chosen
 
     def _character_stages(self):
         """Stage per character row: catalogue label, or the executable's level byte for older projects."""
@@ -676,7 +721,7 @@ class Workspace(QWidget):
                        if association["source_id"] == row["id"] and association["target_id"] in self.rows_by_id}
             model = related.get("model_container")
             texture = related.get("texture")
-            values = (resource_id, label["value"] if label else "not recorded", name, stages.get(row["id"]) or "—",
+            values = (resource_id, label["value"] if label else "not recorded", name, self._class_title(stages.get(row["id"])),
                       model["original_path"] if model else "unsupported / absent",
                       texture["original_path"] if texture else "unavailable")
             for column, value in enumerate(values):
@@ -693,6 +738,10 @@ class Workspace(QWidget):
         package_export.clicked.connect(self._export_digimon)
         package_import = QPushButton('Import Digimon package…')
         package_import.clicked.connect(self._import_digimon)
+        self.character_stage = self._class_filter(self._filter_characters)
+        bundle_export = QPushButton('Export class bundle…')
+        bundle_export.setToolTip('Export every Digimon of the class chosen in the filter as one .dw1digimons bundle.')
+        bundle_export.clicked.connect(lambda: self._export_digimon_bundle(self.character_stage.currentData()))
         restore = QPushButton('Restore selected Digimon from disc')
         restore.clicked.connect(self._restore_digimon)
         model_page = ModelAnimationPanel("Load model and animations")
@@ -703,13 +752,22 @@ class Workspace(QWidget):
         preview_tabs = QTabWidget(); preview_tabs.addTab(model_page, "Model and animation"); preview_tabs.addTab(texture_page, "Texture")
         right = QWidget(); right_layout = QVBoxLayout(right)
         right_layout.addWidget(preview_tabs)
-        split = QSplitter(); split.addWidget(self.character_table); split.addWidget(right)
+        left = QWidget(); left_layout = QVBoxLayout(left); left_layout.setContentsMargins(0, 0, 0, 0)
+        class_row = QHBoxLayout(); class_row.addWidget(QLabel("Class")); class_row.addWidget(self.character_stage, 1)
+        left_layout.addLayout(class_row); left_layout.addWidget(self.character_table)
+        split = QSplitter(); split.addWidget(left); split.addWidget(right)
         layout.addWidget(split, 1)
         actions = QHBoxLayout()
-        for button in (export, package_export, package_import, restore):
+        for button in (export, package_export, bundle_export, package_import, restore):
             actions.addWidget(button)
         layout.addLayout(actions)
         return page
+
+    def _filter_characters(self, *_):
+        chosen = self.character_stage.currentData()
+        stages = self._character_stages()
+        for index, row in enumerate(self.character_rows):
+            self.character_table.setRowHidden(index, not self._class_matches(chosen, stages.get(row["id"])))
 
     def _selected_character(self):
         index = self.character_table.currentRow()
@@ -789,23 +847,39 @@ class Workspace(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, 'Digimon export failed', str(exc))
 
-    def _import_digimon(self):
-        path, _ = QFileDialog.getOpenFileName(self, 'Import native Digimon package', '',
-                                             'DW1 Digimon package (*.dw1digimon)')
+    def _export_digimon_bundle(self, chosen):
+        if chosen == self.NO_CLASS:
+            QMessageBox.information(self, 'Export class bundle', 'Choose a class (Newborn to Ultimate) or All classes '
+                                    'in the filter; characters without a class are not exported as a bundle.')
+            return
+        stages = tuple(STAGES.values()) if chosen == self.ALL_CLASSES else (chosen,)
+        name = 'all-classes' if len(stages) > 1 else {'Fresh': 'newborn'}.get(chosen, chosen.lower())
+        path, _ = QFileDialog.getSaveFileName(self, 'Export Digimon class bundle', f'{name}{DIGIMON_BUNDLE_SUFFIX}',
+                                              f'DW1 Digimon bundle (*{DIGIMON_BUNDLE_SUFFIX})')
         if path:
             try:
-                self._start_digimon('validate', Path(path))
+                self._start_digimon('export-bundle', Path(path), stages=stages)
+            except Exception as exc:
+                QMessageBox.critical(self, 'Digimon bundle export failed', str(exc))
+
+    def _import_digimon(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'Import Digimon package or bundle', '',
+                                             f'DW1 Digimon package or bundle (*.dw1digimon *{DIGIMON_BUNDLE_SUFFIX})')
+        if path:
+            try:
+                bundle = path.endswith(DIGIMON_BUNDLE_SUFFIX)
+                self._start_digimon('validate-bundle' if bundle else 'validate', Path(path))
             except Exception as exc:
                 QMessageBox.critical(self, 'Digimon import failed', str(exc))
 
-    def _start_digimon(self, task, path=None, report=None):
+    def _start_digimon(self, task, path=None, report=None, stages=()):
         if self.digimon_thread is not None:
             raise ValueError('Another Digimon package operation is still finishing.')
-        character_id = self._selected_character()['id']
+        character_id = None if task.endswith('bundle') else self._selected_character()['id']
         dialog = QProgressDialog('Processing Digimon package', 'Cancel', 0, 100, self)
         dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
         thread = QThread(self)
-        worker = DigimonWorker(self.catalogue, character_id, task, path, report)
+        worker = DigimonWorker(self.catalogue, character_id, task, path, report, stages)
         worker.moveToThread(thread); thread.started.connect(worker.run)
         dialog.canceled.connect(lambda: worker.request_cancel())
         worker.progress.connect(self._digimon_progress_changed)
@@ -843,7 +917,22 @@ class Workspace(QWidget):
         result, self._digimon_result = self._digimon_result, None
         if result is not None and not self._closing:
             task, value = result
-            if task == 'validate':
+            if task == 'export-bundle':
+                path, count, skipped = value
+                text = f'Wrote {path}\n{count} Digimon packaged.'
+                if skipped:
+                    text += (f'\n{len(skipped)} skipped (listed in bundle.json): '
+                             + ', '.join(item['character'].rsplit('/', 1)[-1] for item in skipped))
+                QMessageBox.information(self, 'Digimon bundle exported', text)
+            elif task == 'validate-bundle':
+                self._review_digimon_bundle(value)
+            elif task == 'apply-bundle':
+                self._digimon_changed()
+                QMessageBox.information(self, 'Digimon bundle imported',
+                                        f'{len(value.changed)} of {len(value.reports)} characters now use imported '
+                                        'resources; the others use the disc originals. Enable “Play with imported '
+                                        'resources” to play them.')
+            elif task == 'validate':
                 dialog = QDialog(self); dialog.setWindowTitle('Review Digimon import')
                 layout = QVBoxLayout(dialog)
                 summary = QLabel(f"ID {value.source.character.resource_id} — {value.source.character.internal_name}\n"
@@ -867,6 +956,36 @@ class Workspace(QWidget):
             else:
                 QMessageBox.information(self, 'Digimon exported', f'Wrote {value}')
         self.background_finished.emit()
+
+    def _review_digimon_bundle(self, value):
+        dialog = QDialog(self); dialog.setWindowTitle('Review Digimon bundle import'); dialog.resize(640, 480)
+        layout = QVBoxLayout(dialog)
+        stages = ', '.join(value.manifest.get('stages') or []) or 'unknown'
+        summary = QLabel(f"{value.package}: {len(value.reports)} Digimon ({stages}); {len(value.changed)} differ from "
+                         "the disc. Applying makes every listed character match the bundle: unchanged members drop "
+                         "any earlier import of that character.")
+        summary.setWordWrap(True); layout.addWidget(summary)
+        table = QTableWidget(len(value.reports), 3)
+        table.setHorizontalHeaderLabels(['ID', 'Digimon', 'Changes from disc'])
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        for row, report in enumerate(value.reports):
+            character = report.source.character
+            for column, text in enumerate((str(character.resource_id),
+                                           character.display_name or character.internal_name,
+                                           ', '.join(report.changed) or 'none')):
+                table.setItem(row, column, QTableWidgetItem(text))
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(table, 1)
+        skipped = value.manifest.get('skipped') or []
+        if skipped:
+            note = QLabel(f"Not in the bundle (unsupported when exported): "
+                          + ', '.join(str(item.get('character', '')).rsplit('/', 1)[-1] for item in skipped))
+            note.setWordWrap(True); layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Apply bundle')
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._start_digimon('apply-bundle', value.path, report=value)
 
     def _restore_digimon(self):
         try:

@@ -1,4 +1,4 @@
-"""Single-character native packages and validated, same-slot replacement imports.
+"""Native Digimon packages (one character, or a stage bundle of them) and validated, same-slot replacement imports.
 
 MMD already contains geometry and animation records. The executable still owns the
 skeleton, names and gameplay parameters; those are reference data, never imported.
@@ -36,6 +36,10 @@ IMPORT_VERSION = "native-digimon-import-v1"
 MAX_MEMBER = 16 * 1024 * 1024
 MAX_TOTAL = 20 * 1024 * 1024
 MAX_MANIFEST = 64 * 1024
+BUNDLE_FORMAT = "dw1-digimon-bundle"
+BUNDLE_SUFFIX = ".dw1digimons"
+MAX_BUNDLE_PACKAGES = 180
+MAX_BUNDLE_TOTAL = 512 * 1024 * 1024
 MEMBERS = {"model.MMD", "texture.TIM", "texture.png", "texture.png.json", "skeleton.json", "animations.json"}
 
 
@@ -150,9 +154,8 @@ def _provenance(row):
                                          "content_hash", "decoder", "decoder_version", "mapping_evidence", "confidence")}
 
 
-def export_package(destination, source, model=None, texture=None, cancelled=lambda: False,
-                   progress=lambda value, text: None):
-    """Export a native package atomically without replacing an existing destination."""
+def _package_bytes(source, model, texture, cancelled, progress):
+    """The finished .dw1digimon ZIP for one character, built in memory."""
     _source_check(source)
     model = source.model if model is None else model
     texture = source.texture if texture is None else texture
@@ -185,7 +188,19 @@ def export_package(destination, source, model=None, texture=None, cancelled=lamb
                 "files": [{"path": name, "size": len(data), "sha256": digest(data)} for name, data in payloads.items()],
                 "limits": "Same resource ID, executable skeleton, native model layout, texture size/VRAM layout. "
                           "Edit native MMD/TIM, or palette-preserving texture.png. No glTF conversion."}
-    destination = Path(destination).resolve().with_suffix(SUFFIX)
+    result = io.BytesIO()
+    with zipfile.ZipFile(result, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for done, (name, data) in enumerate(payloads.items()):
+            check_cancel(cancelled)
+            progress(20 + done * 10, f"Exporting {name}")
+            archive.writestr(name, data)
+        archive.writestr('manifest.json', _json(manifest))
+    return result.getvalue()
+
+
+def _publish(destination, suffix, data, cancelled):
+    """Write a new export atomically; never replace an existing file or write inside the repository."""
+    destination = Path(destination).resolve().with_suffix(suffix)
     repository = Path(__file__).resolve().parents[2]
     if destination.is_relative_to(repository):
         raise DigimonImportError("Packages contain game data; choose a destination outside the source repository.")
@@ -194,18 +209,160 @@ def export_package(destination, source, model=None, texture=None, cancelled=lamb
     handle, temporary = tempfile.mkstemp(dir=destination.parent, prefix='.digimon.', suffix='.partial')
     os.close(handle)
     try:
-        with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as archive:
-            for done, (name, data) in enumerate(payloads.items()):
-                check_cancel(cancelled)
-                progress(20 + done * 10, f"Exporting {name}")
-                archive.writestr(name, data)
-            archive.writestr('manifest.json', _json(manifest))
+        Path(temporary).write_bytes(data)
         check_cancel(cancelled)
         os.link(temporary, destination)  # atomic publication, refuses overwrite even if another writer raced
     finally:
         Path(temporary).unlink(missing_ok=True)
+    return destination
+
+
+def export_package(destination, source, model=None, texture=None, cancelled=lambda: False,
+                   progress=lambda value, text: None):
+    """Export a native package atomically without replacing an existing destination."""
+    destination = _publish(destination, SUFFIX, _package_bytes(source, model, texture, cancelled, progress), cancelled)
     progress(100, "Digimon package exported")
     return destination
+
+
+def stage_characters(catalogue, stages):
+    """Verified character rows whose executable stage is one of `stages`, in resource-ID order."""
+    rows = [dict(row) for row in catalogue.resources() if row['detected_format'] == 'DW1 character resource entry']
+    executable = next((dict(row) for row in catalogue.resources() if rows and row['original_path'] == rows[0]['parent_path']
+                       and row['offset'] is None), None)
+    if executable is None:
+        return []
+    from .project import layout_from_catalogue
+    with layout_from_catalogue(catalogue).open() as reader:
+        table = parse_character_table(reader.read_extent(executable['extent'], executable['size']))
+    chosen = []
+    for row in rows:
+        resource_id = int(row['original_path'].split('/')[-2])
+        if resource_id < len(table) and table[resource_id].stage in stages:
+            chosen.append((resource_id, row))
+    return [row for _, row in sorted(chosen, key=lambda item: item[0])]
+
+
+def export_bundle(destination, catalogue, stages, overrides=None, cancelled=lambda: False,
+                  progress=lambda value, text: None):
+    """One .dw1digimons file holding a .dw1digimon package for every supported character of the given stages.
+
+    Characters whose model or texture this importer cannot round-trip are listed in the manifest as skipped.
+    Imported overrides, when given, are exported instead of the disc originals, as for single packages."""
+    rows = stage_characters(catalogue, stages)
+    if not rows:
+        raise DigimonImportError("No verified characters have the selected evolution stage.")
+    members, listed, skipped, meta = {}, [], [], catalogue.meta()
+    for done, row in enumerate(rows):
+        check_cancel(cancelled)
+        name = row['original_path'].split('/')[-1]
+        progress(5 + done * 90 // len(rows), f"Packaging {name} ({done + 1}/{len(rows)})")
+        try:
+            source = load_source(catalogue, row['id'], cancelled)
+            resource_id = source.character.resource_id
+            model = overrides.file(resource_id, 'MMD') if overrides else None
+            texture = overrides.file(resource_id, 'TIM') if overrides else None
+            data = _package_bytes(source, model, texture, cancelled, lambda value, text: None)
+        except Cancelled:
+            raise
+        except (DigimonImportError, DiscFormatError, ValidationError, StopIteration, KeyError) as exc:
+            skipped.append({"character": row['original_path'].split('#')[-1], "reason": str(exc) or type(exc).__name__})
+            continue
+        path = f"packages/{resource_id:03d}-{name}{SUFFIX}"
+        members[path] = data
+        listed.append({"path": path, "size": len(data), "sha256": digest(data), "resource_id": resource_id,
+                       "internal_name": source.character.internal_name, "display_name": source.character.display_name,
+                       "stage": source.character.stage})
+    if not members:
+        raise DigimonImportError("None of the selected characters can be packaged: " +
+                                 "; ".join(f"{item['character']}: {item['reason']}" for item in skipped[:3]))
+    manifest = {"format": BUNDLE_FORMAT, "version": VERSION,
+                "created": datetime.now(timezone.utc).isoformat(timespec='seconds'), "tool_version": __version__,
+                "source": {key: meta.get(key) for key in ("executable", "release", "source_sha256")},
+                "stages": list(stages), "packages": listed, "skipped": skipped}
+    result = io.BytesIO()
+    with zipfile.ZipFile(result, 'w', zipfile.ZIP_STORED) as archive:  # members are already compressed
+        for path, data in members.items():
+            archive.writestr(path, data)
+        archive.writestr('bundle.json', _json(manifest))
+    destination = _publish(destination, BUNDLE_SUFFIX, result.getvalue(), cancelled)
+    progress(100, "Digimon bundle exported")
+    return destination, len(listed), skipped
+
+
+def read_bundle(path, cancelled=lambda: False):
+    """The bundle manifest and its member packages (bytes), bounded and hash-listed; nothing is extracted."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)) or len(names) > MAX_BUNDLE_PACKAGES + 1 or 'bundle.json' not in names:
+                raise DigimonImportError("Bundle has duplicate members, too many members or no bundle.json.")
+            if sum(info.file_size for info in infos) > MAX_BUNDLE_TOTAL:
+                raise DigimonImportError("Digimon bundle exceeds the total size limit.")
+            files = {}
+            for info in infos:
+                check_cancel(cancelled)
+                if (info.file_size > (MAX_MANIFEST * 4 if info.filename == 'bundle.json' else MAX_TOTAL)
+                        or info.flag_bits & 1 or (info.external_attr >> 16) & 0xF000 == 0xA000
+                        or not (info.filename == 'bundle.json'
+                                or re.fullmatch(r'packages/\d{3}-[A-Za-z0-9_]+' + re.escape(SUFFIX), info.filename))):
+                    raise DigimonImportError(f"Unsupported or oversized bundle member: {info.filename}")
+                files[info.filename] = archive.read(info)
+        manifest = json.loads(files.pop('bundle.json'))
+    except (OSError, zipfile.BadZipFile, KeyError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
+        raise DigimonImportError(f"Cannot read Digimon bundle: {exc}") from exc
+    if (not isinstance(manifest, dict) or manifest.get('format') != BUNDLE_FORMAT
+            or type(manifest.get('version')) is not int or manifest['version'] != VERSION):
+        raise DigimonImportError("Unsupported Digimon bundle format or version.")
+    listed = manifest.get('packages')
+    if (not isinstance(listed, list) or not all(isinstance(item, dict) and isinstance(item.get('path'), str)
+                                                 and type(item.get('resource_id')) is int for item in listed)):
+        raise DigimonImportError("Malformed Digimon bundle package list.")
+    if sorted(item['path'] for item in listed) != sorted(files):
+        raise DigimonImportError("Bundle package list does not match its members.")
+    ids = [item['resource_id'] for item in listed]
+    if len(ids) != len(set(ids)):
+        raise DigimonImportError("Bundle lists the same character more than once.")
+    return manifest, {item['path']: (item['resource_id'], files[item['path']]) for item in listed}
+
+
+@dataclass(frozen=True)
+class BundleImport:
+    path: Path
+    manifest: dict
+    reports: tuple  # DigimonImport per member, resource-ID order
+
+    @property
+    def package(self):
+        return self.path.name
+
+    @property
+    def changed(self):
+        return tuple(report for report in self.reports if report.changed)
+
+
+def prepare_bundle_import(path, catalogue, cancelled=lambda: False, progress=lambda value, text: None):
+    """Validate every member package exactly as a single import; any failure rejects the whole bundle."""
+    manifest, members = read_bundle(path, cancelled)
+    identity = manifest.get('source') or {}
+    meta = catalogue.meta()
+    if any(identity.get(key) != meta.get(key) for key in ('executable', 'source_sha256')):
+        raise DigimonImportError("Bundle belongs to a different disc/release; use its original analysis project.")
+    rows = {int(row['original_path'].split('/')[-2]): row['id'] for row in catalogue.resources()
+            if row['detected_format'] == 'DW1 character resource entry'}
+    reports = []
+    for done, (member, (resource_id, data)) in enumerate(sorted(members.items(), key=lambda item: item[1][0])):
+        progress(5 + done * 90 // len(members), f"Validating {member.split('/')[-1]} ({done + 1}/{len(members)})")
+        if resource_id not in rows:
+            raise DigimonImportError(f"{member}: character {resource_id} is not in this catalogue.")
+        try:
+            source = load_source(catalogue, rows[resource_id], cancelled)
+            reports.append(prepare_import(io.BytesIO(data), source, cancelled, name=member.split('/')[-1]))
+        except DigimonImportError as exc:
+            raise DigimonImportError(f"{member}: {exc}") from exc
+    progress(100, "Digimon bundle validated")
+    return BundleImport(Path(path), manifest, tuple(reports))
 
 
 def read_package(path, cancelled=lambda: False):
@@ -300,7 +457,7 @@ def _png_texture(png, metadata, original, source, cancelled):
     return bytes(result), f"PNG mapped through palette {palette_index}; {approximated} texels approximated. All palettes preserved."
 
 
-def prepare_import(path, source, cancelled=lambda: False, progress=lambda value, text: None):
+def prepare_import(path, source, cancelled=lambda: False, progress=lambda value, text: None, name=None):
     _source_check(source)
     progress(5, "Reading Digimon package")
     manifest, files, edited = read_package(path, cancelled)
@@ -354,7 +511,7 @@ def prepare_import(path, source, cancelled=lambda: False, progress=lambda value,
     notes.append("IDs, skeleton, stats, evolution stage and gameplay parameters are retained from the executable.")
     check_cancel(cancelled)
     progress(100, "Digimon package validated")
-    return DigimonImport(source, Path(path).name, model, texture, tuple(sorted(edited)), tuple(notes))
+    return DigimonImport(source, name or Path(path).name, model, texture, tuple(sorted(edited)), tuple(notes))
 
 
 class DigimonOverrides:
@@ -397,33 +554,40 @@ class DigimonOverrides:
         return data
 
     def apply(self, report, cancelled=lambda: False, progress=lambda value, text: None):
-        if report.source.meta['source_sha256'] != self.source_sha256:
+        self.apply_many([report], cancelled, progress)
+        return report
+
+    def apply_many(self, reports, cancelled=lambda: False, progress=lambda value, text: None):
+        """Stage every changed asset, then commit all records with one index write (or none on failure)."""
+        if any(report.source.meta['source_sha256'] != self.source_sha256 for report in reports):
             raise DigimonImportError('Import source identity differs from this project.')
-        data = self._load(); files = {}; created = []
+        data = self._load(); created = []
         self.directory.mkdir(parents=True, exist_ok=True)
         try:
-            for kind, content, row in (('MMD', report.model, report.source.model_row),
-                                       ('TIM', report.texture, report.source.texture_row)):
-                check_cancel(cancelled)
-                if kind not in report.changed:
-                    continue
-                name = digest(content) + '.' + kind
-                target = self.directory / name
-                if target.exists():
-                    if target.is_symlink() or read_bounded(target, MAX_MEMBER) != content:
-                        raise DigimonImportError('An existing override blob is corrupt; nothing was applied.')
+            for done, report in enumerate(reports):
+                files = {}
+                for kind, content, row in (('MMD', report.model, report.source.model_row),
+                                           ('TIM', report.texture, report.source.texture_row)):
+                    check_cancel(cancelled)
+                    if kind not in report.changed:
+                        continue
+                    name = digest(content) + '.' + kind
+                    target = self.directory / name
+                    if target.exists():
+                        if target.is_symlink() or read_bounded(target, MAX_MEMBER) != content:
+                            raise DigimonImportError('An existing override blob is corrupt; nothing was applied.')
+                    else:
+                        _atomic_write(target, content); created.append(target)
+                    files[kind] = {'file': name, 'size': len(content), 'sha256': digest(content), 'source': _provenance(row)}
+                progress(5 + done * 90 // len(reports), f"Staging {report.source.character.internal_name}")
+                key = str(report.source.character.resource_id)
+                if files:
+                    data['characters'][key] = {'internal_name': report.source.character.internal_name,
+                                               'model_path': report.source.character.model_path, 'files': files,
+                                               'package': report.package, 'importer': IMPORT_VERSION,
+                                               'imported': datetime.now(timezone.utc).isoformat(), 'notes': report.notes}
                 else:
-                    _atomic_write(target, content); created.append(target)
-                files[kind] = {'file': name, 'size': len(content), 'sha256': digest(content), 'source': _provenance(row)}
-                progress(50, f"Staging {kind}")
-            key = str(report.source.character.resource_id)
-            if files:
-                data['characters'][key] = {'internal_name': report.source.character.internal_name,
-                                           'model_path': report.source.character.model_path, 'files': files,
-                                           'package': report.package, 'importer': IMPORT_VERSION,
-                                           'imported': datetime.now(timezone.utc).isoformat(), 'notes': report.notes}
-            else:
-                data['characters'].pop(key, None)
+                    data['characters'].pop(key, None)
             check_cancel(cancelled)
             self.directory.mkdir(parents=True, exist_ok=True)
             _atomic_write(self.index, _json(data))
@@ -432,7 +596,7 @@ class DigimonOverrides:
                 path.unlink(missing_ok=True)
             raise
         progress(100, 'Digimon import applied')
-        return report
+        return reports
 
     def remove(self, resource_id):
         data = self._load()
