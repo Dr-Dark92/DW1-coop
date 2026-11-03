@@ -1,5 +1,52 @@
 # Handover
 
+## Maps and zones milestone (2026-11-02, branch `maps-zones`)
+
+Worked in a separate worktree at `/home/drdark/dev/DW1-coop-maps` (branched from `873829a`) while another session verified the remaining MMD models on `agumon-preview-verification`. `maps-zones` was then merged into `agumon-preview-verification`.
+
+- `src/dw1_workbench/maps.py`: USA map table, area names, toilets, doors; TFS backgrounds; MAP scene data; background rendering and export. `project.py` catalogues maps on import when the disc has `MAP/` files. `gui.py` replaces the Maps and Zones placeholder with a browser.
+- `tests/test_maps.py`: synthetic map tests (see test count below).
+- Real data outside Git: extracted inputs in `/home/drdark/dev/DW1-coop-data/converter-input-maps/`, converter output and `compare_maps.py` in `/home/drdark/dev/DW1-coop-data/converter-run-maps/`, and a fresh project with maps at `/home/drdark/dev/DW1-coop-data/maps-validation/project`.
+- Result: all 241 file-backed maps and 512 backgrounds match the converter (see `docs/FORMATS.md#maps-and-zones`).
+
+First desktop check: the user could not find zones linked south of Green Gym. The warp list showed only Green Gym's one walk-through exit; its other routes are script-driven (step-script tile 51 on its east edge) or inbound from File City. Added: tree search, "linked from" inbound list, exit direction and walk-through vs table-only per warp, the floor grid decoded as the tile-trigger map (SydPatches evidence) with a colour legend, and a Relation map tab (`relation_view.py`, worker in `gui.py`). 64 tests pass.
+
+The user rechecked search, inbound links, and the relation map on the desktop and confirmed them correct. Next candidates are decoding map scripts (the missing transitions), sprite-object rendering, door models, and an overlay of spawns/exits/Digimon on the background (needs the camera projection).
+
+## All-model converter comparison (2026-11-02)
+
+All 178 USA MMDs were extracted from the catalogue (SHA-256 equal to catalogue hashes) into `/home/drdark/dev/DW1-coop-data/converter-input/CHDAT/MMD{0..5}/` and converted by the pinned `DW1ModelConverter` (`17d1a19`), which wrote 178 glTF files and skipped IDs 62/114 (no MMD). Scripts and results live outside Git in `/home/drdark/dev/DW1-coop-data/converter-run/`: `compare_all.py` (writes `results.json`), `overlap_check.py`, and `degenerate_check.py`.
+
+Result: 151 accepted models all match on skeleton, ordered corners (compared per converter material group), materials, initial pose, and world-space assembly (max 0.00014). 135 also match every centroid texel; the 180 differing samples in 16 models are all zero-area-UV faces (13 models) or animation texture-copy regions (3 models) in the converter's single-palette texture map, not workbench errors. 27 models are rejected: 26 for unsupported primitive types (`0x3e` ×17, `0x36` ×3, `0x2c` ×3, `0x2e`, `0x38`, `0x2d` flag 1) and `TANE` for 75 out-of-range normal indices. No parser bug was found, so `mmd.py` is unchanged. Full lists are in `docs/FORMATS.md` ("All-model comparison").
+
+Possible next steps: support translucent Gouraud textured primitives (`0x36`/`0x3e`, 20 models) with their own evidence and tests; GLB/glTF export with provenance; visual spot checks of a few more accepted models.
+
+## Converter comparison (2026-11-02, resumed)
+
+Step 1 of the resume plan is complete. The pinned `DW1ModelConverter` (`17d1a19`) was built and run against `converter-input/`.
+
+Build note: configuration had picked up the system `zlib-ng` header (`1.3.1.zlib-ng`) for libpng's generated `pnglibconf.h` while compiling against the bundled zlib `1.3.2`, which failed with `The include path of <zlib.h> is incorrect`. Fixed by deleting the generated `pnglibconf.*` files and reconfiguring with `-DZLIB_INCLUDE_DIR=/tmp/DW1ModelConverter-build/_deps/zlib-src -DZLIB_LIBRARY_RELEASE=/tmp/DW1ModelConverter-build/_deps/zlib-build/libz.a`. No upstream source was changed.
+
+Output: `/home/drdark/dev/DW1-coop-data/converter-run/output/digimon/AGUM.gltf`, SHA-256 `a26aaaf20d0ac098f94b5a0983e73080dff9189a3b84004b5473820374a33099`. Comparison script (no proprietary data): `/home/drdark/dev/DW1-coop-data/converter-run/compare_agum.py`.
+
+Result — all checks passed:
+
+- 22 nodes; every parent and mesh/object assignment equal.
+- 16 objects, 690 triangles; every de-indexed corner equal in order (position, normal, UV as `u/256+0.0001`, `v/128+0.0001`) within 1e-4. This confirms winding and quad split independently of the earlier source reading.
+- One material in both; opaque, single-sided, lit — consistent with all parsed faces.
+- Initial pose from animation record 0 equal on every node (scale, translation, and rotation compared as quaternions).
+- World-space vertices from the glTF TRS chain vs. the workbench renderer's `_local_matrix` chain (before its Y flip): max error 0.000032.
+- Texel colours at all 690 face centroids, under each face's own CLUT (palette 0: 523 faces, 1: 21, 2: 146), equal at 5-bit source precision including transparency. The converter expands colour as `c<<3` (max 248) while the workbench uses `c*255/31`; this is a convention difference, not a palette error.
+
+Desktop launch (Wayland) then exposed two GUI defects, both fixed with regression tests (33 passed):
+
+- Segfault: worker `progress`/`failed`/`cancelled`/`succeeded` signals were connected to lambdas, which PySide6 runs in the emitting worker thread, so progress dialogs and labels were repainted off the GUI thread. They now connect to bound `@Slot` methods. Offscreen tests had masked this.
+- Missing texture: 30 of AGUM's 690 triangles (objects 1, 3, 10) have zero-area UVs (one texel, or one texel row/column). The renderer dropped them because the UV-to-screen transform is singular; they are now drawn from their texels (corners spread inside each texel, centroid-colour fallback). Antialiased clipping also left background cracks between faces; textured faces are now drawn aliased. Interior background pixels in a back view fell from 261 to 1.
+
+Resume step 2 (visual inspection on a real display) is done: after both fixes the user inspected Agumon in the desktop GUI and confirmed it looks correct and fully textured.
+
+Not covered: full per-texel palette coverage (the converter's CLUT map also block-fills unassigned texels, so it is not an exact reference there). Model export remains disabled. `README.md`, `docs/FORMATS.md`, and `docs/PROGRESS.md` now describe the settled boundary (Agumon only). Next: decide on GLB/glTF export with provenance as a separate step, and/or extend the converter comparison to the other 177 MMDs.
+
 ## Paused static Agumon milestone (2026-11-02)
 
 The user requested a pause after the bounded parser, background GUI loader, and experimental renderer were implemented, but before independent converter comparison and final documentation were completed. The work is intentionally committed as a reviewable work in progress. It must not yet be described as a fully verified textured-model milestone, and model export remains disabled.

@@ -15,9 +15,11 @@ This is an asset-analysis foundation. It is **not** co-op gameplay, a native por
 - Standalone standard PlayStation TIM preview and PNG + JSON provenance export.
 - Confirmed USA `CHDAT/ALLTIM.TIM` fixed-slot inventory: 180 nine-sector TIM resources with offsets and hashes.
 - Verified USA resource-table associations for 180 IDs: internal/display names, same-index textures, and 178 structurally bounded MMD containers.
-- Character-resource browser with associated decoded texture preview and PNG + provenance export; model geometry and animation remain unsupported.
+- Character-resource browser with associated decoded texture preview and PNG + provenance export.
+- Bounded static MMD/TMD geometry parsing (textured Gouraud triangles and quads), USA skeleton tables, and the initial pose, shown in an orbitable textured preview. 151 of the 178 USA models are accepted and match an independent converter; the other 27 use unsupported primitive types and are rejected. Agumon was also checked visually on a desktop display. Model export and animation playback are not implemented.
+- Maps and Zones browser: the USA map table (244 named maps grouped into 65 area-name zones), TFS background preview with every palette and PNG + provenance export, and decoded scene data — camera, lights, spawn points, outbound and inbound warps (followable between maps, with exit direction), Digimon placements with stats, sprite objects, and the 100×100 tile-trigger grid — plus a zone relation map laid out by exit direction. All 241 file-backed maps match an independent converter; script-driven transitions are not decoded.
 - Thread-safe import cancellation and streamed hashing/file export; partial exports are removed.
-- Honest unsupported states for model geometry, animations, general archives, maps, and scripts.
+- Honest unsupported states for model export, animations, general archives, map scripts, and 3D map geometry.
 
 See [docs/FORMATS.md](docs/FORMATS.md) for exact support boundaries and evidence.
 
@@ -67,7 +69,7 @@ The implementation was scoped after inspecting the public descriptions and sourc
 
 - [jype0/dw_decomp](https://github.com/jype0/dw_decomp) — USA disc extraction through `dumpsxiso`, executable decompilation workflow; MIT licensed.
 - [SydMontague/DW1-SydPatches](https://github.com/SydMontague/DW1-SydPatches) — USA-version extraction/rebuild and reverse-engineering context.
-- [Operation-Decoded/DW1ModelConverter](https://github.com/Operation-Decoded/DW1ModelConverter) — MIT-licensed character-table/MMD association and container research context.
+- [Operation-Decoded/DW1ModelConverter](https://github.com/Operation-Decoded/DW1ModelConverter) — MIT-licensed character-table/MMD association and container research context; its glTF output (revision `17d1a19`) was the independent reference for verifying the static Agumon model.
 - [psx-spx CD-ROM format](https://psx-spx.consoledev.net/cdromformat/) and [file formats](https://psx-spx.consoledev.net/cdromfileformats/) — sector, ISO 9660, PS-X EXE, and TIM structures.
 
 No source code from those projects is copied into this repository. Their project descriptions do not establish complete DW1 asset decoding, and this workbench does not claim it.

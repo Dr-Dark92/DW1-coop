@@ -113,6 +113,20 @@ class StaticModelView(QWidget):
         ty = (y0 * (u1 * v2 - u2 * v1) + y1 * (u2 * v0 - u0 * v2) + y2 * (u0 * v1 - u1 * v0)) / determinant
         return QTransform(a, b, c, d, tx, ty)
 
+    @staticmethod
+    def _sampling_uvs(face):
+        """UVs used to map the texture; zero-area UV triangles stay inside their texels.
+
+        PS1 faces may point all corners at one texel or along one texel line. The GPU then
+        fills them with that colour or strip, but the UV-to-screen transform is singular, so
+        spread the corners within each texel instead of dropping the face.
+        """
+        uvs = tuple((uv.u, uv.v) for uv in face.uvs)
+        (u0, v0), (u1, v1), (u2, v2) = uvs
+        if abs(u0 * (v1 - v2) + u1 * (v2 - v0) + u2 * (v0 - v1)) >= 1e-6:
+            return uvs
+        return tuple((u + du, v + dv) for (u, v), (du, dv) in zip(uvs, ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75))))
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -145,13 +159,23 @@ class StaticModelView(QWidget):
             path = QPainterPath(points[0]); path.lineTo(points[1]); path.lineTo(points[2]); path.closeSubpath()
             palette_index = face.material.clut_y - self.clut_y_base
             if self.textured and 0 <= palette_index < len(self.palettes):
-                transform = self._texture_transform(tuple((uv.u, uv.v) for uv in face.uvs), points)
+                image = self.palettes[palette_index]
+                uvs = self._sampling_uvs(face)
+                transform = self._texture_transform(uvs, points)
+                # Antialiased clip edges are partly transparent and leave background cracks
+                # between adjacent faces, so textured faces are drawn aliased.
+                painter.save(); painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
                 if transform is not None:
-                    painter.save(); painter.setTransform(transform)
-                    source_path = QPainterPath(QPointF(face.uvs[0].u, face.uvs[0].v))
-                    for uv in face.uvs[1:]: source_path.lineTo(uv.u, uv.v)
+                    painter.setTransform(transform)
+                    source_path = QPainterPath(QPointF(*uvs[0]))
+                    for uv in uvs[1:]: source_path.lineTo(*uv)
                     source_path.closeSubpath(); painter.setClipPath(source_path)
-                    painter.drawImage(QPointF(0, 0), self.palettes[palette_index]); painter.restore()
+                    painter.drawImage(QPointF(0, 0), image)
+                else:
+                    u = min(image.width() - 1, int(sum(uv[0] for uv in uvs) / 3))
+                    v = min(image.height() - 1, int(sum(uv[1] for uv in uvs) / 3))
+                    painter.fillPath(path, image.pixelColor(u, v))
+                painter.restore()
             else:
                 hue = (object_index * 37) % 360
                 painter.fillPath(path, QBrush(QColor.fromHsv(hue, 90, 190)))
