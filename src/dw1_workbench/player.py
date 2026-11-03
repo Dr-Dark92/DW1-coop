@@ -19,7 +19,7 @@ from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QLabel,
                                QLineEdit, QMainWindow, QMessageBox, QToolBar, QVBoxLayout, QWidget)
 
-from .inspection import CATEGORIES, InspectionError, InspectionStore
+from .inspection import CATEGORIES, InspectionError, InspectionStore, SpawnLog
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
                        LibretroError)
 from .live import LiveNpc, LiveState, grid_differences, read_live_state
@@ -372,6 +372,12 @@ class LiveMapView(QWidget):
         self._grid_bytes = None
         self.tamer = self.partner = None
         self.npcs: list[tuple[LiveNpc, str]] = []
+        self.items: list[tuple[tuple[int, int], str]] = []
+        self.chests: list[tuple[tuple[int, int], str, bool]] = []
+
+    def show_items(self, items: list[tuple[tuple[int, int], str]], chests: list[tuple[tuple[int, int], str, bool]]):
+        self.items, self.chests = items, chests
+        self.update()
 
     def show_live(self, live: LiveState, npc_names: list[str] | None = None):
         if live.grid != self._grid_bytes:
@@ -404,6 +410,18 @@ class LiveMapView(QWidget):
                        Qt.PenStyle.SolidLine if npc.reacting else Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.drawRect(QRectF(left + x0 * cell, top + y0 * cell, (x1 - x0 + 1) * cell, (y1 - y0 + 1) * cell))
+        half = max(2.5, cell)
+        for tile, name, taken in self.chests:
+            x, y = left + (tile[0] + 0.5) * cell, top + (tile[1] + 0.5) * cell
+            painter.setPen(QPen(QColor("black"), 1)); painter.setBrush(QColor("#7d7d7d" if taken else "#d4a017"))
+            painter.drawRect(QRectF(x - half * 1.4, y - half, half * 2.8, half * 2))
+            painter.setPen(QColor("#f3e2a9")); painter.drawText(QPointF(x + half * 1.6, y + 4), name)
+        for tile, name in self.items:
+            x, y = left + (tile[0] + 0.5) * cell, top + (tile[1] + 0.5) * cell
+            painter.setPen(QPen(QColor("white"), 1)); painter.setBrush(QColor("#2fbf71"))
+            painter.drawPolygon([QPointF(x, y - half * 1.5), QPointF(x + half * 1.5, y), QPointF(x, y + half * 1.5),
+                                 QPointF(x - half * 1.5, y)])
+            painter.setPen(QColor("#bff5d6")); painter.drawText(QPointF(x + half * 1.7, y + 4), name)
         markers = [(npc.tile, NPC_COLOURS[follow_kind(npc.follow_mode)], name + (" !" if npc.reacting else ""))
                    for npc, name in self.npcs]
         markers += [(self.partner, QColor("cyan"), None), (self.tamer, QColor("white"), None)]
@@ -442,7 +460,8 @@ class PlayWindow(QMainWindow):
     closed = Signal()
 
     def __init__(self, config: PlayConfig, title: str = "Digimon World", map_names: dict[int, str] | None = None,
-                 decoded_grid=None, character_names: dict[int, str] | None = None, parent=None):
+                 decoded_grid=None, character_names: dict[int, str] | None = None,
+                 item_names: list[str] | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"{title} — DW1-coop player")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -457,6 +476,8 @@ class PlayWindow(QMainWindow):
         self.status = QLabel("Starting the core…"); self.statusBar().addWidget(self.status, 1)
         self.map_names = map_names or {}
         self.character_names = character_names or {}
+        self.item_names = item_names or []
+        self.spawns = SpawnLog(config.store_dir / "item_spawns.json")
         self._decoded_grid = decoded_grid or (lambda index: None)
         self._decoded_cache: dict[int, bytes | None] = {}
         self.inspections = InspectionStore(config.store_dir / "inspections")
@@ -567,6 +588,19 @@ class PlayWindow(QMainWindow):
     def character_label(self, character_id: int) -> str:
         return self.character_names.get(character_id, f"ID {character_id}")
 
+    def item_label(self, item_id: int) -> str:
+        name = self.item_names[item_id] if 0 <= item_id < len(self.item_names) else ""
+        return name or f"item {item_id}"
+
+    def item_summary(self, live: LiveState) -> str:
+        if live.tamer is None:
+            return ""
+        lines = [f"• {self.item_label(item.item_id)} on the ground at {item.tile[0]},{item.tile[1]}"
+                 + (" — in reach (walking within one tile picks it up)" if item.in_reach(live.tamer_tile) else "") for item in live.items]
+        lines += [f"• chest with {self.item_label(chest.item_id)} at {chest.tile[0]},{chest.tile[1]}"
+                  + (" (taken)" if chest.taken else "") for chest in live.chests]
+        return "\n".join(lines)
+
     def npc_description(self, npc: LiveNpc) -> str:
         kind = follow_kind(npc.follow_mode)
         parts = [f"{self.character_label(npc.character_id)} at {npc.tile[0]},{npc.tile[1]}"]
@@ -620,10 +654,22 @@ class PlayWindow(QMainWindow):
     def _live_changed(self, live: LiveState):
         self._live = live
         threat = self.threat_summary(live)
-        self.live_label.setText(self.live_summary(live) + (f" · {threat}" if threat else ""))
+        in_game = live.tamer is not None  # item slots hold leftovers before the game sets them up
+        reachable = [self.item_label(item.item_id) for item in live.items if in_game and item.in_reach(live.tamer_tile)]
+        extra = [part for part in (threat, f"{', '.join(reachable)} in reach" if reachable else "") if part]
+        self.live_label.setText(" · ".join([self.live_summary(live), *extra]))
+        if in_game:
+            self.live_map.show_items([(item.tile, self.item_label(item.item_id)) for item in live.items],
+                                     [(chest.tile, self.item_label(chest.item_id), chest.taken) for chest in live.chests])
+            new = self.spawns.record(live.map_index, self.map_label(live.map_index),
+                                     [(item.item_id, self.item_label(item.item_id), item.tile) for item in live.items])
+            for item_name, tile in new:
+                self._message(f"New item spawn seen: {item_name} at {tile[0]},{tile[1]} on {self.map_label(live.map_index)}")
         self.live_map.show_live(live, [self.character_label(npc.character_id) for npc in live.npcs])
+        items = self.item_summary(live)
         self.npc_list.setText("Digimon on this map:\n" + ("\n".join(f"• {self.npc_description(npc)}" for npc in live.npcs)
-                                                         or "none"))
+                                                         or "none")
+                              + (f"\nItems and chests:\n{items}" if items else ""))
 
     @Slot(object)
     def _inspection_captured(self, capture: dict):
@@ -631,6 +677,7 @@ class PlayWindow(QMainWindow):
         was_paused = self.worker.paused
         self.worker.paused = True
         summary = (f"{self.live_summary(live)}\n" + "\n".join(self.npc_description(npc) for npc in live.npcs)
+                   + (f"\n{self.item_summary(live)}" if self.item_summary(live) else "")
                    if live is not None
                    else "Position unknown (live map is off for this disc)")
         dialog = InspectDialog(summary, self.note.text(), self)
@@ -644,6 +691,10 @@ class PlayWindow(QMainWindow):
                     partner_tile=live.partner_tile if live else None,
                     npcs=[(npc.character_id, self.character_label(npc.character_id), npc.tile,
                            self.npc_description(npc)) for npc in live.npcs] if live else [],
+                    items=[(item.item_id, self.item_label(item.item_id), item.tile, "ground")
+                           for item in live.items] + [(chest.item_id, self.item_label(chest.item_id), chest.tile,
+                                                       "chest, taken" if chest.taken else "chest")
+                                                      for chest in live.chests] if live and live.tamer else [],
                     grid_differences=self.grid_difference_count(live) if live else None,
                     category=dialog.category.currentText(), note=dialog.note.text(), core=capture["core"],
                     core_version=capture["core_version"], screenshot=capture["screenshot"], state=capture["state"],

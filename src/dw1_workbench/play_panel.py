@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFormLayout, QHBoxLayout,
                                QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .inspection import InspectionStore
+from .inspection import InspectionStore, SpawnLog
 from .libretro import LibretroError, core_info
 from .maps import trigger_description
 from .player import KEY_HELP, PlayConfig, PlayWindow
@@ -88,16 +88,19 @@ class PlayPanel(QWidget):
     inspections_changed = Signal()
 
     def __init__(self, meta: dict, source_ok: bool, source_message: str, map_names: dict[int, str] | None = None,
-                 decoded_grid=None, character_names: dict[int, str] | None = None, parent=None):
+                 decoded_grid=None, character_names: dict[int, str] | None = None,
+                 item_names: list[str] | None = None, parent=None):
         super().__init__(parent)
         self.meta, self.source_ok = meta, source_ok
         self.map_names, self.decoded_grid = map_names or {}, decoded_grid
         self.character_names = character_names or {}
+        self.item_names = item_names or []
         # Live RAM addresses come from the USA executable's decompilation; other releases differ.
         self.live_ram = meta.get("executable") == "SLUS_010.32"
         self.disc = Path(meta.get("source_path", ""))
         self.store = QuickSaveStore(saves_root() / disc_key(meta))
         self.inspections = InspectionStore(self.store.directory / "inspections")
+        self.spawns = SpawnLog(self.store.directory / "item_spawns.json")
         self.settings = QSettings("DW1-coop", "workbench")
         self.window: PlayWindow | None = None
 
@@ -296,7 +299,7 @@ class PlayPanel(QWidget):
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
         self._write_log(f"Launching {config.disc_path.name}{start}")
         window = PlayWindow(config, self.meta.get("release", "Digimon World"), self.map_names, self.decoded_grid,
-                            self.character_names)
+                            self.character_names, self.item_names)
         window.log.connect(self._write_log)
         window.slots_changed.connect(self.refresh_slots)
         window.inspections_changed.connect(self.refresh_inspections)

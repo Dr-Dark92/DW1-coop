@@ -231,6 +231,8 @@ Checked on 2026-11-03 with Beetle PSX and the user's two quick saves: map indice
 
 Checked in the running game on 2026-11-03: re-entering `MAYO00` spawned two ModokiBetamon (ID 83, mode 12, range 1000, autotalk on, HP 300/300). The nearer one's box was rows 16–36; it began reacting the frame the Tamer reached row 17, ran to where it first saw him, then went back to its post and stopped reacting. Touching it started its script ("This is my territory!"). The other, whose box the Tamer never entered, did not react.
 
+Items (`src/main/item.c`, `src/main/map_object.c`, `src/main/tamer.c`): names come from `ITEM_PARA` (`0x801269DC`, 128 × 32-byte `Item`, USA layout with `name[20]` first). Ground items are not in the MAP file: map scripts place them with `SCRIPT_OP_SPAWN_ITEM` → `spawnItem(item, tileX, tileY)` into `DROPPED_ITEMS` (`0x8013D4E0`, 11 × 16 bytes: sprite location, `i32 type` with `0xFF` empty, `i16 tileX`, `i16 tileY`), which battle drops share; while walking, `checkItemPickup` offers the item when the Tamer's tile is within one tile of it on both axes. Chests come from `SCRIPT_OP_SPAWN_CHEST` into `CHEST_ARRAY` (`0x80150F00`, 8 × 56 bytes: trigger u16 at +48, item +50, isTaken +51, tileX +52, tileY +53). Checked in the running game: item 44 is `Digimushrm`; the user's Native Forest `MAYO01_2` inspection had one at tile 61,54 (and `MAYO00` one at 55,71), and stepping to 60,54 opened the game's pick-up box. Because the scripts are not decoded, the player keeps a per-disc log of every ground item it sees (`item_spawns.json`: map, item, tile, visits).
+
 Scripts can change the live grid (the game has `setImpassableRect`); the player reports any such difference instead of assuming the decoded grid.
 
 ## Resource association

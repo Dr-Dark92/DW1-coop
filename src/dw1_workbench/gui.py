@@ -28,6 +28,7 @@ from .maps import (EXIT_COLOURS, FOLLOW_COLOURS, MAX_MAP_FILE, MAX_TFS_FILE, TRI
 from .relation_view import RelationView
 from .animation import parse_animations
 from .animation_view import ModelAnimationPanel, ModelLoad
+from .items import parse_item_names
 from .play_panel import PlayPanel
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .project import import_project, layout_from_catalogue, source_state
@@ -287,7 +288,7 @@ class Workspace(QWidget):
         self.tabs.addTab(self.maps_page, "Maps and Zones")
         self.tabs.addTab(self._executable(), "Executable Analysis")
         self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid,
-                                    self._character_names())
+                                    self._character_names(), self._item_names())
         self.play_panel.show_map_requested.connect(self.show_map)
         self.tabs.addTab(self.play_panel, "Play")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
@@ -774,7 +775,9 @@ class Workspace(QWidget):
             self.map_palette.addItems([f"Palette {index}" for index in range(len(tfs.palettes))])
             self.map_palette.blockSignals(False)
             self._render_map_background()
-            self.map_floor.setPixmap(QPixmap.fromImage(ImageQt(floor_grid_with_digimon(scene))))
+            seen = self.play_panel.spawns.spawns(entry.index) if hasattr(self, "play_panel") else []
+            self.map_floor.setPixmap(QPixmap.fromImage(ImageQt(floor_grid_with_digimon(
+                scene, items=[spawn.tile for spawn in seen]))))
             entries = self._map_entries
             for warp_exit in map_exits(scene):
                 target = entries[warp_exit.warp.map_index]
@@ -815,6 +818,7 @@ class Workspace(QWidget):
                   f"spd {d.stats['speed']}, brn {d.stats['brains']}, bits {d.bits}, script {d.script_id}, "
                   f"{len(d.waypoints)} waypoint(s)" for d in scene.digimon),
                 *self._inspection_lines(entry.index),
+                *self._spawn_lines(entry.index),
                 f"parser: {row['decoder']} {row['decoder_version']}; MAP {scene_row['decoder_version']}; "
                 f"TFS {tfs_row['decoder_version']}",
                 f"evidence: {row['mapping_evidence']}",
@@ -833,6 +837,15 @@ class Workspace(QWidget):
         return [f"inspections while playing ({len(records)}; observations, not decoded data):",
                 *(f"  {record.created} {record.category} at tile {record.tile}: {record.note or '(no note)'}"
                   for record in records)]
+
+    def _spawn_lines(self, index):
+        panel = getattr(self, "play_panel", None)
+        spawns = panel.spawns.spawns(index) if panel is not None else []
+        if not spawns:
+            return ["items seen on the ground while playing: none yet (map scripts place them; scripts are not decoded)"]
+        return [f"items seen on the ground while playing ({len(spawns)}; placed by the map script):",
+                *(f"  {spawn.item_name} at tile {spawn.tile[0]},{spawn.tile[1]} — seen on {spawn.times_seen} visit(s), "
+                  f"last {spawn.last_seen}" for spawn in spawns)]
 
     def _render_map_background(self, *_):
         if self._map_scene is None or self._map_tfs is None or self.map_palette.currentIndex() < 0:
@@ -863,6 +876,16 @@ class Workspace(QWidget):
         if self._select_map(index):
             self.tabs.setCurrentWidget(self.maps_page); self.maps_tabs.setCurrentIndex(0)
             self.map_preview_tabs.setCurrentIndex(2)
+
+    def _item_names(self) -> list[str]:
+        executable = next((row for row in self.rows if row["offset"] is None
+                           and row["original_path"].endswith(self.catalogue.meta().get("executable", "SLUS_010.32"))), None)
+        if executable is None or not source_state(self.catalogue)[0]:
+            return []
+        try:
+            return parse_item_names(self._read_row(executable, PREVIEW_LIMIT))
+        except Exception:
+            return []  # other releases: item IDs are shown as numbers
 
     def _character_names(self) -> dict[int, str]:
         names = {}

@@ -94,6 +94,15 @@ EXPORT void retro_run(void) {
                 system_ram[0x13CB50 + 188] = 12; system_ram[0x13CB50 + 192] = 2;
             }
         }
+        {   /* DROPPED_ITEMS: slot 0 a Digimushrm (44) at tile (61, 54), the rest empty (type 0xff) */
+            int32_t empty = 0xff, mushroom = 44; int16_t tile[2] = {61, 54};
+            for (int slot = 0; slot < 11; slot++) memcpy(system_ram + 0x13D4E0 + slot * 16 + 8, &empty, 4);
+            memcpy(system_ram + 0x13D4E0 + 8, &mushroom, 4); memcpy(system_ram + 0x13D4E0 + 12, tile, 4);
+            /* CHEST_ARRAY: slot 0 holds item 1 at tile (40, 40), trigger 300, not taken; the rest empty */
+            for (int slot = 0; slot < 8; slot++) system_ram[0x150F00 + slot * 56 + 50] = 0xff;
+            {   uint16_t trigger = 300; uint8_t chest[4] = {1, 0, 40, 40};
+                memcpy(system_ram + 0x150F00 + 48, &trigger, 2); memcpy(system_ram + 0x150F00 + 50, chest, 4); }
+        }
     }
     save_ram[1] = (uint8_t)buttons_seen;
     video(counter % 2 ? NULL : pixels, W, H, W * 4); /* odd frames are dupes */

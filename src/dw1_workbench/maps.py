@@ -553,8 +553,9 @@ def trigger_grid_image(grid: bytes) -> Image.Image:
 FOLLOW_COLOURS = {"chases you": (232, 65, 60), "watches you": (242, 201, 76), "ignores you": (255, 154, 31)}
 
 
-def floor_grid_with_digimon(scene: MapScene, scale: int = 4) -> Image.Image:
-    """The floor grid enlarged, with each Digimon placement's post and, for chasers and watchers, its box."""
+def floor_grid_with_digimon(scene: MapScene, scale: int = 4, items=()) -> Image.Image:
+    """The floor grid enlarged, with each Digimon placement's post and, for chasers and watchers, its box,
+    and green diamonds on `items` (tiles where items were seen on the ground)."""
     image = floor_grid_image(scene).resize((FLOOR_GRID * scale, FLOOR_GRID * scale), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(image)
     for digimon in scene.digimon:
@@ -566,6 +567,10 @@ def floor_grid_with_digimon(scene: MapScene, scale: int = 4) -> Image.Image:
         centre = ((x + 0.5) * scale, (y + 0.5) * scale)
         draw.ellipse((centre[0] - scale, centre[1] - scale, centre[0] + scale, centre[1] + scale),
                      fill=colour, outline=(255, 255, 255))
+    for x, y in items:
+        cx, cy = (x + 0.5) * scale, (y + 0.5) * scale
+        draw.polygon(((cx, cy - scale * 1.5), (cx + scale * 1.5, cy), (cx, cy + scale * 1.5), (cx - scale * 1.5, cy)),
+                     fill=(47, 191, 113), outline=(255, 255, 255))
     return image
 
 

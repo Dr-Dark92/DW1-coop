@@ -13,6 +13,8 @@ NPCs (user report: not shown on the live map): `ENTITY_TABLE` slots 2–9 with `
 
 Hostile Digimon (user request "aggressive spawned digimons / enemies"): `maps.follow_kind`/`follow_description`/`tracking_box`/`floor_grid_with_digimon`; `LiveNpc` gains follow mode, tracking range, post, reacting, autotalk, script ID and HP from `NPC_ENTITIES` and `MAP_DIGIMON_TABLE`; live map colours and boxes, NPC descriptions, threat in the status bar, behaviour stored with inspections. Verified with a scripted walk (scratch harness, not in Git) from the user's Native Forest inspection: spawned ModokiBetamon reacted exactly on entering its decoded box and started its battle script on contact. Not yet: battle state (whether a battle is running) and wandering/waypoint paths. 114 tests pass.
 
+Items (user inspection note "item spawn, digi-mushroom" in `MAYO01_2` at 59,54): `items.py` (ITEM_PARA names, `DROPPED_ITEMS`, `CHEST_ARRAY`), `LiveState.items/chests`, live-map diamonds and chests, reach hint, `Inspection.items`, `SpawnLog` (`<saves>/item_spawns.json`, counted per visit), Maps and Zones lines and floor-grid diamonds. Real-game check: the Digimushrm was at 61,54; stepping to 60,54 opened the pick-up box. Item spawn rules (timers, random choice) live in map scripts and are not decoded. 117 tests pass.
+
 Still to do for P0: the user's own playthrough — two connected zones, a gateway and a toilet inspected with F9 — then record it here and in the roadmap. Later: compare inspections where the live grid differs (script-changed tiles), and use spawn/arrival positions after warps.
 
 ## Python player (2026-11-03, branch `python-player`)

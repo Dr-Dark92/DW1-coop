@@ -85,6 +85,8 @@ class LiveState:
     partner: EntityPosition | None
     grid: bytes  # MAP_COLLISION_DATA as the game holds it now (scripts may have changed it)
     npcs: tuple[LiveNpc, ...] = ()
+    items: tuple = ()  # items.GroundItem
+    chests: tuple = ()  # items.Chest
 
     def trigger_at(self, tile: tuple[int, int] | None) -> int | None:
         if tile is None or not (0 <= tile[0] < GRID and 0 <= tile[1] < GRID):
@@ -136,9 +138,10 @@ def _npcs(read) -> tuple[LiveNpc, ...]:
 
 def read_live_state(read) -> LiveState:
     """`read(offset, size)` returns bytes of main RAM (2 MiB, offset from 0x80000000)."""
+    from .items import read_chests, read_ground_items  # items builds on this module's address helpers
     return LiveState(read(ram_offset(CURRENT_SCREEN), 1)[0], _position(read, TAMER_ENTITY),
                      _position(read, PARTNER_ENTITY), read(ram_offset(MAP_COLLISION_DATA), GRID * GRID),
-                     _npcs(read))
+                     _npcs(read), read_ground_items(read), read_chests(read))
 
 
 def grid_differences(live: bytes, decoded: bytes) -> list[tuple[int, int, int, int]]:

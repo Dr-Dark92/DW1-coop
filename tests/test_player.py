@@ -117,13 +117,21 @@ def test_live_map_and_inspection(application, fake_core, tmp_path, monkeypatch):
     monkeypatch.setattr(player.InspectDialog, "exec", lambda self: (self.note.setText("exit tile"),
                                                                      QDialog.DialogCode.Accepted)[1])
     window = PlayWindow(config(fake_core, tmp_path, live_ram=True), map_names={7: "Test zone · TEST00"},
-                        decoded_grid=lambda index: bytes(10000), character_names={43: "Yuramon"})
+                        decoded_grid=lambda index: bytes(10000), character_names={43: "Yuramon"},
+                        item_names=["sm.recovery", "med.recovery"] + [""] * 42 + ["Digimushrm"])
     window.start()
     wait(application, lambda: window._live is not None)
     assert window.live_label.text().startswith("Test zone · TEST00 (map 7) · tile ")
     assert "1 tiles differ from the decoded MAP" in window.live_label.text()  # the fake core's exit tile
     assert window.npc_list.text() == ("Digimon on this map:\n• Yuramon at 48,73, chases you within ±10 tiles of its post, "
-                                      "starts its script (a battle for enemies) on contact, HP 300/300, REACTING NOW")
+                                      "starts its script (a battle for enemies) on contact, HP 300/300, REACTING NOW\n"
+                                      "Items and chests:\n• Digimushrm on the ground at 61,54\n"
+                                      "• chest with med.recovery at 40,40")
+    assert window.live_map.items == [((61, 54), "Digimushrm")]
+    assert window.live_map.chests == [((40, 40), "med.recovery", False)]
+    spawns = window.spawns.spawns()
+    assert [(spawn.map_index, spawn.item_name, spawn.tile, spawn.times_seen) for spawn in spawns] == \
+        [(7, "Digimushrm", (61, 54), 1)]
     assert "⚠ Yuramon is after you" in window.live_label.text()
     npc, name = window.live_map.npcs[0]
     assert (npc.follow_mode, npc.tracking_range, npc.post, npc.autotalk, npc.script_id, name) == \
@@ -134,6 +142,7 @@ def test_live_map_and_inspection(application, fake_core, tmp_path, monkeypatch):
     record = store.list()[0]
     assert (record.map_index, record.map_name, record.note, record.grid_differences) == (7, "Test zone · TEST00", "exit tile", 1)
     assert record.npcs[0][:3] == (43, "Yuramon", (48, 73)) and "chases you" in record.npcs[0][3]
+    assert record.items == ((44, "Digimushrm", (61, 54), "ground"), (1, "med.recovery", (40, 40), "chest"))
     assert record.tile[1] == 52 and store.has_state(record.id) and store.live_grid(record.id)[50 + 52 * 100] == 113
     window.close()
 

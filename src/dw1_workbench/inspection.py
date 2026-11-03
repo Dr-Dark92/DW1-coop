@@ -39,6 +39,7 @@ class Inspection:
     core: str
     core_version: str
     npcs: tuple = ()  # (character ID, name, tile, behaviour) of each NPC the game had on the map
+    items: tuple = ()  # (item ID, name, tile, "ground" / "chest" / "chest, taken") the game had placed
 
 
 def _npc(entry) -> tuple:
@@ -57,7 +58,7 @@ class InspectionStore:
 
     def add(self, *, map_index: int, map_name: str, position, tile, trigger, partner_tile, grid_differences,
             category: str, note: str, core: str, core_version: str, screenshot: bytes | None,
-            state: bytes | None, live_grid: bytes | None, npcs=()) -> Inspection:
+            state: bytes | None, live_grid: bytes | None, npcs=(), items=()) -> Inspection:
         now = datetime.now(timezone.utc)
         inspection_id = now.strftime("%Y%m%d-%H%M%S-%f")
         folder = self._folder(inspection_id)
@@ -65,7 +66,7 @@ class InspectionStore:
                             tuple(position) if position else None, tuple(tile) if tile else None, trigger,
                             tuple(partner_tile) if partner_tile else None, grid_differences, category,
                             note.strip(), core, core_version,
-                            tuple(_npc(entry) for entry in npcs))
+                            tuple(_npc(entry) for entry in npcs), tuple(_npc(entry) for entry in items))
         if screenshot:
             _atomic_write(folder / "screen.png", screenshot)
         if state:
@@ -79,8 +80,9 @@ class InspectionStore:
     def get(self, inspection_id: str) -> Inspection | None:
         try:
             record = json.loads((self._folder(inspection_id) / "inspection.json").read_text())
-            fields = {key: record[key] for key in Inspection.__dataclass_fields__ if key != "npcs"}
+            fields = {key: record[key] for key in Inspection.__dataclass_fields__ if key not in ("npcs", "items")}
             fields["npcs"] = tuple(_npc(entry) for entry in record.get("npcs", []))
+            fields["items"] = tuple(_npc(entry) for entry in record.get("items", []))
         except (OSError, ValueError, KeyError, TypeError):
             return None
         for key in ("position", "tile", "partner_tile"):
@@ -115,3 +117,65 @@ class InspectionStore:
 
     def delete(self, inspection_id: str):
         shutil.rmtree(self._folder(inspection_id), ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class ObservedSpawn:
+    map_index: int
+    map_name: str
+    item_id: int
+    item_name: str
+    tile: tuple[int, int]
+    first_seen: str
+    last_seen: str
+    times_seen: int  # separate visits (map entries) on which it was there
+
+
+class SpawnLog:
+    """Ground items seen while playing, per map and tile. Map scripts place them, and those are not decoded yet,
+    so this log is the evidence of where items appear."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._visit: tuple[int, frozenset] | None = None  # (map, items present) on the current visit
+
+    def _load(self) -> dict:
+        try:
+            return json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return {"format": FORMAT_VERSION, "spawns": []}
+
+    def spawns(self, map_index: int | None = None) -> list[ObservedSpawn]:
+        records = []
+        for entry in self._load().get("spawns", []):
+            try:
+                record = ObservedSpawn(**{**entry, "tile": tuple(entry["tile"])})
+            except (TypeError, KeyError):
+                continue
+            if map_index is None or record.map_index == map_index:
+                records.append(record)
+        return records
+
+    def record(self, map_index: int, map_name: str, items) -> list[tuple[str, tuple[int, int]]]:
+        """Note the (item ID, name, tile) present now; returns spawns never seen before on this map and tile."""
+        present = frozenset((int(item_id), str(name), tuple(tile)) for item_id, name, tile in items)
+        previous = self._visit[1] if self._visit and self._visit[0] == map_index else frozenset()
+        self._visit = (map_index, previous | present)
+        arrivals = present - previous
+        if not arrivals:
+            return []
+        data = self._load()
+        spawns = data.setdefault("spawns", [])
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        new = []
+        for item_id, name, tile in sorted(arrivals):
+            existing = next((entry for entry in spawns if entry.get("map_index") == map_index
+                             and entry.get("item_id") == item_id and tuple(entry.get("tile", ())) == tile), None)
+            if existing is None:
+                spawns.append({"map_index": map_index, "map_name": map_name, "item_id": item_id, "item_name": name,
+                               "tile": list(tile), "first_seen": now, "last_seen": now, "times_seen": 1})
+                new.append((name, tile))
+            else:
+                existing["last_seen"], existing["times_seen"] = now, existing.get("times_seen", 0) + 1
+        _atomic_write(self.path, json.dumps(data, indent=2).encode())
+        return new
