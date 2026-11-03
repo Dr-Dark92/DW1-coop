@@ -54,9 +54,32 @@ Raw file export is implemented; a usable zone or complete Digimon export is not.
 
 ## Delivery order and acceptance gates
 
-### P0 — Close the existing static-model milestone
+Priority revised on 2026-11-03: deliver a playable inspection build first so zones can be examined in the running original game before decoding or editing them. Static-model validation is deferred and does not block this build. This changes delivery order, not the implementation status recorded above.
 
-Status: IN PROGRESS. Finish this bounded task before opening a broad new implementation stream.
+### P0 — Playable inspection build first
+
+User item: 5 (initial direct-launch experience). Status: NOT STARTED. Highest implementation priority.
+
+Purpose: launch and play the original game so the user can inspect zone layouts, walking boundaries, gateways, toilets and other interactions before map decoding and editing.
+
+- Investigate a maintained PS1 emulator/core with a supported local launch/integration interface. Record the selected version, dependencies, licensing, BIOS requirements and host compatibility before implementation.
+- Use the user's own disc image and, where required, user-supplied BIOS. Do not bundle game data or firmware.
+- Add a clearly labelled Play / Launch game workflow to the workbench with emulator, disc and firmware configuration, validation, actionable errors and launch logs.
+- Start with an external emulator process if that is the smallest reliable integration. An embedded viewport is optional and must not delay the playable build.
+- Provide keyboard/controller input, working video/audio, normal-speed gameplay, clean shutdown and persistent saves in a separate writable location. Preserve original disc data.
+- Confirm new-game/load-game, player and partner movement, a representative battle, transitions between connected zones, and save/relaunch/load.
+- Create an inspection checklist for named zones: screenshots, observed paths/boundaries, gateway destinations/arrival points, toilets and other interactions. Record observed facts separately from decoded resource IDs and hypotheses.
+- Establish reproducible inspection access using an ordinary save near the target zone. Save states may supplement normal saves if supported by the chosen emulator. Teleport, zone selection and debug overlays are later optional tools requiring verified integration; they are not assumed to exist.
+- Record the runtime feasibility decision here. The initial emulator-backed build supplies a playable reference and desktop launch experience; it does not complete native reimplementation or prove replacement import support.
+- Treat existing HANDOVER instructions as historical asset-work resume notes. The current next task is this playable build, not completion of Agumon model validation.
+
+Exit: on the target workstation, launch the user's game from the workbench, move through at least two connected zones, inspect a gateway and a toilet/other interactive object, and save/relaunch/load successfully. Record screenshots and the inspection checklist. No decoded-map overlay is required for this gate.
+
+After this gate, resume P1 and P2 using the playable build as the behaviour reference. Before P3 replacement verification, document the rebuild/patch path or runtime override mechanism that will actually consume edited zone packages. A full native runtime remains a separate architectural commitment and is not a prerequisite for initial zone inspection.
+
+### P1 — Close the existing static-model milestone
+
+Status: IMPLEMENTED WIP; verification deferred until after the P0 playable inspection build. Preserve the current parser and experimental labels; this work must not block launching the game.
 
 - Reproduce the 30-test baseline in the configured development environment.
 - Compare AGUM output with pinned DW1ModelConverter revision 17d1a19: objects, vertices, UVs, materials/palettes, skeleton, initial pose and winding.
@@ -67,7 +90,7 @@ Status: IN PROGRESS. Finish this bounded task before opening a broad new impleme
 
 Exit: one independently checked static Agumon model; documented supported boundaries and reproducible checks.
 
-### P1 — One-zone discovery, reconstruction and export
+### P2 — One-zone discovery, reconstruction and export
 
 User item: 1. Status: NOT STARTED beyond raw disc inventory/export.
 
@@ -82,7 +105,7 @@ User item: 1. Status: NOT STARTED beyond raw disc inventory/export.
 
 Exit: one inspectable zone whose layout, walkability, gateways and at least one interactive object can be checked against the original game. Unknown fields remain explicit.
 
-### P2 — Single-zone import, then zone bundles
+### P3 — Single-zone import, then zone bundles
 
 User item: 2. Status: NOT STARTED.
 
@@ -95,34 +118,18 @@ User item: 2. Status: NOT STARTED.
 
 Exit: unchanged zone round trip and one verified edit, followed by a bundle containing connected zones.
 
-### P3 — Digimon export/import, then stage bundles
+### P4 — Digimon export/import, then stage bundles
 
 User items: 3–4. Status: PARTIAL FOUNDATION ONLY.
 
 - Build a verified stage/class mapping for Fresh, In-training, Rookie, Champion and Ultimate; leave unknown/non-Digimon entries explicit.
-- Complete geometry/material export after P0; separately decode and verify animations and their skeleton/channel mappings.
+- Complete geometry/material export after P1; separately decode and verify animations and their skeleton/channel mappings.
 - Package one Digimon with stable ID, display label, stage, model, textures/palettes, skeleton, animation and required references.
 - Support single-Digimon export and validated replacement import without silently changing IDs or losing unknown fields.
 - Verify unchanged round trip and one controlled replacement in the execution target.
 - Add stage-filtered selection and class bundles after single-Digimon replacement works.
 
 Exit: one complete usable Digimon package and replacement, then verified Rookie/Champion/Ultimate bundles. A PNG or raw MMD alone does not satisfy this gate.
-
-### P4 — Runtime decision and playable desktop baseline
-
-User item: 5. Status: NOT STARTED.
-
-Architecture decision: begin a short feasibility investigation alongside P1; settle the execution target before P2 replacement verification. Full playable-baseline delivery remains this milestone.
-
-Options to evaluate:
-
-- Packaged emulator plus original-game patches: direct desktop launch and original behaviour, with patching constraints.
-- Reimplemented runtime: a new executable using decoded assets and recreated systems; substantially larger scope.
-- A staged path: emulator reference/early launch experience, then incremental runtime reconstruction.
-
-A packaged emulator is not a native reimplementation. A scene viewer is not a playable game.
-
-Exit: documented architecture, direct launch, inputs, stable zone transitions, partner behaviour, representative battle, save/load, configuration and logs. Validate against original-game behaviour before the gameplay overhaul.
 
 ### P5 — Resolution, aspect ratios, frame rate and game speed
 
@@ -181,7 +188,7 @@ Exit: at least one complete Mega evolution that can move, fight, save/load and e
 
 User item: 8. Status: NOT STARTED.
 
-Plan ownership and world-state boundaries during P4/P6 even though multiplayer delivery comes later.
+Plan ownership and world-state boundaries during runtime architecture planning and P6 even though multiplayer delivery comes later.
 
 - Define two player identities, inputs, partners, inventories and UI.
 - Render two cameras and support independent controls.
@@ -215,7 +222,9 @@ Exit: authenticated users can exchange messages across separate networks with th
 
 ## Next implementation task
 
-Resume P0 from the opening section of [HANDOVER.md](HANDOVER.md). Close the Agumon verification gap, then begin P1 with one complete zone. Do not restart the static parser from scratch or treat it as already verified.
+Implement P0: inspect the current launch/UI structure, select and validate an emulator integration on the target workstation, add the Play workflow, then demonstrate two connected zones and persistent saves. Do not wait for Agumon verification, model export or MAP/TFS decoding.
+
+After the playable inspection gate passes, resume the paused static-model verification from [HANDOVER.md](HANDOVER.md) as P1, then decode one complete zone as P2. Preserve existing WIP code and its verification limits. The roadmap's revised delivery order takes precedence over older next-task text in the handover.
 
 Recorded workstation paths from the handover, not paths accessible in this review:
 
