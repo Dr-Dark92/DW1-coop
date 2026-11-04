@@ -109,7 +109,7 @@ The player compares every finished frame with the game's own background and repl
 
 ## Map and HP/MP on the game screen
 
-While you play, the top right of the game screen shows the map: the walkable floor, exits in gold, you in white, your partner in cyan, and other Digimon in red (they chase you), yellow (they watch you) or orange (they ignore you). Your partner's HP and MP sit directly above the game's happiness and discipline bars, in the same bar style with current/maximum values. They slide in and out with the game's own status bars, so they hide in battles, menus and text scenes. The **Map and HP/MP** box under **Settings > Game screen** turns them off.
+While you play, the top right of the game screen shows the map: the walkable floor, exits in gold, you in white, your partner in cyan, and other Digimon in red (they chase you), yellow (they watch you) or orange (they ignore you). Your partner's HP and MP sit directly above the game's happiness and discipline bars, in the same bar style with current/maximum values. They slide in and out with the game's own status bars, so they hide in battles, menus and text scenes. The **Map and HP/MP** box under **Settings > Game screen** turns them off. F10 still opens the larger Live map panel beside the game for inspection work; it starts closed.
 
 ## Co-op battle test (prototype)
 
