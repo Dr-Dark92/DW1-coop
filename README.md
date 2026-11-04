@@ -77,7 +77,7 @@ The source is opened read-only. Exports run in a cancellable background worker, 
 
 In **Maps and Zones**, select a map and choose **Set HD picture…**, then pick your upscaled or repainted picture (the whole map, lined up with its background). Importing a zone package with an edited `background-palette0.png` also keeps that picture at full size. Play as usual: the game window's **HD backgrounds** box turns the layer on and off while playing, and maps without a picture look as they always did.
 
-The player compares every finished frame with the game's own background and replaces only the pixels that are background, so characters, the HUD and menus stay the game's, while shadows, fades and the time of day carry over to your picture. The picture isn't converted to 8-bit, shrunk or written to the disc, and it applies only in this player. Foreground pieces with their own palette and semi-transparent menu boxes stay at the game's resolution. See `docs/FORMATS.md` for details and measurements.
+The player compares every finished frame with the game's own background and replaces only the pixels that are background, so characters, the HUD and menus stay the game's, while shadows, fades and the time of day carry over to your picture. The picture isn't converted to 8-bit, shrunk or written to the disc, and it applies only in this player. Animated foreground pieces, effects, art that isn't part of the background, and semi-transparent menu boxes stay at the game's resolution. See `docs/FORMATS.md` for details and measurements.
 
 ## Game rules (levels, EXP, no aging or death)
 

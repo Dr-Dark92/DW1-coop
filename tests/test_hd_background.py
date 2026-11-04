@@ -233,3 +233,67 @@ def test_pictures_store_replaces_and_converts(tmp_path):
     assert store.path(6) is None
     store.remove(5)
     assert store.path(5) is None
+
+
+def add_piece(game, number, sprite, x, y, width, height, tex_x, tex_y, clut, transparency=4, frames=None):
+    at = H.MAP_INSTANCES + number * H.INSTANCE_SIZE
+    frames = frames or [sprite]
+    game.set(at, "<3h", 900, x, y)
+    game.set(at + 6, "<8h", *(frames + [-1] * (8 - len(frames))))
+    game.set(H.LOCAL_MAP_OBJECTS + sprite * H.OBJECT_SIZE, "<5h2B2b", tex_x, tex_y, 0, 0, 0, width, height, clut, transparency)
+
+
+def test_cut_out_pieces_come_from_the_picture_and_separate_art_does_not(game, tmp_path):
+    words = np.frombuffer(game.vram, "<u2", 512 * 1024).reshape(512, 1024).copy()
+    bytes8 = bytearray(words.tobytes())
+    # An 8-bit piece at (120, 80) using its own palette (row 16 + 468): near the background, not equal to it.
+    own = palette_bytes(shift=1)
+    bytes8[(16 + 468) * 2048:(16 + 468) * 2048 + 512] = own
+    tile = game.tiles[0, 0][80:100, 120:128]
+    # A second piece, bright magenta: separate art.
+    bytes8[(17 + 468) * 2048:(17 + 468) * 2048 + 512] = struct.pack("<H", 0x7C1F) * 256
+    for line in range(20):
+        at = line * 2048 + 384 * 2
+        bytes8[at:at + 8] = tile[line].tobytes()
+    game.vram = bytearray(bytes8)
+    game.set(H.MAP_OBJECT_COUNT, "<h", 2)
+    add_piece(game, 0, 0, 120, 80, 8, 20, 0, 0, 16)
+    add_piece(game, 1, 1, 140, 80, 8, 20, 0, 0, 17)
+    cuts = {}
+    background = MapBackground(game.read); background.refresh()
+    state = bytes(game.vram)
+    palette = rgb5(palette_bytes())
+    painted = H.read_foreground(game.read, state, background.indices, background.valid, palette, palette, cuts)
+    assert cuts == {0: True, 1: False}
+    assert painted[85, 123] != H.NO_FOREGROUND and painted[85, 143] == H.NO_FOREGROUND
+
+    path = picture_file(tmp_path)
+    layer = BackgroundLayer(game.read, game.serialize, lambda index: path)
+    frame = game.frame()
+    layer.apply(frame); layer._load_picture(layer._picture_key, path)
+    own_levels = rgb5(own)
+    frame[80 - 60:100 - 60, 120 - 100:128 - 100] = (lambda levels: levels[..., 0].astype(np.uint32) << 19
+                                                    | levels[..., 1].astype(np.uint32) << 11
+                                                    | levels[..., 2].astype(np.uint32) << 3)(own_levels[tile])
+    frame[20:40, 40:48] = 0xF800F8  # the separate art
+    result = layer.apply(frame)
+    assert rgb(result.pixels[25 * 4, 24 * 4]) == (200, 100, 50)  # the cut-out shows the picture
+    assert rgb(result.pixels[25 * 4, 44 * 4]) == (0xF8, 0, 0xF8)  # the separate art stays the game's
+
+
+def test_piece_at_the_end_of_its_page_spans_one_texel_less(game):
+    bytes8 = bytearray(game.vram)
+    bytes8[(16 + 468) * 2048:(16 + 468) * 2048 + 512] = b"".join(struct.pack("<H", i + 1) for i in range(256))
+    for line in range(16):  # rows hold their own number, at v = 240-255
+        at = (240 + line) * 2048 + 384 * 2
+        bytes8[at:at + 16] = bytes([line + 1] * 16)
+    game.vram = bytearray(bytes8)
+    game.set(H.MAP_OBJECT_COUNT, "<h", 1)
+    add_piece(game, 0, 0, 20, 20, 16, 16, 0, 240, 16)
+    background = MapBackground(game.read); background.refresh()
+    palette = rgb5(palette_bytes())
+    # Always treated as a cut-out here: the decision is not what this test is about.
+    painted = H.read_foreground(game.read, bytes(game.vram), background.indices, background.valid, palette, palette, {0: True})
+    column = painted[20:36, 20]
+    # Row r holds texel r + 1, drawn with colour r + 2; 15 rows over 16 lines, so the last row (17) never shows.
+    assert column[0] == 2 and column[8] == 10 and column[15] == 16

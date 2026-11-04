@@ -237,7 +237,7 @@ class EmulatorWorker(QObject):
             if config.live_ram and config.hd_pictures is not None:
                 self.hd_layer = BackgroundLayer(core.read_memory, core.serialize, HdPictures(config.hd_pictures).path,
                                                 on_error=self.message.emit)
-                self._compositor = Compositor(self.hd_layer, self._publish_composed, self.message.emit)
+                self._compositor = Compositor(self.hd_layer, self._publish_composed, self._hd_failed)
             if config.game_rules and config.live_ram:
                 self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path))
                 self.evolution = EvolutionController(core, self.rules.progress, self.dex, self.dex_map_names,
@@ -376,6 +376,11 @@ class EmulatorWorker(QObject):
             return False
         self._compositor.submit(job)
         return True
+
+    def _hd_failed(self, text: str):
+        """From the compositor thread: show plain frames from now on rather than a frozen picture."""
+        self.hd_layer = None
+        self.message.emit(text)
 
     def _publish_composed(self, composed):
         pixels = composed.pixels

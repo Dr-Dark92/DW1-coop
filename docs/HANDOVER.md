@@ -6,7 +6,9 @@ User asked to force 16-bit backgrounds; after the numbers (FORMATS.md) and a bef
 
 The user tried it on the desktop with a rebuilt picture for File City `TWNA02` (map 168) and reports much better results. Their inspection there, noted "check it", has not been looked at.
 
-Next: foreground pieces with their own palette (e.g. the top-left bush on `MAYO00`) and semi-transparent boxes stay low-res; only `MAYO00` was measured, indoor and small maps untested; other video modes pass through. Avatar rendering (`avatars.py`) holds the GIL on a store with no cache (first launch on this Linux store): frame rate about 30 for about a minute, unrelated to HD.
+Follow-up the same day: per-block compare (4× from 23 to about 57 fps) and a foreground model (`read_foreground`) fixing the streaks on File City's roof. Not committed when written.
+
+Next: effects, animated pieces and semi-transparent boxes stay low-res; only `MAYO00` and `TWNA02` were measured, indoor and small maps untested; other video modes pass through. Avatar rendering (`avatars.py`) holds the GIL on a store with no cache (first launch on this Linux store): frame rate about 30 for about a minute, unrelated to HD.
 
 ## Claude P6 entry point (2026-11-03)
 
