@@ -304,6 +304,10 @@ class LibretroCore:
     def memory_size(self, kind: int = MEMORY_SYSTEM_RAM) -> int:
         return self._lib.retro_get_memory_size(kind) if self._lib.retro_get_memory_data(kind) else 0
 
+    @property
+    def ram_size(self) -> int:
+        return self._lib.retro_get_memory_size(MEMORY_SYSTEM_RAM)
+
     def read_memory(self, offset: int, size: int, kind: int = MEMORY_SYSTEM_RAM) -> bytes:
         """A copy of `size` bytes of the core's memory region (main RAM by default)."""
         pointer, total = self._lib.retro_get_memory_data(kind), self._lib.retro_get_memory_size(kind)

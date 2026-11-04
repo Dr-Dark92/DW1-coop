@@ -1,0 +1,254 @@
+diff --git a/libretro.c b/libretro.c
+index eed6d47f..f4b82f1f 100644
+--- a/libretro.c
++++ b/libretro.c
+@@ -1653,7 +1653,7 @@ void PSX_RequestMLExit(void)
+ 
+ void MDFN_FASTCALL PSX_MemWrite8(int32_t timestamp, uint32_t A, uint32_t V)
+ {
+-   if(A < 0x00800000)                       { MASMEM_WriteU8(MainRAM, A & 0x1FFFFF, V); return; }
++   if(A < 0x00800000)                       { MASMEM_WriteU8(MainRAM, A & 0x7FFFFF, V); return; }
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))   return;
+    if(timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
+       PSX_EventHandler(timestamp);
+@@ -1676,7 +1676,7 @@ void MDFN_FASTCALL PSX_MemWrite8(int32_t timestamp, uint32_t A, uint32_t V)
+ 
+ void MDFN_FASTCALL PSX_MemWrite16(int32_t timestamp, uint32_t A, uint32_t V)
+ {
+-   if(A < 0x00800000)                       { MASMEM_WriteU16(MainRAM, A & 0x1FFFFF, V); return; }
++   if(A < 0x00800000)                       { MASMEM_WriteU16(MainRAM, A & 0x7FFFFF, V); return; }
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))   return;
+    if(timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
+       PSX_EventHandler(timestamp);
+@@ -1699,7 +1699,7 @@ void MDFN_FASTCALL PSX_MemWrite16(int32_t timestamp, uint32_t A, uint32_t V)
+ 
+ void MDFN_FASTCALL PSX_MemWrite24(int32_t timestamp, uint32_t A, uint32_t V)
+ {
+-   if(A < 0x00800000)                       { MASMEM_WriteU24(MainRAM, A & 0x1FFFFF, V); return; }
++   if(A < 0x00800000)                       { MASMEM_WriteU24(MainRAM, A & 0x7FFFFF, V); return; }
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))   return;
+    if(timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
+       PSX_EventHandler(timestamp);
+@@ -1722,7 +1722,7 @@ void MDFN_FASTCALL PSX_MemWrite24(int32_t timestamp, uint32_t A, uint32_t V)
+ 
+ void MDFN_FASTCALL PSX_MemWrite32(int32_t timestamp, uint32_t A, uint32_t V)
+ {
+-   if(A < 0x00800000)                       { MASMEM_WriteU32(MainRAM, A & 0x1FFFFF, V); return; }
++   if(A < 0x00800000)                       { MASMEM_WriteU32(MainRAM, A & 0x7FFFFF, V); return; }
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))   return;
+    if(timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
+       PSX_EventHandler(timestamp);
+@@ -1753,7 +1753,7 @@ uint8_t MDFN_FASTCALL PSX_MemRead8(int32_t *timestamp, uint32_t A)
+    {
+       if (!psx_gte_overclock)
+          *timestamp += 3;
+-      return MASMEM_ReadU8(MainRAM, A & 0x1FFFFF);
++      return MASMEM_ReadU8(MainRAM, A & 0x7FFFFF);
+    }
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
+       return MASMEM_ReadU8(BIOSROM, A & bios_addr_mask);
+@@ -1803,7 +1803,7 @@ uint16_t MDFN_FASTCALL PSX_MemRead16(int32_t *timestamp, uint32_t A)
+    {
+       if (!psx_gte_overclock)
+          *timestamp += 3;
+-      return MASMEM_ReadU16(MainRAM, A & 0x1FFFFF);
++      return MASMEM_ReadU16(MainRAM, A & 0x7FFFFF);
+    }
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
+       return MASMEM_ReadU16(BIOSROM, A & bios_addr_mask);
+@@ -1862,7 +1862,7 @@ uint32_t MDFN_FASTCALL PSX_MemRead24(int32_t *timestamp, uint32_t A)
+    {
+       if (!psx_gte_overclock)
+          *timestamp += 3;
+-      return MASMEM_ReadU24(MainRAM, A & 0x1FFFFF);
++      return MASMEM_ReadU24(MainRAM, A & 0x7FFFFF);
+    }
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
+       return MASMEM_ReadU24(BIOSROM, A & bios_addr_mask);
+@@ -1915,7 +1915,7 @@ uint32_t MDFN_FASTCALL PSX_MemRead32(int32_t *timestamp, uint32_t A)
+    {
+       if (!psx_gte_overclock)
+          *timestamp += 3;
+-      return MASMEM_ReadU32(MainRAM, A & 0x1FFFFF);
++      return MASMEM_ReadU32(MainRAM, A & 0x7FFFFF);
+    }
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
+       return MASMEM_ReadU32(BIOSROM, A & bios_addr_mask);
+@@ -1971,12 +1971,12 @@ static INLINE uint32_t MemPeek(int32_t timestamp, uint32_t A, unsigned size, boo
+    if(A < 0x00800000)
+    {
+       if(access24)
+-         return(MASMEM_ReadU24(MainRAM, A & 0x1FFFFF));
++         return(MASMEM_ReadU24(MainRAM, A & 0x7FFFFF));
+       if (size == 4)
+-         return MASMEM_ReadU32(MainRAM, A & 0x1FFFFF);
++         return MASMEM_ReadU32(MainRAM, A & 0x7FFFFF);
+       if (size == 2)
+-         return MASMEM_ReadU16(MainRAM, A & 0x1FFFFF);
+-      return MASMEM_ReadU8(MainRAM, A & 0x1FFFFF);
++         return MASMEM_ReadU16(MainRAM, A & 0x7FFFFF);
++      return MASMEM_ReadU8(MainRAM, A & 0x7FFFFF);
+    }
+ 
+    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
+@@ -2086,7 +2086,7 @@ static void PSX_Power(void)
+ 
+    cd_warned_slow = false;
+ 
+-   memset(MultiAccessSizeMem_get_data32(MainRAM), 0, 2048 * 1024);
++   memset(MultiAccessSizeMem_get_data32(MainRAM), 0, 8192 * 1024);
+ 
+    for(i = 0; i < 9; i++)
+       SysControl.Regs[i] = 0;
+@@ -2116,15 +2116,15 @@ static INLINE void MemPoke(int32_t timestamp, uint32_t A, uint32_t V, unsigned s
+    if(A < 0x00800000)
+    {
+       if(access24)
+-         MASMEM_WriteU24(MainRAM, A & 0x1FFFFF, V);
++         MASMEM_WriteU24(MainRAM, A & 0x7FFFFF, V);
+       else
+       {
+          if (size == 4)
+-            MASMEM_WriteU32(MainRAM, A & 0x1FFFFF, V);
++            MASMEM_WriteU32(MainRAM, A & 0x7FFFFF, V);
+          else if (size == 2)
+-            MASMEM_WriteU16(MainRAM, A & 0x1FFFFF, V);
++            MASMEM_WriteU16(MainRAM, A & 0x7FFFFF, V);
+          else
+-            MASMEM_WriteU8(MainRAM, A & 0x1FFFFF, V);
++            MASMEM_WriteU8(MainRAM, A & 0x7FFFFF, V);
+       }
+ 
+       return;
+@@ -2531,7 +2531,7 @@ static void SetDiscWrapper(const bool CD_TrayOpen) {
+ /* PSX memory region sizes - these are used unconditionally below (e.g. for
+  * MultiAccessSizeMem_New() in the non-lightrec path), so they must NOT be
+  * gated on HAVE_LIGHTREC. */
+-#define RAM_SIZE     0x200000
++#define RAM_SIZE     0x800000
+ 
+ #define SCRATCH_SIZE 0x400
+ #define SHM_SIZE     (RAM_SIZE + BIOS_SIZE + SCRATCH_SIZE)
+@@ -3325,11 +3325,11 @@ static void InitCommon(const bool EmulateMemcards, const bool WantPIOMem)
+       PIOMem = MultiAccessSizeMem_New(PIO_SIZE);
+    }
+ 
+-   for(uint32_t ma = 0x00000000; ma < 0x00800000; ma += 2048 * 1024)
++   for(uint32_t ma = 0x00000000; ma < 0x00800000; ma += 8192 * 1024)
+    {
+-      CPU_SetFastMap(PSX_CPU, MultiAccessSizeMem_get_data32(MainRAM), 0x00000000 + ma, 2048 * 1024);
+-      CPU_SetFastMap(PSX_CPU, MultiAccessSizeMem_get_data32(MainRAM), 0x80000000 + ma, 2048 * 1024);
+-      CPU_SetFastMap(PSX_CPU, MultiAccessSizeMem_get_data32(MainRAM), 0xA0000000 + ma, 2048 * 1024);
++      CPU_SetFastMap(PSX_CPU, MultiAccessSizeMem_get_data32(MainRAM), 0x00000000 + ma, 8192 * 1024);
++      CPU_SetFastMap(PSX_CPU, MultiAccessSizeMem_get_data32(MainRAM), 0x80000000 + ma, 8192 * 1024);
++      CPU_SetFastMap(PSX_CPU, MultiAccessSizeMem_get_data32(MainRAM), 0xA0000000 + ma, 8192 * 1024);
+    }
+ 
+    CPU_SetFastMap(PSX_CPU, MultiAccessSizeMem_get_data32(BIOSROM), 0x1FC00000, bios_mapped_size);
+@@ -3345,7 +3345,7 @@ static void InitCommon(const bool EmulateMemcards, const bool WantPIOMem)
+ 
+ 
+    MDFNMP_Init(1024, ((uint64_t)1 << 29) / 1024);
+-   MDFNMP_AddRAM(2048 * 1024, 0x00000000, MainRAM->data8);
++   MDFNMP_AddRAM(8192 * 1024, 0x00000000, MainRAM->data8);
+    /* Scratchpad (1KB at 0x1F800000): exposed for cheats. Games such as
+     * the Rockman Complete Works ports keep lives/health/ammo here, and
+     * "1F800XXX" GameShark codes target it. */
+@@ -3935,7 +3935,7 @@ int StateAction(StateMem *sm, int load, int data_only)
+       SFVAR(CD_SelectedDisc),
+       SFARRAYN((uint8_t *)compatibility_disc_serial,
+             sizeof(compatibility_disc_serial), "CompatibilityDiscSerial"),
+-      SFARRAYN(MainRAM->data8, 1024 * 2048, "MainRAM.data8"),
++      SFARRAYN(MainRAM->data8, 1024 * 8192, "MainRAM.data8"),
+       SFARRAY32(SysControl.Regs, 9),
+       SFVAR(PSX_PRNG.lcgo),
+       SFVAR(PSX_PRNG.x),
+@@ -6654,7 +6654,7 @@ bool retro_load_game(const struct retro_game_info *info)
+       descs[0].flags  = RETRO_MEMDESC_SYSTEM_RAM;
+       descs[0].ptr    = MainRAM->data8;
+       descs[0].start  = 0x00000000;
+-      descs[0].len    = 2048 * 1024;
++      descs[0].len    = 8192 * 1024;
+       descs[0].select = 0;
+ 
+       descs[1].flags  = RETRO_MEMDESC_SYSTEM_RAM;
+@@ -7566,7 +7566,7 @@ size_t retro_get_memory_size(unsigned type)
+    switch (type)
+    {
+       case RETRO_MEMORY_SYSTEM_RAM:
+-         return 0x200000;
++         return 0x800000;
+       case RETRO_MEMORY_SAVE_RAM:
+          if (!use_mednafen_memcard0_method)
+             return (1 << 17);
+diff --git a/mednafen/psx/dma.c b/mednafen/psx/dma.c
+index f29db8f6..0091fe91 100644
+--- a/mednafen/psx/dma.c
++++ b/mednafen/psx/dma.c
+@@ -355,7 +355,7 @@ static INLINE void ChRW(const unsigned ch, const uint32_t CRModeCache, const uin
+          if(DMACH[ch].WordCounter == 1)
+             *V = 0xFFFFFF;
+          else
+-            *V = (DMACH[ch].CurAddr - 4) & 0x1FFFFF;
++            *V = (DMACH[ch].CurAddr - 4) & 0x7FFFFF;
+          break;
+    }
+ 
+@@ -477,7 +477,7 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
+                   break;
+                }
+ 
+-               header = MASMEM_ReadU32(MainRAM, DMACH[ch].CurAddr & 0x1FFFFC);
++               header = MASMEM_ReadU32(MainRAM, DMACH[ch].CurAddr & 0x7FFFFC);
+                DMACH[ch].CurAddr = (DMACH[ch].CurAddr + 4) & 0xFFFFFF;
+ 
+                DMACH[ch].WordCounter = header >> 24;
+@@ -526,14 +526,14 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
+             }
+ 
+             if(CRModeCache & 0x1)
+-               vtmp = MASMEM_ReadU32(MainRAM, DMACH[ch].CurAddr & 0x1FFFFC);
++               vtmp = MASMEM_ReadU32(MainRAM, DMACH[ch].CurAddr & 0x7FFFFC);
+ 
+ 			/*iCB: Pass address of memory for GPU */
+             ChRW(ch, CRModeCache, DMACH[ch].CurAddr, &vtmp, &voffs);
+ 
+             if(!(CRModeCache & 0x1))
+             {
+-               uint32_t waddr = (DMACH[ch].CurAddr + (voffs << 2)) & 0x1FFFFC;
++               uint32_t waddr = (DMACH[ch].CurAddr + (voffs << 2)) & 0x7FFFFC;
+                MASMEM_WriteU32(MainRAM, waddr, vtmp);
+ #ifdef HAVE_LIGHTREC
+                if(!inv_count)
+diff --git a/mednafen/state.c b/mednafen/state.c
+index 1d0b2d03..c44f62f2 100644
+--- a/mednafen/state.c
++++ b/mednafen/state.c
+@@ -722,7 +722,14 @@ static int ReadStateChunk(StateMem *st, SFORMAT *sf, int size)
+       {
+          uint32_t expected_size = tmp->size;	/* In bytes */
+ 
+-         if(recorded_size != expected_size)
++         if(recorded_size == 2048 * 1024 && expected_size == 8192 * 1024 && !strcmp((char*)toa + 1, "MainRAM.data8"))
++         {
++            /* A state saved with the original 2 MB of RAM: the rest starts empty. */
++            memset(tmp->v, 0, expected_size);
++            if (smem_read(st, (uint8_t *)tmp->v, recorded_size) != recorded_size)
++               return 0;
++         }
++         else if(recorded_size != expected_size)
+          {
+             if(smem_seek(st, recorded_size, SSEEK_CUR) < 0)
+                return(0);
+diff --git a/rhi/rhi_intf.c b/rhi/rhi_intf.c
+index 1b5bcb22..009564cc 100644
+--- a/rhi/rhi_intf.c
++++ b/rhi/rhi_intf.c
+@@ -15,6 +15,7 @@
+ #include "beetle_psx_globals.h"
+ #include "../osd_message.h"
+ #include "libretro_cbs.h"
++extern retro_log_printf_t log_cb;
+ #include "libretro_options.h"
+ #include "mednafen/mednafen.h"
+ #include "mednafen/psx/gpu.h"

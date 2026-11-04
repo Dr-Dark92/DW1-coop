@@ -41,7 +41,7 @@
 - On-screen map (top right) and partner HP/MP above the status bars, in the game's bar art, sliding with the native HUD; the Live map panel starts closed (F10). Checked in the real play window; not yet seen by the user.
 - P8 feasibility: a second Digimon can fight as an ally in the real battle code using only memory writes between frames (hits the enemy, gets hit, normal win when dropped). A different species (Greymon, Meramon) was also spawned through the game's own functions and joined a real battle through its own battle-start code. Scripted orders (which move, which target, hold back) were also obeyed against two enemies. Tests only; no co-op feature exists.
 - Co-op battle prototype in one game window: player 2's chosen Digimon joins real fights with player 1's controls (J/L, K, U for the finisher) and the game's AI choosing techniques; player 2 gains the same EXP and Bits and shares the Digi-Dex. Checked in the real play window with a scripted battle trigger; not yet played by the user.
-- Split screen (menu option 10): a second game process beside player 1's at full speed (both about 60 fps measured), from a different save, with its own keys and its own copy of the save. Two separate games: no shared progress or same-zone battle yet, and player 2's game is silent. Option 11, LAN Co-op, is a placeholder. Checked in the real window, offscreen; not yet played by the user.
+- Split screen (menu option 10): a second game process beside player 1's at full speed (both about 60 fps measured), from a different save, with its own keys and its own copy of the save. On the same map each game shows the other's Digimon, moving and animated (`visitor.py`); on the standard core limited by the game's memory; the extended 8 MB core lifts that. A fight started by either player on a shared map runs in that game with the other's real Digimon as the ally, shown on both halves, with both players rewarded. Story progress and inventory aren't shared yet, and player 2's game is silent. Option 11, LAN Co-op, is a placeholder. Checked in the real window, offscreen; not yet played by the user.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
@@ -72,7 +72,7 @@
 - Audio/video decoding.
 - Disassembly/decompilation integration.
 - Player: gamepad input, key remapping, core options UI, and audio-driven frame pacing (pacing is clock-based; audio is dropped rather than delayed).
-- Shared co-op progress, same-zone battles across the two split-screen games, native runtime, or networking.
+- Shared story progress and inventory across the two split-screen games, native runtime, or networking.
 - Digimon World 3 import (planned, see HANDOVER.md).
 
 ## Real-disc validation (user-provided USA image)

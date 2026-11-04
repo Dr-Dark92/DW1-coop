@@ -17,6 +17,9 @@ fight last, which also loads its effects and sounds. Between frames the player t
 Player 2 gains what the main player gains: the same EXP and Bits go to their own record (coop_player2.json), which
 sets their level and so their Digimon's stats. The Digi-Dex is shared because there is one per disc.
 
+In split screen the ally is the other player's real partner (LinkedPlayer): the game that met the enemy runs the fight,
+and the player object carries what that player's own game should gain afterwards.
+
 Addresses are from jype0/dw_decomp aaf69a4 (src/main/overworld.c, model.c, btl.c, world_object.c, src/btl/) and apply
 only to SLUS_010.32.
 """
@@ -28,10 +31,11 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from .live import ram_offset
+from .live import RAM_BASE, RAM_SIZE, ram_end, ram_offset
 from .progression import LEVEL_MAX, level_for, stats_for, total_exp, exp_to_next
 from .quicksave import _atomic_write
 
+WORK_AREA_SIZE = 0x1000
 ENTITY_TABLE, GAME_STATE, ENEMY_COUNT, COMBAT_DATA_PTR = 0x8012F344, 0x80134F0A, 0x80134D6C, 0x80134D4C
 WORLD_OBJECTS, OBJECT_COUNT = 0x80137418, 128
 MAP_DIGIMON_TABLE, MAP_DIGIMON_SIZE = 0x8013CB50, 196
@@ -42,12 +46,19 @@ MOVE_DATA = 0x8012623C  # Move[122]
 MOVE_NAMES = 0x80126054  # char *[122]
 MOVE_NAME_COUNT = 122
 MONEY = 0x80134EB8  # the player's Bits
+LOADED_DIGIMON_MODELS = 0x801BE7EC  # the map change unloads what is listed here
 FLEE_CHANCES = 0x8012BB14
 IS_SCRIPT_PAUSED, TALKED_TO_ENTITY = 0x80134FF4, 0x80134C9C
 LOAD_NPC_MODEL, SCRIPT_SET_DIGIMON, REMOVE_OBJECT = 0x800B6110, 0x800B6118, 0x800A3008
 PARTNER_SLOT, FIRST_NPC, LAST_NPC = 1, 2, 9
-# Unused RAM (zero in every save sampled): the routine, then function, a0, a1, a2 and its result.
-ROUTINE, CALL_DATA = 0x801C0000, 0x801C0200
+
+
+def work_area() -> int:
+    """RAM for the routines below. Free on the console's 2 MB (zero in every save sampled, though the heap could reach it);
+    on the extended core, the top 4 KB, which extra_memory.py keeps out of the heap."""
+    return ram_end() - WORK_AREA_SIZE if ram_end() > RAM_BASE + RAM_SIZE else 0x801C0000
+
+
 NOT_DONE = 0xFFFFFFFF
 TASK_ID = 0x7A10
 ALLY_MARK = 0x7A7A  # MapDigimonEntity.padding0 of the entry placing the ally, so a loaded state finds it again
@@ -77,15 +88,15 @@ def _ori(reg, value):
     return 0x34000000 | reg << 21 | reg << 16 | value & 0xFFFF
 
 
-def routine() -> bytes:
+def routine(data: int, task: int = TASK_ID) -> bytes:
     """One-shot object tick: result = function(a0, a1, a2), then remove this object. R3000: loads have a delay slot."""
     t0, t9, a0, a1, a2, v0, sp, ra = 8, 25, 4, 5, 6, 2, 29, 31
     load = lambda reg, offset: 0x8C000000 | t0 << 21 | reg << 16 | offset
-    code = [0x27BDFFE0, 0xAFBF0018, _lui(t0, CALL_DATA), _ori(t0, CALL_DATA),
+    code = [0x27BDFFE0, 0xAFBF0018, _lui(t0, data), _ori(t0, data),
             load(t9, 0), load(a0, 4), load(a1, 8), load(a2, 12), 0,
             0x0320F809, 0,  # jalr t9
-            _lui(t0, CALL_DATA), _ori(t0, CALL_DATA), 0xAC000000 | t0 << 21 | v0 << 16 | 16,  # sw v0,16(t0)
-            _lui(a0, TASK_ID), _ori(a0, TASK_ID), 0x34000000 | a1 << 16,  # ori a1,zero,0
+            _lui(t0, data), _ori(t0, data), 0xAC000000 | t0 << 21 | v0 << 16 | 16,  # sw v0,16(t0)
+            _lui(a0, task), _ori(a0, task), 0x34000000 | a1 << 16,  # ori a1,zero,0
             0x0C000000 | (REMOVE_OBJECT >> 2) & 0x3FFFFFF, 0,
             0x8C000000 | sp << 21 | ra << 16 | 24, 0x27BD0020, 0x03E00008, 0]
     return struct.pack(f"<{len(code)}I", *code)
@@ -102,7 +113,7 @@ def species_moves(read, species: int) -> list[int]:
 
 
 def read_text(read, pointer: int, limit: int = 32) -> str:
-    if not 0x80000000 <= pointer < 0x80200000 - limit:
+    if not 0x80000000 <= pointer < ram_end() - limit:
         return ""
     return read(ram_offset(pointer), limit).split(b"\0")[0].decode("latin-1")
 
@@ -120,10 +131,14 @@ class PlayerTwo:
     species: int
     exp: int
     bits: int = 0
+    label = "Player 2"
 
     @property
     def level(self) -> int:
         return level_for(self.exp)
+
+    def stats(self) -> dict:
+        return stats_for(self.level)
 
     def summary(self) -> str:
         level = self.level
@@ -146,6 +161,24 @@ class PlayerTwo:
     def save(self, path: Path):
         _atomic_write(Path(path), json.dumps({"format": 1, "species": self.species, "exp": self.exp, "level": self.level,
                                               "bits": self.bits}, indent=2).encode())
+
+
+@dataclass
+class LinkedPlayer(PlayerTwo):
+    """The other split-screen player: their game's level and stats; exp and bits count what this game owes them."""
+    fixed_level: int = 1
+    fixed_stats: dict | None = None
+    label: str = "Player 2"
+
+    @property
+    def level(self) -> int:
+        return self.fixed_level
+
+    def stats(self) -> dict:
+        return self.fixed_stats or stats_for(self.fixed_level)
+
+    def summary(self) -> str:
+        return f"Lv {self.fixed_level}"
 
 
 def available_commands(brains: int) -> tuple[int, ...]:
@@ -173,6 +206,7 @@ class AllyPanel:
     finisher_ready: bool
     down: bool
     left: bool
+    owner: str = "P2"
 
 
 class CoopBattle:
@@ -186,6 +220,9 @@ class CoopBattle:
         self.sound_events: list[str] = []
         self.panel: AllyPanel | None = None
         self.messages: list[str] = []
+        self.owner = "P2"  # how the panel names the player
+        self.can_join = None  # in split screen, asked when an enemy is met: is the other player there to join?
+        self.foes: list[int] = []  # the Digimon the ally fought in this battle
         self.reset()
 
     def reset(self):
@@ -204,6 +241,7 @@ class CoopBattle:
         self._finisher_armed = False
         self._was_holding = False
         self._after_battle = False
+        self._map_row = None
         self.panel = None
         self.excluded_slot = None
 
@@ -225,7 +263,7 @@ class CoopBattle:
 
     def _entity(self, slot):
         pointer = self._u32(ENTITY_TABLE + slot * 4)
-        return pointer if 0x80000000 <= pointer < 0x80200000 - NPC_SIZE else None
+        return pointer if 0x80000000 <= pointer < ram_end() - NPC_SIZE else None
 
     def _location(self, entity):
         return self._u32(entity + POSITION) + LOCATION
@@ -248,11 +286,17 @@ class CoopBattle:
         return None
 
     def _free_slot(self):
-        """The highest NPC slot with no entity and no Digimon the map could still place: fighting last, in no script's way."""
-        for slot in range(LAST_NPC, FIRST_NPC - 1, -1):
-            if self._entity(slot) is None and self._s16(self._table_entry(slot)) in (-1, 0xFF):
-                return slot
-        return None
+        """The highest NPC slot with no entity and no Digimon the map could still place: fighting last, in no script's way.
+        In split screen, a row the map only lists for its scripts will do too; it goes back after the fight."""
+        empty = [slot for slot in range(LAST_NPC, FIRST_NPC - 1, -1) if self._entity(slot) is None]
+        unused = [slot for slot in empty if self._s16(self._table_entry(slot)) in (-1, 0xFF)]
+        return (unused or (empty if self.can_join is not None else []) or [None])[0]
+
+    @property
+    def engaged(self) -> bool:
+        """Between meeting an enemy with an ally and the end of the script that followed."""
+        return (self._state in ("joining", "battle", "ending", "left", "solo") or self._step is not None
+                or self._after_battle)
 
     def press(self, button: str):
         """A player 2 button, from the GUI thread; acted on between frames."""
@@ -281,19 +325,23 @@ class CoopBattle:
                 self.sound_events.append("choose")
 
     # -- calling the game ---------------------------------------------------------------------------------------
+    def _data(self):
+        """The routine's function, a0, a1, a2 and result."""
+        return work_area() + 0x200
+
     def _call(self, function, a0=0, a1=0, a2=0):
-        code = routine()
-        if self.read(ram_offset(ROUTINE), len(code)) != code:  # never rewritten once there, so no stale cached code
-            self.write(ram_offset(ROUTINE), code)
-        self.write(ram_offset(CALL_DATA), struct.pack("<5I", function, a0, a1, a2, NOT_DONE))
+        code = routine(self._data())
+        if self.read(ram_offset(work_area()), len(code)) != code:  # never rewritten once there, so no stale cached code
+            self.write(ram_offset(work_area()), code)
+        self.write(ram_offset(self._data()), struct.pack("<5I", function, a0, a1, a2, NOT_DONE))
         for index in range(OBJECT_COUNT):
             if self._s16(WORLD_OBJECTS + index * 12) == -1:
-                self.write(ram_offset(WORLD_OBJECTS + index * 12), struct.pack("<hhII", TASK_ID, 0, ROUTINE, 0))
+                self.write(ram_offset(WORLD_OBJECTS + index * 12), struct.pack("<hhII", TASK_ID, 0, work_area(), 0))
                 return True
         return False
 
     def _call_done(self):
-        return self._u32(CALL_DATA + 16) != NOT_DONE
+        return self._u32(self._data() + 16) != NOT_DONE
 
     # -- the frame ------------------------------------------------------------------------------------------------
     def tick(self) -> list[str]:
@@ -304,7 +352,7 @@ class CoopBattle:
         placing = self._step is not None
         if not placing and self._slot is not None and (self._entity(self._slot) is None
                                                        or self._i32(self._entity(self._slot)) != self.species):
-            self._slot = None  # the map changed
+            self._slot = self._map_row = None  # the map changed
         if in_battle:
             self._tick_battle()
         else:
@@ -345,7 +393,7 @@ class CoopBattle:
         if self._step == "place":
             if self._call_done():
                 self._step = None
-                if self._u32(CALL_DATA + 16) != 1 or self._entity(self._slot) is None:
+                if self._u32(self._data() + 16) != 1 or self._entity(self._slot) is None:
                     self._no_room("the game would not place it")
                     return
                 self._apply_stats(self._entity(self._slot))
@@ -357,27 +405,43 @@ class CoopBattle:
                 self._restore_chances()
                 self._state = "field"
             return
+        if self.can_join is not None and not self.can_join():
+            return
         if self._slot is None:
             if self._state == "no room":
                 return
-            if self._free_slot() is None or sum(self.read(ram_offset(NPC_MODEL_TAKEN), 20)[::4]) >= NPC_MODEL_SLOTS:
-                self._no_room("no room for its model on this map")
+            if self._free_slot() is None:
+                self._no_room("no free place on this map")
                 return
             self._source = talked
+            if self.species in self._listed_models():  # the map change will unload it, once
+                self.write(ram_offset(self._data() + 16), struct.pack("<I", 0))
+                self._step = "model"
+                return
+            if sum(self.read(ram_offset(NPC_MODEL_TAKEN), 20)[::4]) >= NPC_MODEL_SLOTS:
+                self._no_room("no room for its model on this map")
+                return
             self._step = "model"
             self._call(LOAD_NPC_MODEL, self.species)
             return
         self._state = "joining"
+        self._source = talked
         self._show_beside_partner()
         self._hold_join_chance()
 
+    def _listed_models(self):
+        return struct.unpack("<8i", self.read(ram_offset(LOADED_DIGIMON_MODELS), 32))
+
     def _no_room(self, why):
-        self.messages.append(f"Player 2's {self.names.get(self.species, 'Digimon')} can't join: {why}")
+        self.messages.append(f"{self.player.label}'s {self.names.get(self.species, 'Digimon')} can't join: {why}")
         self._step = None
         self._slot = None
         self._state = "no room"
 
     def _write_entry(self, slot, source):
+        row = self.read(ram_offset(self._table_entry(slot)), MAP_DIGIMON_SIZE)
+        if self._map_row is None and struct.unpack_from("<h", row)[0] not in (-1, 0xFF, self.species):
+            self._map_row = row
         entry = bytearray(self.read(ram_offset(self._table_entry(source)), MAP_DIGIMON_SIZE))
         struct.pack_into("<hH", entry, 0, self.species, ALLY_MARK)
         entry[FOLLOW_MODE] = 0  # ignores the Tamer
@@ -386,7 +450,7 @@ class CoopBattle:
         self.write(ram_offset(self._table_entry(slot)), bytes(entry))
 
     def _apply_stats(self, entity):
-        stats = stats_for(self.player.level)
+        stats = self.player.stats()
         self.write(ram_offset(entity + OFFENSE), struct.pack("<4h", stats["offense"], stats["defense"], stats["speed"], stats["brains"]))
         moves = species_moves(self.read, self.species)
         self.write(ram_offset(entity + MOVE_WEIGHTS), bytes(25 if move != 0xFF else 0 for move in moves))
@@ -396,9 +460,14 @@ class CoopBattle:
     def _hide(self):
         if self._slot is not None and self._entity(self._slot) is not None:
             self.write(ram_offset(self._entity(self._slot) + IS_ON_MAP), bytes([0, 0]))
+        if self._slot is not None and self._map_row is not None:  # a borrowed row: the map's scripts may want it
+            self.write(ram_offset(self._table_entry(self._slot)), self._map_row)
+            self._map_row = None
 
     def _show_beside_partner(self):
         entity = self._entity(self._slot)
+        if self.can_join is not None and self._s16(self._table_entry(self._slot) + 2) != ALLY_MARK:
+            self._write_entry(self._slot, self._source)
         x, y, z = self._position(self._entity(PARTNER_SLOT))
         self.write(ram_offset(self._location(entity)), struct.pack("<3i", x - 120, y, z + 60))
         self.write(ram_offset(entity + IS_ON_MAP), bytes([1, 1]))
@@ -428,13 +497,13 @@ class CoopBattle:
         self._restore_chances()
         count = self._s16(ENEMY_COUNT)
         combat = self._u32(COMBAT_DATA_PTR)
-        if not 1 <= count <= 3 or not 0x80000000 <= combat < 0x80200000:
+        if not 1 <= count <= 3 or not 0x80000000 <= combat < ram_end():
             return
         if self._state not in ("battle", "ending", "left", "solo"):
             ids = self._ids()[:count + 1]
             if self._slot is None or self._slot not in ids:
                 if self._state == "joining":
-                    self.messages.append("No room for player 2's Digimon in this fight")
+                    self.messages.append(f"No room for {self.player.label}'s Digimon in this fight")
                     self._hide()
                 # Player 2 still gains what this fight pays, as after loading a save made once the ally had left it.
                 self._state = "solo"
@@ -442,7 +511,7 @@ class CoopBattle:
                 return
             self._ally_index = ids.index(self._slot)
             if self._ally_index != count:  # the ending relies on it being last
-                self.messages.append("Player 2's Digimon joined out of order; it sits this one out")
+                self.messages.append(f"{self.player.label}'s Digimon joined out of order; it sits this one out")
                 self._state = "solo"
                 return
             self._state = "battle"
@@ -451,7 +520,8 @@ class CoopBattle:
             self._targets = {}
             self._money_before = self._i32(MONEY)
             self._presses.clear()
-            self._commands = available_commands(stats_for(self.player.level)["brains"])
+            self._commands = available_commands(self.player.stats()["brains"])
+            self.foes = [self._i32(self._entity(slot)) for slot in ids[1:] if slot != self._slot and self._entity(slot)]
             self._hovered = len(self._commands) - 1  # Your Call, as the partner starts
             self._current = YOUR_CALL
             self._target = 0
@@ -494,7 +564,7 @@ class CoopBattle:
             self.excluded_slot = self._slot
             self.write(ram_offset(self._entity(self._slot) + IS_ON_MAP), bytes([0, 0]))
             if ran:
-                self.messages.append("Player 2 ran from the fight")
+                self.messages.append(f"{self.player.label} ran from the fight")
             return
         ally_entity = self._entity(self._slot)
         ally_alive = self._alive(ally)
@@ -584,16 +654,16 @@ class CoopBattle:
         ready = goal > 0 and self._s16(fighter + FINISHER_PROGRESS) >= goal - 1 and not self._finisher_armed
         self.panel = AllyPanel(self.names.get(self.species, "Digimon"), self.player.summary(), max(self._s16(entity + HP), 0),
                                self._s16(entity + MAX_HP), max(self._s16(entity + MP), 0), self._s16(entity + MAX_MP),
-                               self._commands[1:], self._hovered - 1, self._current, self._name(target), ready, down, False)
+                               self._commands[1:], self._hovered - 1, self._current, self._name(target), ready, down, False, self.owner)
 
     def gain_exp(self, amount: int) -> list[str]:
         """The EXP the main player just gained goes to player 2 as well."""
         before = self.player.level
         self.player.exp = min(self.player.exp + amount, total_exp(LEVEL_MAX))
         after = self.player.level
-        messages = [f"Player 2: +{amount} EXP — {self.player.summary()}"]
+        messages = [f"{self.player.label}: +{amount} EXP — {self.player.summary()}"]
         if after > before:
-            messages.append(f"Player 2 level up! Lv {after}")
+            messages.append(f"{self.player.label} level up! Lv {after}")
             entity = self._entity(self._slot) if self._slot is not None else None
             if entity is not None and self._s16(GAME_STATE) == 0:
                 self._apply_stats(entity)
@@ -605,7 +675,7 @@ class CoopBattle:
             try:
                 self.player.save(self.path)
             except OSError as exc:
-                self.messages.append(f"Player 2's progress could not be written: {exc}")
+                self.messages.append(f"{self.player.label}'s progress could not be written: {exc}")
 
     def _leave_battle(self):
         if self._money_before is not None:
@@ -613,7 +683,7 @@ class CoopBattle:
             self._money_before = None
             if gained > 0:
                 self.player.bits += gained
-                self.messages.append(f"Player 2: +{gained} Bits — {self.player.bits} Bits")
+                self.messages.append(f"{self.player.label}: +{gained} Bits")
                 self._save()
         self._hide()
         if self._slot is not None and self._entity(self._slot) is not None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import queue
+import struct
 import threading
 import time
 import traceback
@@ -28,11 +29,13 @@ from .graphics import SCREENS, screen_rects
 from .inspection import CATEGORIES, InspectionError, InspectionStore, SpawnLog
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
                        LibretroError)
-from .live import LiveNpc, LiveState, grid_differences, read_live_state
+from .live import LiveNpc, LiveState, RAM_SIZE, grid_differences, ram_offset, read_live_state, set_ram_size
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
-from .coop import CONFIRM, LEFT, RIGHT, SQUARE, CoopBattle, PlayerTwo
+from .coop import CONFIRM, LEFT, MONEY, RIGHT, SQUARE, CoopBattle, LinkedPlayer, PlayerTwo
 from .hd_background import BackgroundLayer, Compositor, HdPictures
 from .split_screen import SplitGame, choosable_saves, copy_save
+from .extra_memory import extend_heap
+from .visitor import PARTNER, TAMER, Visitor, match_world, on_the_field, read_partner_stats, read_record, read_world
 from .hud_view import HudPainter, HudState, command_icons, draw_ally_panel, read_hud
 from .progression import BattleResult, GameRules, Progress
 from .avatars import load_avatars
@@ -48,6 +51,7 @@ from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveError, QuickSaveStore, 
 # player and NPCs (2026-11-03). The code stays for later work; nothing patches the game while this is False.
 WORLD_ZOOM_ENABLED = False
 FAST_FORWARD = 4  # speed while fast-forward is held
+EXTEND_HEAP_FRAMES = 30
 MEMORY_CARD_FLUSH_FRAMES = 600  # write a changed memory card about every 10 s
 LIVE_FRAMES = 10  # read the live map, positions and grid about six times a second
 IMAGE_FORMATS = {PIXEL_XRGB8888: QImage.Format.Format_RGB32, PIXEL_RGB565: QImage.Format.Format_RGB16,
@@ -61,6 +65,7 @@ DEFAULT_KEYS = {
     Qt.Key.Key_Return: "Start", Qt.Key.Key_Enter: "Start", Qt.Key.Key_Backspace: "Select",
 }
 # Player 2's battle controls in the co-op test, the same as player 1's: Left, Right, confirm and finisher.
+ALLY_BUTTONS = {"Left": LEFT, "Right": RIGHT, "B": CONFIRM, "Y": SQUARE}  # what the guest's buttons do in a shared fight
 COOP_KEYS = {Qt.Key.Key_J: LEFT, Qt.Key.Key_L: RIGHT, Qt.Key.Key_K: CONFIRM, Qt.Key.Key_U: SQUARE}
 
 
@@ -153,6 +158,14 @@ class EmulatorWorker(QObject):
         self._hud_painter: HudPainter | None = None
         self.save_slot: int | None = config.launch_slot  # the save player 1 is playing, which player 2 may not take
         self.split_slot: int | None = None  # the save player 2 started from
+        self.link = None  # split_screen.WorldLink while split screen shares the partners' positions
+        self.visitors: list[Visitor] = []
+        self.player_label = "Player 1"  # this game's player; player 2's game says otherwise
+        self._solo_coop: CoopBattle | None = None  # the Co-op battle test, put away during split screen
+        self._linked: LinkedPlayer | None = None
+        self._awards_seen = (0, 0)
+        self._dex_seen = 0
+        self._dex_sent: set[int] = set()
         self.coop: CoopBattle | None = None
         self._coop_icons = None
         self._coop_icon_tries = 0
@@ -262,6 +275,9 @@ class EmulatorWorker(QObject):
                 self.hd_layer = BackgroundLayer(core.read_memory, core.serialize, HdPictures(config.hd_pictures).path,
                                                 on_error=self.message.emit)
                 self._compositor = Compositor(self.hd_layer, self._publish_composed, self._hd_failed)
+            set_ram_size(core.ram_size)
+            if config.live_ram and core.ram_size > RAM_SIZE:
+                self.message.emit(f"Extended core: the game has {core.ram_size // (1024 * 1024)} MB of RAM")
             if config.coop_species is not None and config.live_ram:
                 path = config.store_dir / "coop_player2.json"
                 self.coop = CoopBattle(core.read_memory, core.write_memory,
@@ -299,6 +315,9 @@ class EmulatorWorker(QObject):
             if self.paused:
                 self._stop.wait(0.02); deadline = time.perf_counter()
                 continue
+            if self.link is not None and self.link.is_guest():  # the other game is running the fight: wait for it
+                self._stop.wait(0.005); deadline = time.perf_counter()
+                continue
             core.buttons = self.buttons
             if self.evolution is not None:
                 try:
@@ -316,6 +335,8 @@ class EmulatorWorker(QObject):
             audio = self._menu_audio.mix(audio)
             if self.coop is not None:
                 self._apply_coop()
+            if self.link is not None or self.visitors:
+                self._apply_visitors(core)
             if self.rules is not None:
                 self._apply_rules()
             self._ensure_camera()
@@ -326,6 +347,8 @@ class EmulatorWorker(QObject):
                 self._reported_zoom = zoom_state
                 self.camera_zoom_changed.emit(*zoom_state)
             frames += 1
+            if self.config.live_ram and core.ram_size > RAM_SIZE and frames % EXTEND_HEAP_FRAMES == 0:
+                extend_heap(core.read_memory, core.write_memory, core.ram_size)
             if frame is not None:
                 image = battle_result_image(frame_image(frame), self.rules.battle_result if self.rules else None)
                 menu = self.evolution.menu if self.evolution else None
@@ -356,6 +379,104 @@ class EmulatorWorker(QObject):
                 time.sleep(delay)
             elif delay < -0.25:  # far behind (a slow frame or a breakpoint): do not try to catch up
                 deadline = time.perf_counter()
+
+    def _apply_visitors(self, core):
+        try:
+            link = self.link
+            if link is None:  # split screen ended: take them off the map
+                for visitor in self.visitors:
+                    visitor.hide()
+                self.visitors = []
+                self.coop, self._solo_coop, self._linked = self._solo_coop, None, None
+                return
+            if not self.visitors:
+                self.visitors = [Visitor(core.read_memory, core.write_memory, actor) for actor in (PARTNER, TAMER)]
+                self._start_linked_battles(core, link)
+            self._run_shared_battle(core, link)
+            for visitor in self.visitors:
+                link.publish(read_record(core.read_memory, visitor.actor), visitor.actor)
+                busy = any(placing._step is not None for placing in self.visitors if placing is not visitor)
+                for text in visitor.tick(link.other(visitor.actor), busy):
+                    self.message.emit(text)
+        except Exception as exc:  # the game must keep running
+            traceback.print_exc()
+            self.message.emit(f"Shared world turned off: {exc}")
+            self.link = None
+            self.visitors = []
+
+    def _start_linked_battles(self, core, link):
+        self._solo_coop = self.coop
+        other = "Player 1" if self.player_label == "Player 2" else "Player 2"
+        self._linked = LinkedPlayer(0, 0, label=other)
+        self.coop = CoopBattle(core.read_memory, core.write_memory, self._linked)
+        self.coop.owner = "P1" if other == "Player 1" else "P2"
+        self.coop.can_join = lambda: self._other_can_join(core, link)
+        self._awards_seen = (0, 0)
+        self._dex_seen = 0
+        self._dex_sent = set()
+
+    def _other_can_join(self, core, link) -> bool:
+        """When this game meets an enemy: the other player's partner, seen here on this map, joins."""
+        other, partner = link.other(PARTNER), link.other_partner()
+        here = read_record(core.read_memory, PARTNER)
+        if (other is None or partner is None or here is None or not other.visible or other.map != here.map
+                or self.visitors[PARTNER]._slot is None):
+            return False
+        self._linked.species, self._linked.fixed_level, self._linked.fixed_stats = other.species, partner[0], partner[1]
+        if self.coop.species != other.species:
+            self.coop.species, self.coop._slot = other.species, None
+            self.coop.names = {}
+        return True
+
+    def _run_shared_battle(self, core, link):
+        coop = self.coop
+        link.set_hosting(coop.engaged)
+        for code in link.take_presses():
+            coop.press(code)
+        stats = read_partner_stats(core.read_memory)
+        if stats is not None:
+            link.publish_partner(self.rules.progress.level if self.rules is not None else 1, stats)
+        link.award_other(self._linked.exp, self._linked.bits)
+        if coop.foes and self.dex is not None and coop.foes != sorted(self._dex_sent):
+            entries = {str(kind): self.dex.entries[str(kind)] for kind in coop.foes if str(kind) in self.dex.entries}
+            if entries:
+                link.send_dex(entries)
+                self._dex_sent = set(coop.foes)
+        self._take_rewards(core, link)
+        self._share_world(core, link)
+
+    def _share_world(self, core, link):
+        """Only on the field: a battle or script takes Digimon off the map for a while, which isn't them being beaten."""
+        if not on_the_field(core.read_memory):
+            return
+        skip = {visitor._slot for visitor in self.visitors} | {self.coop._slot}
+        link.publish_world(read_world(core.read_memory, skip))
+        theirs = link.other_world()
+        if theirs is not None:
+            match_world(core.read_memory, core.write_memory, theirs, self.player_label == "Player 1", skip)
+
+    def _take_rewards(self, core, link):
+        """What the other game's fight earned this player."""
+        exp_total, bits_total = link.my_awards()
+        exp, bits = exp_total - self._awards_seen[0], bits_total - self._awards_seen[1]
+        self._awards_seen = (exp_total, bits_total)
+        if exp > 0 and self.rules is not None:
+            for text in self.rules.gain(exp, "Co-op battle"):
+                self.message.emit(text)
+            self._write_progress()
+            self.progress_changed.emit(self.rules.progress.summary())
+        if bits > 0:
+            money = struct.unpack("<i", core.read_memory(ram_offset(MONEY), 4))[0]
+            core.write_memory(ram_offset(MONEY), struct.pack("<i", money + bits))
+            self.message.emit(f"Co-op battle: +{bits} Bits")
+        self._dex_seen, entries = link.take_dex(self._dex_seen)
+        if entries and self.dex is not None:
+            new = {key: entry for key, entry in entries.items() if key not in self.dex.entries and DigiDex._valid_entry(entry)}
+            if new:
+                self.dex.entries.update(new)
+                self.dex.dirty = True
+                self.dex.save()
+                self.dex_changed.emit(self.dex.snapshot())
 
     def _apply_coop(self):
         try:
@@ -463,6 +584,8 @@ class EmulatorWorker(QObject):
             self.hd_layer.reset()
         if self.coop is not None:
             self.coop.reset()
+        for visitor in self.visitors:
+            visitor.reset()
 
     def _read_hud(self, core: LibretroCore, menu):
         """What the on-screen map and bars show for this frame; nothing over the workbench's own game menus."""
@@ -541,6 +664,8 @@ class EmulatorWorker(QObject):
         # No live evolution-selector patch may escape into a slot or inspection.
         if self.evolution is not None:
             self.evolution.restore()
+        for visitor in self.visitors:
+            visitor.hide()
         return self.core.serialize()
 
     def _save(self, slot: int, note: str = ""):
@@ -740,6 +865,7 @@ class FrameView(QWidget):
         self.setMinimumSize(320, 240)
         self.image: QImage | None = None
         self.second: QImage | None = None  # player 2's game, in split screen
+        self.shared = None  # in a shared fight, the player whose game is running it: both halves show that game
         self.aspect = 4 / 3
         self.smooth = False
         self.screen = SCREENS[0]
@@ -755,7 +881,8 @@ class FrameView(QWidget):
         if self.second is not None and self.image is not None:
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.smooth)
             half = self.width() / 2
-            for left, picture in ((0, self.image), (half, self.second)):
+            pictures = {None: (self.image, self.second), 0: (self.image, self.image), 1: (self.second, self.second)}[self.shared]
+            for left, picture in ((0, pictures[0]), (half, pictures[1])):
                 x, y, w, h = screen_rects(half - 1, self.height(), self.aspect, SCREENS[0])[1]
                 painter.drawImage(QRectF(left + x, y, w, h), picture)
             painter.fillRect(QRectF(half - 1, 0, 2, self.height()), QColor("#3080c0"))
@@ -1079,6 +1206,8 @@ class PlayWindow(QMainWindow):
         if event.key() == Qt.Key.Key_Tab:
             self.worker.fast_forward = pressed
             return True
+        if self._split is not None and self._split.link.host() is not None:
+            return self._shared_fight_key(event, pressed)
         if self._split is not None and event.key() in SPLIT_KEYS:
             bit = 1 << BUTTON[SPLIT_KEYS[event.key()]]
             self._split_held = self._split_held | bit if pressed else self._split_held & ~bit
@@ -1276,6 +1405,30 @@ class PlayWindow(QMainWindow):
         if self.audio is not None:
             self.audio.write(data)
 
+    def _shared_fight_key(self, event, pressed: bool) -> bool:
+        """In a shared fight the host's buttons reach its game as usual; the guest's order the ally."""
+        host = self._split.link.host()
+        split_button, own_button = SPLIT_KEYS.get(event.key()), self.keys.get(event.key())
+        if split_button is None and own_button is None:
+            return False
+        if host == 0:
+            if split_button is not None:  # player 2's keys
+                if pressed and split_button in ALLY_BUTTONS:
+                    self.worker.coop.press(ALLY_BUTTONS[split_button])
+                return True
+            bit = 1 << BUTTON[own_button]
+            self._held = self._held | bit if pressed else self._held & ~bit
+            self.worker.buttons = self._held
+            return True
+        if split_button is not None:  # player 2 hosts: their game takes their keys
+            bit = 1 << BUTTON[split_button]
+            self._split_held = self._split_held | bit if pressed else self._split_held & ~bit
+            self._split.set_buttons(self._split_held)
+            return True
+        if pressed and own_button in ALLY_BUTTONS:
+            self._split.link.send_press(1, ALLY_BUTTONS[own_button])
+        return True
+
     @Slot(object)
     def _split_requested(self, request):
         if request == "stop":
@@ -1294,6 +1447,8 @@ class PlayWindow(QMainWindow):
             self._message(f"Split screen could not start: {exc}")
             return
         self.worker.split_slot = request
+        if self.config.live_ram:
+            self.worker.link = self._split.link
         self._split_timer.start(16)
         self.live_dock.setVisible(False)
         if not self.isFullScreen():
@@ -1308,6 +1463,10 @@ class PlayWindow(QMainWindow):
             self._message("Player 2's game has stopped")
             self._stop_split()
             return
+        shared = self._split.link.host()
+        if shared != self.view.shared:
+            self.view.shared = shared
+            self.view.update()
         frame = self._split.newest_frame()
         if frame is not None:
             width, height, data = frame
@@ -1316,6 +1475,7 @@ class PlayWindow(QMainWindow):
 
     def _stop_split(self):
         self._split_timer.stop()
+        self.worker.link = None
         if self._split is not None:
             split, self._split = self._split, None
             self._split_held = 0
@@ -1325,6 +1485,7 @@ class PlayWindow(QMainWindow):
                 self._message(f"Split screen did not stop cleanly: {exc}")
         self.worker.split_slot = None
         self.view.second = None
+        self.view.shared = None
         self.view.update()
 
     @Slot(str)

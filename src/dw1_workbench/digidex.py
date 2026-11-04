@@ -10,7 +10,7 @@ import struct
 from pathlib import Path
 
 from .characters import STAGES, MOVE_NAME_COUNT
-from .live import ENTITY_TABLE, ram_offset
+from .live import ENTITY_TABLE, ram_offset, ram_end
 from .progression import DIGIMON_DATA, DIGIMON_PARA_SIZE, PARTNER_ENTITY, PARTNER_STATS, GAME_STATE, ENEMY_COUNT, COMBAT_DATA_PTR, COMBAT_ENTITY_IDS
 from .quicksave import _atomic_write
 
@@ -152,7 +152,7 @@ class DigiDex:
             self.dirty |= changed
             return []
         count, combat = number(ENEMY_COUNT), number(COMBAT_DATA_PTR, "<I")
-        if not 1 <= count <= 3 or not 0x80000000 <= combat <= 0x80200000 - COMBAT_ENTITY_IDS - 4:
+        if not 1 <= count <= 3 or not 0x80000000 <= combat <= ram_end() - COMBAT_ENTITY_IDS - 4:
             self.dirty |= changed
             return []
         slots = [slot for slot in read(ram_offset(combat + COMBAT_ENTITY_IDS + 1), count) if slot != self.excluded_slot]
@@ -161,7 +161,7 @@ class DigiDex:
             return []
         for slot in slots:
             pointer = number(ENTITY_TABLE + slot * 4, "<I")
-            if not 0x80000000 <= pointer <= 0x80200000 - 104:
+            if not 0x80000000 <= pointer <= ram_end() - 104:
                 continue
             kind = number(pointer, "<i")
             if not 0 < kind < 180 or kind not in catalog:
@@ -267,7 +267,7 @@ def skill_summary(move):
 def read_skill(read, move):
     pointer = struct.unpack("<I", read(ram_offset(0x80126054 + move * 4), 4))[0]
     name = ""
-    if 0x80000000 <= pointer <= 0x80200000 - 64:
+    if 0x80000000 <= pointer <= ram_end() - 64:
         raw = read(ram_offset(pointer), 64)
         if b"\0" in raw:
             name = raw.split(b"\0", 1)[0].decode("ascii", errors="replace")

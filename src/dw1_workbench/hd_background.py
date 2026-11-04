@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .live import CURRENT_SCREEN, ram_offset
+from .live import CURRENT_SCREEN, ram_offset, ram_end
 from .quicksave import _atomic_write
 
 MAP_TILE_DATA = 0x8014F084  # MapTileData tiles[35] (20 bytes each), then ...
@@ -335,7 +335,7 @@ class MapBackground:
         for row in range(self.height):
             for column in range(self.width):
                 pointer, tile_id, _, _, _, tex_v = struct.unpack_from("<Ihhhhh", table, (row * self.width + column) * 20)
-                if tile_id == -1 or not 0x80000000 <= pointer < 0x80200000 - TILE * TILE:
+                if tile_id == -1 or not 0x80000000 <= pointer < ram_end() - TILE * TILE:
                     continue
                 tile = np.frombuffer(self.read(ram_offset(pointer), TILE * TILE), np.uint8).reshape(TILE, TILE)
                 self.squeezed[row] = tex_v % 256 != 0
@@ -545,7 +545,7 @@ class BackgroundLayer:
         changed = self._palette is None or not np.array_equal(palette, self._palette)
         self._palette = palette
         pointer = struct.unpack("<I", self.read(ram_offset(MAP_CLUTS), 4))[0]
-        base = rgb5(self.read(ram_offset(pointer), 512)) if 0x80000000 <= pointer < 0x80200000 - 512 else palette
+        base = rgb5(self.read(ram_offset(pointer), 512)) if 0x80000000 <= pointer < ram_end() - 512 else palette
         self._tables = channel_tables(base, palette)
         self._palette_reads += 1
         in_battle = struct.unpack("<h", self.read(ram_offset(GAME_STATE), 2))[0] != 0

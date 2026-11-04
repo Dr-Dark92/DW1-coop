@@ -27,7 +27,7 @@ import struct
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .live import ram_offset
+from .live import ram_offset, ram_end
 
 # -- the rules ----------------------------------------------------------------------------------------------------
 LEVEL_MAX = 99
@@ -300,7 +300,7 @@ class GameRules:
         """DigimonPara.level of each enemy in the running battle."""
         count = self._s16(ENEMY_COUNT)
         combat = self._u32(COMBAT_DATA_PTR)
-        if not 1 <= count <= 3 or not 0x80000000 <= combat < 0x80200000:
+        if not 1 <= count <= 3 or not 0x80000000 <= combat < ram_end():
             return []
         ids = self.read(ram_offset(combat + COMBAT_ENTITY_IDS), 4)
         levels = []
@@ -310,7 +310,7 @@ class GameRules:
             if not 2 <= entity_id < 10:
                 return []
             entity = self._u32(ENTITY_TABLE + entity_id * 4)
-            if not 0x80000000 <= entity < 0x80200000:
+            if not 0x80000000 <= entity < ram_end():
                 return []
             kind = struct.unpack("<i", self.read(ram_offset(entity), 4))[0]
             if not 0 <= kind < 180:

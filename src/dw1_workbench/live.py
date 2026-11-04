@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 RAM_BASE = 0x80000000
 RAM_SIZE = 0x200000
+RAM_ADDRESS_MASK = 0x7FFFFF  # up to the 8 MB of the extended core
 CURRENT_SCREEN = 0x80134DA8  # u8 map-table index, set by the map loader after the floor grid is copied
 TAMER_ENTITY = 0x8015576C  # TamerEntity; starts with Entity {i32 type; PositionData *posData; ...}
 PARTNER_ENTITY = 0x801557A8  # PartnerEntity; starts with the same Entity header
@@ -33,8 +34,21 @@ POSITION_POINTER_OFFSET = 4
 LOCATION_OFFSET = 120
 
 
+_ram_size = RAM_SIZE  # the running core's: more than the console's RAM_SIZE on the extended core
+
+
+def set_ram_size(size: int) -> None:
+    global _ram_size
+    _ram_size = size
+
+
+def ram_end() -> int:
+    """The first address past this core's main RAM, for checking pointers read from the game."""
+    return RAM_BASE + _ram_size
+
+
 def ram_offset(address: int) -> int:
-    return (address - RAM_BASE) & (RAM_SIZE - 1)
+    return (address - RAM_BASE) & RAM_ADDRESS_MASK
 
 
 def _c_div(value: int, divisor: int) -> int:
@@ -103,7 +117,7 @@ class LiveState:
 
 
 def _in_ram(pointer: int, size: int) -> bool:
-    return RAM_BASE <= pointer and pointer + size <= RAM_BASE + RAM_SIZE
+    return RAM_BASE <= pointer and pointer + size <= ram_end()
 
 
 def _position(read, entity_address: int) -> EntityPosition | None:

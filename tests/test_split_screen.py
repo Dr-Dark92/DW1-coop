@@ -103,6 +103,7 @@ def test_stopping_copes_with_the_memory_already_gone():
     game = S.SplitGame.__new__(S.SplitGame)
     game.memory = S.shared_memory.SharedMemory(create=True, size=S.HEADER.size)
     game.process = Exited()
+    game.link = S.WorldLink(game.memory, 0)
     other = S._attach(game.memory.name)
     other.close()
     other.unlink()

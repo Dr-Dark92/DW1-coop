@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter
 
-from .live import LiveState, ram_offset
+from .live import LiveState, ram_offset, ram_end
 from .maps import follow_kind, trigger_kind
 from .progression import CURRENT_HP, CURRENT_MP, PARTNER_ENTITY, PARTNER_STATS, STAT_FIELDS
 
@@ -117,7 +117,7 @@ def draw_ally_panel(image: QImage, panel, icons: dict | None, bars: "HudPainter"
     font = QFont("Arial"); font.setPixelSize(9); font.setBold(True); painter.setFont(font)
     entries = len(panel.commands)
     if panel.down:
-        _shadow_text(painter, 20, 205, f"P2 {panel.name} is down", "#ff9090")
+        _shadow_text(painter, 20, 205, f"{panel.owner} {panel.name} is down", "#ff9090")
     else:
         for index, command in enumerate(panel.commands):
             x = 20 + (entries - 1 - index) * ICON_STEP
@@ -141,7 +141,7 @@ def draw_ally_panel(image: QImage, panel, icons: dict | None, bars: "HudPainter"
             else:
                 painter.fillRect(QRectF(x, y, ICON_W - 2, ICON_H - 2), QColor(FRAME_BLUE if index == panel.hovered else FRAME_MID))
         _shadow_text(painter, 20, 192, COMMAND_NAMES.get(panel.commands[panel.hovered], ""))
-    _shadow_text(painter, 20, 232, f"P2 {panel.name} · {panel.progress}", "#fad990")
+    _shadow_text(painter, 20, 232, f"{panel.owner} {panel.name} · {panel.progress}", "#fad990")
     bars._bar_row(painter, P2_BAR_X, P2_BAR_Y, "hp", HEART, panel.hp, panel.max_hp)
     bars._bar_row(painter, P2_BAR_X, P2_BAR_Y + BAR_STEP, "mp", ORB, panel.mp, panel.max_mp)
     if not panel.down:
@@ -154,7 +154,7 @@ def draw_ally_panel(image: QImage, panel, icons: dict | None, bars: "HudPainter"
 def _floor_position(read, entity: int) -> tuple[float, float] | None:
     """An entity's place on the 100 × 100 floor grid, in fractions of a tile so the marker moves smoothly."""
     pointer = struct.unpack("<I", read(ram_offset(entity + 4), 4))[0]
-    if not 0x80000000 <= pointer < 0x80200000 - 136:
+    if not 0x80000000 <= pointer < ram_end() - 136:
         return None
     x, _, z = struct.unpack("<3i", read(ram_offset(pointer + 120), 12))
     return x / 100 + 50, 50 - z / 100

@@ -72,19 +72,19 @@ def contact(ram, slot=5):
 
 
 def finish_call(ram, result=1):
-    ram.put(C.CALL_DATA + 16, "<I", result)
+    ram.put((C.work_area() + 0x200) + 16, "<I", result)
 
 
 def spawn(ram, coop):
     """Run the load, the placement and the join as the game would."""
     contact(ram)
     coop.tick()
-    assert ram.get(C.CALL_DATA, "<I") == C.LOAD_NPC_MODEL and ram.get(C.CALL_DATA + 4, "<I") == SPECIES
+    assert ram.get((C.work_area() + 0x200), "<I") == C.LOAD_NPC_MODEL and ram.get((C.work_area() + 0x200) + 4, "<I") == SPECIES
     coop.tick()  # still loading
     finish_call(ram, 0)
     coop.tick()
-    assert ram.get(C.CALL_DATA, "<I") == C.SCRIPT_SET_DIGIMON
-    assert ram.get(C.CALL_DATA + 8, "<I") == 9 - 2  # the highest free slot, so it fights last
+    assert ram.get((C.work_area() + 0x200), "<I") == C.SCRIPT_SET_DIGIMON
+    assert ram.get((C.work_area() + 0x200) + 8, "<I") == 9 - 2  # the highest free slot, so it fights last
     address = entity(ram, 9, SPECIES)
     finish_call(ram, 1)
     coop.tick()
@@ -99,7 +99,7 @@ def battle(ram, ids, count):
 
 
 def test_routine_is_r3000_safe_and_removes_itself():
-    words = struct.unpack(f"<{len(C.routine()) // 4}I", C.routine())
+    words = struct.unpack(f"<{len(C.routine(C.work_area() + 0x200)) // 4}I", C.routine(C.work_area() + 0x200))
     jal = 0x0C000000 | (C.REMOVE_OBJECT >> 2) & 0x3FFFFFF
     assert jal in words and words[words.index(jal) + 1] == 0  # branch delay slot
     jalr = words.index(0x0320F809)
@@ -299,3 +299,11 @@ def test_a_fight_the_ally_is_not_in_still_pays_player_two(game):
     game.put(C.MONEY, "<i", 170)
     game.put(C.GAME_STATE, "<h", 0)
     assert any("+70 Bits" in text for text in coop.tick())
+
+
+def test_a_linked_player_uses_the_other_games_stats_and_counts_gains():
+    stats = {"offense": 11, "defense": 22, "speed": 33, "brains": 450, "hp": 900, "mp": 800}
+    player = C.LinkedPlayer(3, 0, fixed_level=7, fixed_stats=stats, label="Player 1")
+    assert player.level == 7 and player.stats() == stats and player.summary() == "Lv 7"
+    player.exp += 30
+    assert player.level == 7  # their own game levels them up
