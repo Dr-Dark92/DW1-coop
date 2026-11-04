@@ -8,21 +8,31 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QObject, QSettings, QStandardPaths, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
-from PySide6.QtWidgets import (QGroupBox, QScrollArea, QTabWidget, QCheckBox, QSpinBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+from PySide6.QtCore import QLockFile, QObject, QSize, Qt, QThread, QUrl, Signal, Slot
+from PIL import Image
+from PySide6.QtGui import QDesktopServices, QIcon, QImage, QPixmap
+from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QGroupBox, QSlider, QScrollArea, QTabWidget, QCheckBox, QSpinBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .errors import Cancelled
+from .errors import Cancelled, DiscFormatError
 from .graphics import DEFAULT_RESOLUTION, RESOLUTIONS, core_options
 from .inspection import InspectionStore, SpawnLog
 from .libretro import LibretroError, core_info
 from .maps import trigger_description
+from .avatars import render_character
 from .controls_view import ControlsPanel
-from .player import DEFAULT_KEYS, KEY_HELP, SPLIT_KEYS, PlayConfig, PlayWindow
-from .quicksave import RESUME_SLOT, QuickSaveStore
+from .shared_data import app_settings, saves_root
+from .tamer_skin import load_characters
+from .tim import decode_tim
+from .title_screens import SHOWN_ROWS, TITLE_SCREENS, TitleStore, disc_titles, encode_title, shown_part
+from .graphics import SCREENS
+from .player import DEFAULT_KEYS, KEY_HELP, SPLIT_KEYS, WORLD_ZOOM_ENABLED, PlayConfig, PlayWindow
+from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveStore
 
+ASK_CHARACTER, DEFAULT_CHARACTER = "ask", "default"
+CHARACTER_PICTURE = 240
+TITLE_PREVIEW = 160, 120
 LIBRARY_SUFFIX = ".dll" if sys.platform == "win32" else ".dylib" if sys.platform == "darwin" else ".so"
 CORE_NAMES = ("mednafen_psx_libretro", "swanstation_libretro", "pcsx_rearmed_libretro")
 # North American BIOS files. Beetle PSX looks for scph5501.bin first; the game also booted with SCPH1001.BIN
@@ -45,10 +55,6 @@ def find_installed_core() -> Path | None:
             if (candidate := folder / f"{name}{LIBRARY_SUFFIX}").is_file():
                 return candidate
     return None
-
-
-def saves_root() -> Path:
-    return Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)) / "DW1-coop" / "play"
 
 
 def disc_key(meta: dict) -> str:
@@ -112,6 +118,49 @@ class PatchWorker(QObject):
             self.finished.emit()
 
 
+FRAMERATE_OWN, FRAMERATE_MOST = 19.0, 360.0  # the box's lowest value stands for the game's own rate
+
+
+class CharacterDialog(QDialog):
+    """The choice at game start: each character, large, one click."""
+
+    def __init__(self, characters, disc: Path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Choose your character")
+        self._choice = None
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Who do you want to play as?"))
+        row = QHBoxLayout(); layout.addLayout(row)
+        self._add(row, "Default character", DEFAULT_CHARACTER, self._default_picture(disc))
+        for character in characters:
+            self._add(row, character.name, character.name, QPixmap(str(character.preview)))
+
+    @staticmethod
+    def _default_picture(disc: Path) -> QPixmap:
+        try:
+            image = render_character(disc, 0, CHARACTER_PICTURE)
+        except Exception:
+            return QPixmap()  # the button still names them
+        return QPixmap.fromImage(image) if image is not None else QPixmap()
+
+    def _add(self, row, text, value, picture):
+        button = QPushButton(text)
+        if not picture.isNull():
+            button.setIcon(QIcon(picture)); button.setIconSize(QSize(CHARACTER_PICTURE, CHARACTER_PICTURE))
+        button.setStyleSheet("text-align: center; padding: 8px")
+        button.clicked.connect(lambda _=False, chosen=value: self._pick(chosen))
+        row.addWidget(button)
+
+    def _pick(self, value):
+        self._choice = value
+        self.accept()
+
+    def choice(self):
+        """A character's name, DEFAULT_CHARACTER, or None when closed."""
+        self.exec()
+        return self._choice
+
+
 class PlayPanel(QWidget):
     show_map_requested = Signal(int)  # map-table index
     inspections_changed = Signal()
@@ -138,7 +187,7 @@ class PlayPanel(QWidget):
         self.store = QuickSaveStore(saves_root() / disc_key(meta))
         self.inspections = InspectionStore(self.store.directory / "inspections")
         self.spawns = SpawnLog(self.store.directory / "item_spawns.json")
-        self.settings = QSettings("DW1-coop", "workbench")
+        self.settings = app_settings()
         self.window: PlayWindow | None = None
 
         layout = QVBoxLayout(self)
@@ -166,7 +215,8 @@ class PlayPanel(QWidget):
         open_saves = QPushButton("Open folder"); open_saves.clicked.connect(self._open_saves); saves.addWidget(open_saves)
         form.addRow("Saves", saves)
         self.resume = QCheckBox("Keep a Resume slot when the game is closed")
-        self.resume.setChecked(self.settings.value("play/resume", True, type=bool))
+        self.resume.setToolTip("Off: closing the game keeps only what you saved, with Save or on the game's memory card.")
+        self.resume.setChecked(self.settings.value("play/resume", False, type=bool))
         self.resume.toggled.connect(lambda value: self.settings.setValue("play/resume", value))
         form.addRow("", self.resume)
         self.use_imports = QCheckBox()
@@ -222,10 +272,27 @@ class PlayPanel(QWidget):
         self.steady_3d.setToolTip("Less wobbly polygons and warped textures on 3D characters. Slightly slower.")
         self.steady_3d.setChecked(self.settings.value("play/steady_3d", False, type=bool))
         self.steady_3d.toggled.connect(lambda value: self.settings.setValue("play/steady_3d", value))
+        self.framerate = QDoubleSpinBox()
+        self.framerate.setRange(FRAMERATE_OWN, FRAMERATE_MOST); self.framerate.setDecimals(2); self.framerate.setSuffix(" fps")
+        self.framerate.setSpecialValueText("Game's own (about 59.83)")
+        self.framerate.setKeyboardTracking(False)
+        self.framerate.setValue(float(self.settings.value("play/framerate", FRAMERATE_OWN)))
+        self.framerate.setToolTip("Type the frames per second to run at. The game's speed is tied to this, so it runs faster "
+                                  "above about 59.83 and slower below it, with the sound's pitch following. Takes effect the "
+                                  "next time a game starts.")
+        self.framerate.valueChanged.connect(lambda value: self.settings.setValue("play/framerate", value))
+        form.addRow("Frame rate", self.framerate)
         for widget in (self.resolution, self.smooth_colours, self.steady_3d):
             picture.addWidget(widget)
         picture.addStretch(1)
         form.addRow("Picture", picture)
+        self._add_game_screen(group("Game screen"))
+        self._add_quick_saves(group("Quick saves"))
+        self._add_during_game(group("During a game"))
+        form = group("Character")
+        self.character = QComboBox()
+        self.character.setToolTip("Who you play as. They share the game's animations. Ask shows a choice each time a game starts.")
+        form.addRow("Play as", self.character)
         form = group("Imported Digimon")
         self.offer_forms = QCheckBox("Offer imported Digimon in the Digi-Bank's egg list (WarGreymon)")
         self.offer_forms.setToolTip("Needs imported resources on. When off they aren't offered as new eggs; one you "
@@ -233,7 +300,17 @@ class PlayPanel(QWidget):
         self.offer_forms.setChecked(self.settings.value("play/offer_forms", False, type=bool))
         self.offer_forms.toggled.connect(lambda value: self.settings.setValue("play/offer_forms", value))
         form.addRow("", self.offer_forms)
+        self._add_title_screens(group("Title screens"))
         settings_layout.addStretch(1)
+        self.characters = load_characters(self.hd_pictures.parent / "characters" if self.hd_pictures else None)
+        self.character.addItem("Ask when a game starts", ASK_CHARACTER)
+        self.character.addItem("Default character", DEFAULT_CHARACTER)
+        for character in self.characters:
+            self.character.addItem(character.name, character.name)
+        self.character.setCurrentIndex(max(self.character.findData(self.settings.value("play/character", ASK_CHARACTER)), 0))
+        self.character.currentIndexChanged.connect(lambda _: self.settings.setValue("play/character", self.character.currentData()))
+        self.character.setEnabled(bool(self.characters))
+        self._chosen_character = None
         self.refresh_imports()
         self.core.editingFinished.connect(self._check); self.bios.editingFinished.connect(self._check)
 
@@ -400,15 +477,186 @@ class PlayPanel(QWidget):
         if inspection_id is not None:
             self.launch(None, inspection_id)
 
+    def _add_game_screen(self, form):
+        """How the game window shows the game. Changes reach an open game straight away."""
+        def check(text, tip, key, setter):
+            box = QCheckBox(text); box.setToolTip(tip)
+            box.setChecked(self.settings.value(key, True, type=bool))
+            box.toggled.connect(lambda value: self._game_setting(key, value, setter))
+            form.addRow("", box)
+            return box
+        self.smooth = check("Smooth", "Blend pixels when the picture is enlarged (softer, less blocky)", "play/smooth", "_set_smooth")
+        self.hd_backgrounds = check("HD backgrounds", "Show your full-size zone and title pictures instead of the game's 8-bit ones",
+                                    "play/hd_backgrounds", "_set_hd")
+        self.hud = check("Map and HP/MP", "Show the map and your partner's HP and MP on the game screen, with the game's own status bars",
+                         "play/hud", "_set_hud")
+        self.screen = QComboBox(); self.screen.addItems(SCREENS)
+        self.screen.setToolTip("4:3: the original shape. 16:9 fill: the original shape in a 16:9 screen, with a blurred copy "
+                               "of the picture at the sides. 16:9 stretch: the picture stretched to 16:9 (wider characters).")
+        self.screen.setCurrentText(self.settings.value("play/screen", SCREENS[0]))
+        self.screen.currentTextChanged.connect(lambda value: self._game_setting("play/screen", value, "_set_screen"))
+        form.addRow("Screen", self.screen)
+        zoom = QHBoxLayout()
+        self.camera_zoom = QSlider(Qt.Orientation.Horizontal); self.camera_zoom.setRange(50, 100); self.camera_zoom.setValue(100)
+        self.camera_zoom.setFixedWidth(160); self.camera_zoom.setEnabled(WORLD_ZOOM_ENABLED)
+        self.camera_zoom.setToolTip("World zoom (USA): shows more of the map around the screen centre. The HUD stays native; past "
+                                    "a map's edge the view is black." if WORLD_ZOOM_ENABLED else
+                                    "World zoom is switched off for now: it crashed the game and misplaced characters.")
+        self.camera_zoom.valueChanged.connect(self._set_camera_zoom)
+        self.camera_zoom_status = QLabel("100%")
+        zoom.addWidget(self.camera_zoom); zoom.addWidget(self.camera_zoom_status); zoom.addStretch(1)
+        form.addRow("World zoom", zoom)
+
+    def _game_setting(self, key, value, setter):
+        self.settings.setValue(key, value)
+        if self.window is not None:
+            getattr(self.window, setter)(value)
+
+    def _set_camera_zoom(self, value):
+        if self.window is not None:
+            self.window.worker.set_camera_scale(value * 256 // 100)
+
+    def _add_quick_saves(self, form):
+        """Which slot the game window's Save and Load use. F6 and F7 in the game change it too."""
+        self.quick_slot = QComboBox(); self.quick_slot.addItems([f"Slot {index}" for index in range(1, SLOT_COUNT + 1)])
+        self.quick_note = QLineEdit(); self.quick_note.setPlaceholderText("Note for the next quick save, e.g. the zone")
+        self._sync_quick_save()
+        self.quick_slot.currentIndexChanged.connect(self._quick_slot_chosen)
+        self.quick_note.textChanged.connect(lambda text: self.settings.setValue("play/save_note", text))
+        form.addRow("Save and Load use", self.quick_slot)
+        form.addRow("Note", self.quick_note)
+
+    def _quick_slot_chosen(self, index):
+        self.settings.setValue("play/slot", index + 1)
+        if self.window is not None:
+            self.window.set_slot(index + 1)
+
+    def _sync_quick_save(self):
+        self.settings.sync()
+        for widget, set_value, value in (
+                (self.quick_slot, self.quick_slot.setCurrentIndex, min(max(self.settings.value("play/slot", 1, type=int), 1), SLOT_COUNT) - 1),
+                (self.quick_note, self.quick_note.setText, self.settings.value("play/save_note", "") or "")):
+            widget.blockSignals(True); set_value(value); widget.blockSignals(False)
+
+    def _add_during_game(self, form):
+        """For the game that is open. In the game's window these are P, Ctrl+R and F4."""
+        row = QHBoxLayout()
+        self.game_pause = QPushButton("Pause"); self.game_pause.setCheckable(True); self.game_pause.setToolTip("P in the game window")
+        self.game_reset = QPushButton("Reset"); self.game_reset.setToolTip("Ctrl+R in the game window")
+        self.game_dex = QPushButton("Digi-Dex"); self.game_dex.setToolTip("F4 in the game window")
+        self.game_pause.clicked.connect(lambda checked: self._game_action(lambda window: window.pause.setChecked(checked) or window._toggle_pause(checked)))
+        self.game_reset.clicked.connect(lambda: self._game_action(lambda window: window._reset()))
+        self.game_dex.clicked.connect(lambda: self._game_action(lambda window: window._show_digidex()))
+        for button in (self.game_pause, self.game_reset, self.game_dex):
+            row.addWidget(button)
+        row.addStretch(1)
+        form.addRow(row)
+        self._update_game_controls()
+
+    def _game_action(self, call):
+        if self.window is not None:
+            call(self.window)
+
+    def _update_game_controls(self):
+        window = self.window
+        self.game_pause.setEnabled(window is not None)
+        self.game_reset.setEnabled(window is not None)
+        self.game_dex.setEnabled(window is not None and window.dex_action.isEnabled())
+        if window is None:
+            self.game_pause.setChecked(False)
+
+    def _add_title_screens(self, form):
+        """Each title picture beside its buttons. Needs the project's overrides folder and the disc to read the originals from."""
+        self.title_store = TitleStore(self.hd_pictures.parent) if self.hd_pictures else None
+        self._title_originals = None
+        self._title_previews = {}
+        form.addRow(QLabel("Your own pictures, shown when the game starts from the disc (Play), not when it resumes a save. "
+                           "Any size works: with HD backgrounds on you see your picture at full size. On the Press Start "
+                           "screen, the game draws its text over the lower middle."))
+        for screen in TITLE_SCREENS:
+            row = QHBoxLayout()
+            preview = QLabel(); preview.setFixedSize(*TITLE_PREVIEW); row.addWidget(preview)
+            self._title_previews[screen.name] = preview
+            choose = QPushButton("Choose picture…"); choose.clicked.connect(lambda _=False, s=screen: self._choose_title(s))
+            save = QPushButton("Save as PNG…"); save.clicked.connect(lambda _=False, s=screen: self._save_title(s))
+            reset = QPushButton("Use the disc's"); reset.clicked.connect(lambda _=False, s=screen: self._reset_title(s))
+            actions = QVBoxLayout()
+            for button in (choose, save, reset):
+                button.setEnabled(self.title_store is not None)
+                actions.addWidget(button)
+            actions.addStretch(1)
+            row.addLayout(actions); row.addStretch(1)
+            form.addRow(screen.label, row)
+        self._show_titles()
+
+    def _title_original(self, screen) -> bytes | None:
+        if self._title_originals is None:
+            try:
+                self._title_originals = disc_titles(self.disc)
+            except (OSError, ValueError, KeyError, DiscFormatError):
+                self._title_originals = {}
+        return self._title_originals.get(screen.name)
+
+    def _title_now(self, screen) -> bytes | None:
+        return (self.title_store.get(screen) if self.title_store else None) or self._title_original(screen)
+
+    def _show_titles(self):
+        for screen in TITLE_SCREENS:
+            tim = self._title_now(screen)
+            if tim is None:
+                continue
+            image = decode_tim(tim).image.convert("RGB").crop((0, 0, 320, SHOWN_ROWS)).resize(TITLE_PREVIEW, Image.LANCZOS)
+            picture = QImage(image.tobytes(), image.width, image.height, image.width * 3, QImage.Format.Format_RGB888).copy()
+            self._title_previews[screen.name].setPixmap(QPixmap.fromImage(picture))
+
+    def _choose_title(self, screen):
+        original = self._title_original(screen)
+        if original is None:
+            QMessageBox.warning(self, "Title screens", "The disc's title pictures couldn't be read."); return
+        path, _ = QFileDialog.getOpenFileName(self, f"Picture for the {screen.label}", "", "Pictures (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not path:
+            return
+        try:
+            with Image.open(path) as picture:
+                self.title_store.set(screen, encode_title(original, picture), shown_part(picture, original))
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Title screens", f"That picture couldn't be used: {exc}"); return
+        self._show_titles(); self.refresh_imports()
+
+    def _save_title(self, screen):
+        tim = self._title_now(screen)
+        if tim is None:
+            QMessageBox.warning(self, "Title screens", "The disc's title pictures couldn't be read."); return
+        path, _ = QFileDialog.getSaveFileName(self, f"Save the {screen.label}", f"{screen.name}.png", "PNG picture (*.png)")
+        if path:
+            decode_tim(tim).image.convert("RGB").save(path)
+
+    def _reset_title(self, screen):
+        self.title_store.remove(screen)
+        self._show_titles(); self.refresh_imports()
+
     def refresh_imports(self):
         count = self.imports[0]()
-        self.use_imports.setText(f"Play with imported resources ({count} map/Digimon override{'s' if count != 1 else ''}; a patched "
+        self.use_imports.setText(f"Play with imported resources ({count} map/Digimon/title override{'s' if count != 1 else ''}; a patched "
                                  "copy of the disc is built, the original is untouched)")
         self.use_imports.setEnabled(count > 0)
 
+    def _choose_character(self) -> bool:
+        """Who to play as, from Settings or asked now. False when the player closed the question."""
+        self._chosen_character = None
+        if not self.characters:
+            return True
+        wanted = self.character.currentData()
+        if wanted == ASK_CHARACTER:
+            wanted = CharacterDialog(self.characters, self.disc, self).choice()
+            if wanted is None:
+                return False
+        self._chosen_character = next((c for c in self.characters if c.name == wanted), None)
+        return True
+
     def launch_directly(self) -> bool:
-        """DW1-play: carry on from the Resume slot, or power on without one. False when no game is starting."""
-        self.launch(RESUME_SLOT if self.store.info(RESUME_SLOT) else None)
+        """DW1-play: power on, to the game's own title screens. False when no game is starting."""
+        self.launch(None)
         return self.window is not None or self._patch_thread is not None
 
     def launch(self, slot: int | None, inspection_id: str | None = None, disc: Path | None = None):
@@ -420,6 +668,8 @@ class PlayPanel(QWidget):
         if not self._check() or not self.source_ok:
             QMessageBox.warning(self, "Cannot play yet", "Choose a working core and make sure the disc image is available.")
             return
+        if disc is None and not self._choose_character():
+            return
         if disc is None and self.use_imports.isChecked() and self.imports[0]() > 0:
             self._build_patched(slot, inspection_id)
             return
@@ -427,8 +677,11 @@ class PlayPanel(QWidget):
                             launch_slot=slot, launch_inspection=inspection_id,
                             resume_on_close=self.resume.isChecked(), live_ram=self.live_ram,
                             game_rules=self.game_rules.isChecked(), hd_pictures=self.hd_pictures,
+                            framerate=0.0 if self.framerate.value() <= FRAMERATE_OWN else self.framerate.value(),
                             forms=self.imports[2]() if disc is not None and len(self.imports) > 2 else {},
                             offer_forms=self.offer_forms.isChecked(),
+                            character=self._chosen_character.folder if self._chosen_character else None,
+                            keep_tamer=not self.characters,
                             coop_species=self.coop_species.currentData() if self.coop.isChecked() else None,
                             coop_level=self.coop_level.value(),
                             options=core_options(self.resolution.currentText(), self.smooth_colours.isChecked(),
@@ -451,7 +704,11 @@ class PlayPanel(QWidget):
         window.slots_changed.connect(self.refresh_slots)
         window.inspections_changed.connect(self.refresh_inspections)
         window.closed.connect(self._window_closed)
+        window.quick_save_changed.connect(self._sync_quick_save)
+        window.zoom_reported.connect(self.camera_zoom_status.setText)
+        window.pause.toggled.connect(self.game_pause.setChecked)
         self.window = window
+        self._update_game_controls()
         self._update_buttons()
         window.start()
 
@@ -503,6 +760,7 @@ class PlayPanel(QWidget):
     @Slot()
     def _window_closed(self):
         self.window = None
+        self._update_game_controls()
         if self._player_lock is not None:
             self._player_lock.unlock()
             self._player_lock = None

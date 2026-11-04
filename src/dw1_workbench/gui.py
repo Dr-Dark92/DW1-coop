@@ -44,6 +44,8 @@ from .digimon_package import (BUNDLE_SUFFIX as DIGIMON_BUNDLE_SUFFIX, DigimonOve
                               prepare_import as prepare_digimon_import)
 from .characters import STAGES
 from .hd_background import HdPictures
+from .shared_data import app_settings
+from .title_screens import TitleStore
 from .zone_import import OverrideStore, check_package
 from .zone_export import SUFFIX as ZONE_SUFFIX, MapSource, export_package, pathing_image, slug as zone_slug
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
@@ -60,7 +62,7 @@ LAST_PROJECT = "app/last_project"
 
 def workbench_settings() -> QSettings:
     """What DW1-settings saves and DW1-play runs from."""
-    return QSettings("DW1-coop", "workbench")
+    return app_settings()
 
 
 class ImportWorker(QObject):
@@ -419,7 +421,9 @@ class ZoneImportDialog(QDialog):
         summary = QLabel(f"{manifest.get('kind', 'zone').capitalize()} with {len(manifest.get('zones', []))} zone(s), "
                          f"{len(report.maps)} map(s), made {manifest.get('created', '?')} from "
                          f"{(manifest.get('source') or {}).get('release', 'an unknown release')}. "
-                         f"{len(report.changed_maps)} map(s) differ from the disc.")
+                         f"{len(report.changed_maps)} map(s) differ from the disc."
+                         + (f" {sum(1 for item in report.maps if item.skipped)} map(s) can't be imported and stay as they are."
+                            if any(item.skipped for item in report.maps) else ""))
         summary.setWordWrap(True); layout.addWidget(summary)
         table = QTableWidget(len(report.maps), 4)
         table.setHorizontalHeaderLabels(["Map", "MAP", "TFS", "Checks"])
@@ -427,13 +431,15 @@ class ZoneImportDialog(QDialog):
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         for row, item in enumerate(report.maps):
-            checks = "; ".join(item.problems) or "; ".join(item.notes) or "ok"
-            if item.index in current and not item.changed:
+            checks = item.skipped or "; ".join(item.problems) or "; ".join(item.notes) or "ok"
+            if item.index in current and not item.changed and not item.skipped:
                 checks += "; replaces the earlier import with the disc's files"
             for column, value in enumerate((item.label, item.status.get("MAP", "—"), item.status.get("TFS", "—"), checks)):
                 cell = QTableWidgetItem(value)
                 if item.problems:
                     cell.setForeground(Qt.GlobalColor.red)
+                elif item.skipped:
+                    cell.setForeground(Qt.GlobalColor.darkYellow)
                 table.setItem(row, column, cell)
         layout.addWidget(table, 1)
         if report.problems:
@@ -526,6 +532,7 @@ class Workspace(QWidget):
         self.associations = catalogue.associations()
         self.labels = {(row["resource_id"], row["kind"]): row for row in catalogue.labels()}
         self.overrides = OverrideStore(catalogue.project_dir)
+        self.title_store = TitleStore(self.overrides.directory)
         self.hd_pictures = HdPictures(self.overrides.directory / "hd")
         self.digimon_overrides = DigimonOverrides(catalogue.project_dir, catalogue.meta().get('source_sha256'))
         self.digimon_thread = self.digimon_worker = self.digimon_progress = None
@@ -558,7 +565,7 @@ class Workspace(QWidget):
         self.tabs.addTab(self._executable(), "Executable Analysis")
         self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid,
                                     self._character_names(), self._item_names(),
-                                    (lambda: len(self.overrides.records()) + len(self.digimon_overrides.records()),
+                                    (lambda: len(self.overrides.records()) + len(self.digimon_overrides.records()) + self.title_store.count(),
                                      self._build_patched_disc, self._imported_forms), self.hd_pictures.directory)
         self.play_panel.show_map_requested.connect(self.show_map)
         self.tabs.addTab(self.play_panel, "Play")
@@ -1617,10 +1624,12 @@ class Workspace(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             changed = self.overrides.apply(report)
             self._overrides_changed()
+            skipped = [item.label for item in report.maps if item.skipped]
             QMessageBox.information(self, "Zone package imported",
                                     f"{len(changed)} map(s) now use imported files: "
                                     f"{', '.join(item.label for item in changed) or 'none (all identical to the disc)'}. "
-                                    "Tick “Play with imported resources” in the Play tab to play them.")
+                                    + (f"Left as they were, because their pictures are damaged: {', '.join(skipped)}. " if skipped else "")
+                                    + "Tick “Play with imported resources” in the Play tab to play them.")
 
     def _manage_overrides(self):
         ImportedZonesDialog(self.overrides, self).exec()
@@ -1655,6 +1664,7 @@ class Workspace(QWidget):
                   for row in self.character_rows if (model := self._character_related(row, 'model_container')) is not None}
         replacements = self.overrides.replacements(entries)
         replacements.update(self.digimon_overrides.replacements(alltim, models))
+        replacements.update(self.title_store.replacements())
         return build_patched_image(layout_from_catalogue(self.catalogue), replacements,
                                    self.overrides.directory / "patched", cancelled, progress)
 

@@ -499,3 +499,23 @@ Implement a bounded embedded-TMD primitive parser for one known MMD, starting wi
 3. preserve MMD source path, embedded offsets, hashes, parser version, and any preview transform;
 4. add a static model preview/export only after geometry and UVs are structurally and visually verified; otherwise retain the current texture-only preview;
 5. leave animation data unsupported until its bone/channel structure is separately proven.
+
+## Where settings and saves live (`shared_data.py`)
+
+Settings are in `~/.dw1-coop/settings.ini`, saves in `~/.dw1-coop/play`. They were in the registry and AppData, but the Claude desktop app on Windows is an MSIX package: anything started from it, Bash and PowerShell tools included, gets a private copy of HKCU and of `%LOCALAPPDATA%` under `Packages\Claude_*\LocalCache`. The same command then had different settings and saves depending on who ran it, and test output described the private copy, not the user's. `D:` and the home folder aren't redirected. Set `DW1_COOP_HOME` to run against another folder; `tests/conftest.py` does.
+
+## Playing as another character (`tamer_skin.py`)
+
+The Tamer is replaced in RAM and VRAM while the game runs, because he is loaded only at a new game or memory-card load and a quick save holds its copy. Writes must match what the game did at load: `as_loaded` makes offsets absolute, sets the texture page, and writes each polygon run's length into its first packet. A wrong run length hangs the renderer.
+
+Memory, measured on map 168 with `_stack_addr` 0x801FFF00 and `_stack_size` 64 KB:
+
+- The Tamer slot holds 15,048 bytes of model before the animations, which must stay where they are.
+- 0x801BFC00-0x801D5F00 looks empty but is free heap. The next Digimon a map loads can land there, so do not use it.
+- 0x801EFF00 up is the bottom of the reserved stack, out of the heap's reach. `detail.bin` goes there, up to 48 KB. Marker bytes from 0x801FBF00 to 0x801FE000 stayed untouched through 6 map changes and a full battle.
+- Draw buffer is 80 KB a frame. Full Tai (2,228 triangles, 894 pairs as quads) peaked at 40 KB in the world against 29 KB for the default Tamer, and 55 KB in a battle with Terra Force. Busier scenes have not been measured; nothing guards an overflow.
+
+The title pictures work the same way as HD maps but keyed by frame content, in `title_hd.py`: a frame is a title when 60% of it matches the TIM at one brightness, since there is no map in RAM to read. The game's fade is a multiply, and its 255-to-256 texel stretch needs one column of tolerance.
+
+Each body part still moves rigidly, since a TMD object has one bone. Tai's converter and data live outside Git in `D:/DW1-coop-data/tai`, and his files are installed in the project's `overrides/characters/tai`.
+

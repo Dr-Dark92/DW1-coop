@@ -6,6 +6,12 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def separate_data_folder(tmp_path, monkeypatch):
+    """Nothing a test does may reach the real settings and saves."""
+    monkeypatch.setenv("DW1_COOP_HOME", str(tmp_path / "dw1-coop-home"))
+
+
 def both16(value: int) -> bytes:
     return value.to_bytes(2, "little") + value.to_bytes(2, "big")
 

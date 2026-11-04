@@ -118,6 +118,59 @@ def test_edited_background_picture_becomes_the_tfs(tmp_path, monkeypatch):
     assert kept.read_bytes() == buffer.getvalue() and Image.open(kept).size == picture.size
 
 
+def painted_picture(package):
+    import io
+    from PIL import Image
+    with zipfile.ZipFile(package) as archive:
+        picture = Image.open(io.BytesIO(archive.read("maps/000-TEST01/background-palette0.png"))).convert("RGBA")
+    picture = picture.resize((picture.width * 2, picture.height * 2))
+    buffer = io.BytesIO(); picture.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+PICTURE = "maps/000-TEST01/background-palette0.png"
+
+
+def test_repaint_is_found_when_the_manifest_was_updated_too(tmp_path, monkeypatch):
+    entries, package, originals, room = exported(tmp_path)
+    monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
+    data = painted_picture(package)
+    edited = rewrite(package, tmp_path / "painted.dw1zone", PICTURE, data, fix_manifest=True)
+    report = check_package(edited, META, entries, originals, room)
+    item = report.maps[0]
+    assert report.ok and item.changed == ["TFS"] and item.picture == data, item.problems
+    assert any("background-palette0.png edited" in note for note in item.notes)
+    assert report.maps[1].changed == [] and "identical to the disc" in report.maps[1].notes
+
+
+def test_damaged_picture_skips_its_map_only_and_keeps_the_earlier_import(tmp_path, monkeypatch):
+    entries, package, originals, room = exported(tmp_path)
+    monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
+    store = OverrideStore(tmp_path / "project")
+    store.apply(check_package(rewrite(package, tmp_path / "first.dw1zone", "maps/000-TEST01/TEST01.MAP", b"EARLIER"), META, entries, originals, room))
+    data = painted_picture(package)
+    damaged = rewrite(package, tmp_path / "cut.dw1zone", PICTURE, data[:len(data) // 2], fix_manifest=True)
+    damaged = rewrite(damaged, tmp_path / "cut2.dw1zone", "maps/001-TEST02/TEST02.MAP", b"NEW")
+    report = check_package(damaged, META, entries, originals, room)
+    first, second = report.maps
+    assert report.ok and first.skipped and not first.changed and second.changed == ["MAP"]
+    store.apply(report)
+    assert store.file(0, "MAP") == b"EARLIER" and store.file(1, "MAP") == b"NEW"
+    assert not (store.directory / "hd" / "000-TEST01.png").exists()
+
+
+def test_hand_edited_tfs_wins_over_its_untouched_picture(tmp_path, monkeypatch):
+    entries, package, originals, room = exported(tmp_path)
+    monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
+    with zipfile.ZipFile(package) as archive:
+        tfs = bytearray(archive.read("maps/000-TEST01/TEST01.TFS"))
+    tfs[-1] ^= 1
+    edited = rewrite(package, tmp_path / "hex.dw1zone", "maps/000-TEST01/TEST01.TFS", bytes(tfs), fix_manifest=False)
+    report = check_package(edited, META, entries, originals, room)
+    item = report.maps[0]
+    assert report.ok and item.changed == ["TFS"] and item.files["TFS"] == bytes(tfs) and item.picture is None, item.problems
+
+
 def tim(depth, x, width_units, height, pixels, clut=None):
     import struct
     flags = depth | (8 if clut else 0)

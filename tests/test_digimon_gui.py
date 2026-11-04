@@ -32,7 +32,6 @@ def wait(app, condition):
 @pytest.fixture
 def workspace(application, tmp_path, monkeypatch):
     monkeypatch.setattr(play_panel, 'find_installed_core', lambda: None)
-    monkeypatch.setattr(play_panel, 'QSettings', lambda *args: QSettings(str(tmp_path / 'qt.ini'), QSettings.Format.IniFormat))
     catalogue = Catalogue(tmp_path / 'project'); catalogue.initialize()
     original = source()
     catalogue.set_meta(**original.meta)

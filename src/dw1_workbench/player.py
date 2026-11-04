@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import queue
+import struct
 import sys
 import struct
 import threading
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import (QTimer, QBuffer, QCoreApplication, QPointF, QByteArray, QIODevice, QObject, QRectF, QSettings, Qt,
+from PySide6.QtCore import (QTimer, QBuffer, QCoreApplication, QPointF, QByteArray, QIODevice, QObject, QRectF, Qt,
                             QThread, Signal, Slot)
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
@@ -35,7 +36,11 @@ from .live import LiveNpc, LiveState, RAM_SIZE, grid_differences, ram_offset, re
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
 from .coop import CONFIRM, LEFT, MONEY, RIGHT, SQUARE, CoopBattle, LinkedPlayer, PlayerTwo
 from .hd_background import BackgroundLayer, Compositor, HdPictures
+from .shared_data import app_settings
+from .title_hd import TitleLayer
+from .title_screens import TitleStore
 from .split_screen import SplitGame, choosable_saves, copy_save
+from .tamer_skin import Character, TamerSkin, disc_tamer
 from .extra_memory import extend_heap
 from .visitor import PARTNER, TAMER, Visitor, match_world, on_the_field, read_partner_stats, read_record, read_world
 from .hud_view import HudPainter, HudState, command_icons, draw_ally_panel, read_hud
@@ -79,7 +84,7 @@ SPLIT_KEYS = {Qt.Key.Key_I: "Up", Qt.Key.Key_K: "Down", Qt.Key.Key_J: "Left", Qt
               Qt.Key.Key_7: "L", Qt.Key.Key_8: "R"}
 KEY_HELP = ("Arrows: D-pad  •  Z Cross  X Circle  A Square  S Triangle  •  Q/W L1/R1  E/R L2/R2  •  "
             "Enter Start  Backspace Select  •  F4 Digi-Dex  •  F5 quick save  F8 quick load  F6/F7 slot  •  "
-            "Co-op player 2: J/L command, K confirm, U finisher  •  Split screen player 2: I/J/K/L D-pad, U Cross, O Circle, Y Square, H Triangle, N Start  •  F9 inspect here  F10 live map  •  hold Tab fast-forward  •  P pause  •  F11 full screen")
+            "Co-op player 2: J/L command, K confirm, U finisher  •  Split screen player 2: I/J/K/L D-pad, U Cross, O Circle, Y Square, H Triangle, N Start  •  F9 inspect here  F10 live map  •  hold Tab fast-forward  •  P pause  Ctrl+R reset  •  F11 full screen")
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,22 @@ class PlayConfig:
     options: dict[str, str] = field(default_factory=dict)
     forms: dict[int, dict] = field(default_factory=dict)  # on the patched disc: imported Digimon, see EvolutionController
     offer_forms: bool = False  # the bank's egg list offers them
+    character: Path | None = None  # the folder of who to play as (tamer_skin.py)
+    keep_tamer: bool = True  # False: put the disc's own Tamer back if a save was made as someone else
+    framerate: float = 0.0  # frames per second to run at; 0 is the core's own. The game's speed follows it.
+
+
+def stretched_audio(audio: bytes, speed: float) -> bytes:
+    """Stereo 16-bit audio for a game running at `speed` times its own rate: the same sound, faster, so it keeps up with the
+    device instead of the device dropping or starving. Its pitch follows, like any game run at another speed."""
+    samples = np.frombuffer(audio, dtype="<i2").reshape(-1, 2)
+    count = round(len(samples) / speed)
+    if not count or count == len(samples):
+        return audio
+    where = np.arange(count) * (len(samples) / count)
+    source = np.arange(len(samples))
+    mixed = np.column_stack([np.interp(where, source, samples[:, side]) for side in (0, 1)])
+    return mixed.astype("<i2").tobytes()
 
 
 def frame_image(frame: Frame) -> QImage:
@@ -178,6 +199,8 @@ class EmulatorWorker(QObject):
         self._coop_frames = 0
         self.hd_layer: BackgroundLayer | None = None
         self._compositor: Compositor | None = None
+        self.title_layer: TitleLayer | None = None
+        self._title_compositor: Compositor | None = None
         self.buttons = 0
         self.paused = False
         self.fast_forward = False
@@ -196,6 +219,7 @@ class EmulatorWorker(QObject):
         self._camera_notice_sent = False
         self._reported_zoom = None
         self.rules: GameRules | None = None
+        self.tamer_skin: TamerSkin | None = None
         self.evolution: EvolutionController | None = None
         self.dex: DigiDex | None = None
         self.dex_map_names = {}
@@ -281,6 +305,7 @@ class EmulatorWorker(QObject):
                 self.hd_layer = BackgroundLayer(core.read_memory, core.serialize, HdPictures(config.hd_pictures).path,
                                                 on_error=self.message.emit)
                 self._compositor = Compositor(self.hd_layer, self._publish_composed, self._hd_failed)
+                self._prepare_titles(core)
             set_ram_size(core.ram_size)
             if config.live_ram and core.ram_size > RAM_SIZE:
                 self.message.emit(f"Extended core: the game has {core.ram_size // (1024 * 1024)} MB of RAM")
@@ -306,12 +331,25 @@ class EmulatorWorker(QObject):
                 self.progress_changed.emit(self.rules.progress.summary())
             self.started_ok.emit({"core": core.info.name, "version": core.info.version, "fps": core.fps,
                                   "sample_rate": core.sample_rate, "aspect": core.aspect_ratio})
+            self._prepare_character(core)
             self._loop(core)
         except Exception as exc:
             self.failed.emit(f"The game stopped unexpectedly: {exc}")
         finally:
             self._shutdown(core)
             self.finished.emit()
+
+    def _prepare_character(self, core: LibretroCore):
+        """Who the Tamer is. Trouble here leaves the game's own Tamer: a picture must not stop the game."""
+        config = self.config
+        if config.character is None and config.keep_tamer:
+            return
+        try:
+            parts = (Character("", config.character).data() if config.character is not None
+                     else disc_tamer(config.disc_path))
+            self.tamer_skin = TamerSkin(core, *parts)
+        except (OSError, ValueError, KeyError, DiscFormatError, struct.error) as exc:
+            self.message.emit(f"Character not applied: {exc}")
 
     def _loop(self, core: LibretroCore):
         frames = 0
@@ -338,6 +376,8 @@ class EmulatorWorker(QObject):
                     self.message.emit(f"Manual evolution turned off: {exc}")
             frame, audio = core.run_frame()
             self._has_run_frame = True
+            if self.tamer_skin is not None:
+                self.tamer_skin.tick()
             audio = self._menu_audio.mix(audio)
             if self.coop is not None:
                 self._apply_coop()
@@ -370,14 +410,16 @@ class EmulatorWorker(QObject):
                     self._publish(image)
                 self._last_image = image
             fast = self.fast_forward
+            own_rate = core.fps
+            rate = self.config.framerate or own_rate
             if audio and not fast:
-                self.audio_ready.emit(audio)
+                self.audio_ready.emit(stretched_audio(audio, rate / own_rate) if rate != own_rate else audio)
             if frames % MEMORY_CARD_FLUSH_FRAMES == 0:
                 self._flush_memory_card(core)
             if self.config.live_ram and frames % LIVE_FRAMES == 0:
                 self._read_live(core)
             # core.fps is read every frame: cores may change timing (Beetle PSX settles on 59.826 fps after boot).
-            deadline += 1.0 / (core.fps * (FAST_FORWARD if fast else 1))
+            deadline += 1.0 / (rate * (FAST_FORWARD if fast else 1))
             delay = deadline - time.perf_counter()
             if delay > 0:
                 # time.sleep uses a high-resolution timer on Windows (Python 3.11+); Event.wait rounds up to the
@@ -555,14 +597,34 @@ class EmulatorWorker(QObject):
         except OSError as exc:
             self.message.emit(f"Level/EXP could not be written: {exc}")
 
+    def _prepare_titles(self, core):
+        """The title pictures at full size. Trouble here leaves the game's own: a picture must not stop the game."""
+        try:
+            self.title_layer = TitleLayer.from_store(TitleStore(self.config.hd_pictures.parent))
+        except (OSError, ValueError, DiscFormatError) as exc:
+            self.message.emit(f"HD title screens not available: {exc}")
+        if self.title_layer is not None:
+            self._title_compositor = Compositor(self.title_layer, self._publish_composed, self._titles_failed)
+
+    def _titles_failed(self, text: str):
+        self.title_layer = None
+        self.message.emit(text.replace("backgrounds", "title screens"))
+
     def _submit_hd(self, image: QImage) -> bool:
-        """Send the frame to the HD compositor when this map has a picture; False to show it as it is."""
-        if self.hd_layer is None or not self.hd_enabled or self._compositor is None:
+        """Send the frame to the HD compositor when it has a picture; False to show it as it is."""
+        if not self.hd_enabled or (self.hd_layer is None and self.title_layer is None):
             return False
         if image.format() != QImage.Format.Format_RGB32:
             image = image.convertToFormat(QImage.Format.Format_RGB32)
         pixels = np.frombuffer(image.constBits(), np.uint32).reshape(image.height(), image.bytesPerLine() // 4)
         pixels = pixels[:, :image.width()] & 0xFFFFFF
+        if self.title_layer is not None:
+            title = self.title_layer.prepare(pixels)
+            if title is not None:
+                self._title_compositor.submit(title)
+                return True
+        if self.hd_layer is None or self._compositor is None:
+            return False
         try:
             job = self.hd_layer.prepare(pixels)
         except (LibretroError, ValueError) as exc:
@@ -796,6 +858,8 @@ class EmulatorWorker(QObject):
     def _shutdown(self, core: LibretroCore):
         if self._compositor is not None:
             self._compositor.stop()
+        if self._title_compositor is not None:
+            self._title_compositor.stop()
         try:
             if self.config.resume_on_close and core.av is not None and self._has_run_frame:
                 self.slot_saved.emit(self._save(RESUME_SLOT, "Saved when the game was closed"))
@@ -1031,6 +1095,8 @@ class PlayWindow(QMainWindow):
 
     slots_changed = Signal()
     inspections_changed = Signal()
+    quick_save_changed = Signal()  # the slot or note, in the settings the Play tab shows them from
+    zoom_reported = Signal(str)
     log = Signal(str)
     closed = Signal()
 
@@ -1083,8 +1149,8 @@ class PlayWindow(QMainWindow):
         self.thread = QThread(self)
         self._dex_snapshot = {"entries": {}, "catalog": []}
         self.worker = EmulatorWorker(config)
-        self.worker.hd_enabled = self.hd_check.isChecked()
-        self.worker.hud_enabled = self.hud_check.isChecked()
+        self.worker.hd_enabled = self._hd_on
+        self.worker.hud_enabled = self._hud_on
         self.worker.dex_map_names = dict(self.map_names)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -1107,7 +1173,7 @@ class PlayWindow(QMainWindow):
         self._split_timer = QTimer(self)
         self._split_timer.timeout.connect(self._show_split_frame)
         self._pads = system_pads()
-        self._controls = load_controls(QSettings("DW1-coop", "workbench"))
+        self._controls = load_controls(app_settings())
         self._pad_buttons = [set(), set()]  # each player's controller buttons held
         self._pad_held = [0, 0]  # the bits of those that reach a game
         self._pad_timer = QTimer(self)
@@ -1176,77 +1242,60 @@ class PlayWindow(QMainWindow):
             self.view.setFocus()
 
     def _build_toolbar(self):
+        """The game screen keeps Save, Load and Full screen. The rest is in the Play tab's Settings; keys still work here."""
         bar = QToolBar("Quick saves"); bar.setMovable(False); self.addToolBar(bar)
-        self.slot = QComboBox(); self.slot.addItems([f"Slot {index}" for index in range(1, SLOT_COUNT + 1)])
-        self.note = QLineEdit(); self.note.setPlaceholderText("Note for the next quick save, e.g. the zone")
-        self.note.setMaximumWidth(320); self.note.returnPressed.connect(self.view.setFocus)
 
-        def action(text, shortcut, handler, checkable=False):
+        def action(text, shortcut, handler, checkable=False, on_bar=True):
             item = QAction(text, self); item.setShortcut(QKeySequence(shortcut))
             item.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
-            item.setCheckable(checkable); item.triggered.connect(handler); bar.addAction(item)
+            item.setCheckable(checkable); item.triggered.connect(handler)
+            bar.addAction(item) if on_bar else self.addAction(item)
             return item
 
-        bar.addWidget(self.slot)
-        action("Save", "F5", lambda: self.worker.quick_save(self.current_slot, self.note.text()))
+        settings = app_settings()
+        self._slot = min(max(settings.value("play/slot", 1, type=int), 1), SLOT_COUNT)
+        action("Save", "F5", lambda: self.worker.quick_save(self.current_slot, self.quick_save_note))
         action("Load", "F8", lambda: self.worker.quick_load(self.current_slot))
         previous = QAction(self); previous.setShortcut(QKeySequence("F6")); previous.triggered.connect(lambda: self._step_slot(-1))
         following = QAction(self); following.setShortcut(QKeySequence("F7")); following.triggered.connect(lambda: self._step_slot(1))
         self.addAction(previous); self.addAction(following)
-        bar.addWidget(self.note); bar.addSeparator()
-        self.pause = action("Pause", "P", self._toggle_pause, checkable=True)
-        action("Reset", "Ctrl+R", self._reset)
-        dex_action = action("Digi-Dex", "F4", self._show_digidex)
-        dex_action.setEnabled(self.config.live_ram)
         self.full = action("Full screen", "F11", self._toggle_full_screen, checkable=True)
-        settings = QSettings("DW1-coop", "workbench")
-        smooth = QCheckBox("Smooth"); smooth.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        smooth.setToolTip("Blend pixels when the picture is enlarged (softer, less blocky)")
-        smooth.toggled.connect(self._set_smooth); bar.addWidget(smooth)
-        smooth.setChecked(settings.value("play/smooth", True, type=bool))
-        self.hd_check = hd = QCheckBox("HD backgrounds"); hd.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        hd.setToolTip("Show the full-size picture set for a zone (Maps and Zones) instead of the game's 8-bit tiles")
-        hd.setEnabled(self.config.live_ram and self.config.hd_pictures is not None)
-        hd.toggled.connect(self._set_hd); bar.addWidget(hd)
-        hd.setChecked(hd.isEnabled() and settings.value("play/hd_backgrounds", True, type=bool))
-        self.hud_check = hud = QCheckBox("Map and HP/MP"); hud.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        hud.setToolTip("Show the map and your partner's HP and MP on the game screen, with the game's own status bars")
-        hud.setEnabled(self.config.live_ram)
-        hud.toggled.connect(self._set_hud); bar.addWidget(hud)
-        hud.setChecked(hud.isEnabled() and settings.value("play/hud", True, type=bool))
-        screen = QComboBox(); screen.addItems(SCREENS); screen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        screen.setToolTip("4:3: the original shape. 16:9 fill: the original shape in a 16:9 screen, with a blurred copy "
-                          "of the picture at the sides. 16:9 stretch: the picture stretched to 16:9 (wider characters).")
-        screen.currentTextChanged.connect(self._set_screen)
-        screen.setCurrentText(settings.value("play/screen", SCREENS[0]))
-        bar.addWidget(QLabel("Screen")); bar.addWidget(screen)
-        bar.addWidget(QLabel("World zoom"))
-        self.camera_zoom = QSlider(Qt.Orientation.Horizontal); self.camera_zoom.setRange(50, 100)
-        self.camera_zoom.setValue(100); self.camera_zoom.setFixedWidth(120)
-        self.camera_zoom.setEnabled(WORLD_ZOOM_ENABLED and self.config.live_ram)
-        self.camera_zoom.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.camera_zoom.setToolTip("World zoom (USA): shows more of the map around the screen centre. The HUD stays "
-                                    "native; past a map's edge the view is black." if WORLD_ZOOM_ENABLED else
-                                    "World zoom is switched off for now: it crashed the game and misplaced characters.")
-        self.camera_zoom.valueChanged.connect(lambda value: self.worker.set_camera_scale(value * 256 // 100))
-        bar.addWidget(self.camera_zoom)
-        self.camera_zoom_status = QLabel("100%")
-        bar.addWidget(self.camera_zoom_status)
+        self.pause = action("Pause", "P", self._toggle_pause, checkable=True, on_bar=False)
+        action("Reset", "Ctrl+R", self._reset, on_bar=False)
+        self.dex_action = action("Digi-Dex", "F4", self._show_digidex, on_bar=False)
+        self.dex_action.setEnabled(self.config.live_ram)
+        self.view.smooth = settings.value("play/smooth", True, type=bool)
+        self.view.screen = settings.value("play/screen", SCREENS[0])
+        self._hd_on = (self.config.live_ram and self.config.hd_pictures is not None
+                       and settings.value("play/hd_backgrounds", True, type=bool))
+        self._hud_on = self.config.live_ram and settings.value("play/hud", True, type=bool)
         inspect = QAction(self); inspect.setShortcut(QKeySequence("F9")); inspect.triggered.connect(self.worker_inspect)
         live_toggle = QAction(self); live_toggle.setShortcut(QKeySequence("F10"))
         live_toggle.triggered.connect(lambda: self.live_dock.setVisible(not self.live_dock.isVisible()))
         self.addAction(inspect); self.addAction(live_toggle)
         help_action = QAction(self); help_action.setShortcut(QKeySequence("F1")); help_action.triggered.connect(self._show_help)
         self.addAction(help_action)
-        for widget in (self.slot,):
-            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     @property
     def current_slot(self) -> int:
-        return self.slot.currentIndex() + 1
+        return self._slot
+
+    @property
+    def quick_save_note(self) -> str:
+        return app_settings().value("play/save_note", "") or ""
+
+    def _clear_quick_save_note(self):
+        app_settings().remove("play/save_note")
+        self.quick_save_changed.emit()
+
+    def set_slot(self, slot: int):
+        """From the Settings tab, while a game is open."""
+        self._slot = slot
 
     def _step_slot(self, step: int):
-        self.slot.setCurrentIndex((self.slot.currentIndex() + step) % SLOT_COUNT)
+        self._slot = (self._slot - 1 + step) % SLOT_COUNT + 1
+        app_settings().setValue("play/slot", self._slot)
+        self.quick_save_changed.emit()
         info = self.worker.store.info(self.current_slot)
         self.status.setText(f"Slot {self.current_slot}: " + (f"{info.created}{f' — {info.note}' if info.note else ''}"
                                                              if info else "empty"))
@@ -1384,7 +1433,7 @@ class PlayWindow(QMainWindow):
                    + (f"\n{self.item_summary(live)}" if self.item_summary(live) else "")
                    if live is not None
                    else "Position unknown (live map is off for this disc)")
-        dialog = InspectDialog(summary, self.note.text(), self)
+        dialog = InspectDialog(summary, self.quick_save_note, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             try:
                 record = self.inspections.add(
@@ -1405,7 +1454,7 @@ class PlayWindow(QMainWindow):
                     live_grid=live.grid if live else None)
                 self._message(f"Inspection saved: {record.category} at {record.map_name}"
                               + (f" — {record.note}" if record.note else ""))
-                self.note.clear()
+                self._clear_quick_save_note()
                 self.inspections_changed.emit()
             except (InspectionError, OSError) as exc:
                 QMessageBox.warning(self, "Inspection", f"The inspection could not be saved: {exc}")
@@ -1426,23 +1475,23 @@ class PlayWindow(QMainWindow):
         self.showFullScreen() if full else self.showNormal()
 
     def _set_smooth(self, smooth: bool):
-        QSettings("DW1-coop", "workbench").setValue("play/smooth", smooth)
+        app_settings().setValue("play/smooth", smooth)
         self.view.smooth = smooth; self.view.update(); self.view.setFocus()
 
     def _set_hud(self, enabled: bool):
-        QSettings("DW1-coop", "workbench").setValue("play/hud", enabled)
+        app_settings().setValue("play/hud", enabled)
         if getattr(self, "worker", None) is not None:
             self.worker.hud_enabled = enabled
         self.view.setFocus()
 
     def _set_hd(self, enabled: bool):
-        QSettings("DW1-coop", "workbench").setValue("play/hd_backgrounds", enabled)
+        app_settings().setValue("play/hd_backgrounds", enabled)
         if getattr(self, "worker", None) is not None:
             self.worker.hd_enabled = enabled
         self.view.setFocus()
 
     def _set_screen(self, screen: str):
-        QSettings("DW1-coop", "workbench").setValue("play/screen", screen)
+        app_settings().setValue("play/screen", screen)
         self.view.screen = screen; self.view.update(); self.view.setFocus()
 
     def _show_help(self):
@@ -1496,7 +1545,10 @@ class PlayWindow(QMainWindow):
             self._split = SplitGame({
                 "core": str(self.config.core_path), "bios": str(self.config.bios_dir), "disc": str(self.config.disc_path),
                 "store": str(target), "slot": request, "live_ram": self.config.live_ram, "game_rules": self.config.game_rules,
-                "hd": str(self.config.hd_pictures) if self.config.hd_pictures else None, "options": self.config.options})
+                "hd": str(self.config.hd_pictures) if self.config.hd_pictures else None, "options": self.config.options,
+                "character": str(self.config.character) if self.config.character else None,
+                "keep_tamer": self.config.keep_tamer,
+                "framerate": self.config.framerate})
         except (OSError, ValueError) as exc:
             self._message(f"Split screen could not start: {exc}")
             return
@@ -1552,10 +1604,7 @@ class PlayWindow(QMainWindow):
 
     @Slot(int, int)
     def _camera_zoom_changed(self, requested: int, effective: int):
-        self.camera_zoom_status.setText(f"{round(effective * 100 / 256)}%")
-        self.camera_zoom_status.setToolTip(
-            f"Requested {round(requested * 100 / 256)}%; applied {round(effective * 100 / 256)}%"
-            + (" (waiting for the next rendered frame)." if effective != requested else "."))
+        self.zoom_reported.emit(f"{round(effective * 100 / 256)}%")
 
     @Slot(object)
     def _started(self, info):
@@ -1573,7 +1622,7 @@ class PlayWindow(QMainWindow):
     def _slot_saved(self, info):
         self.slots_changed.emit()
         if info.slot != RESUME_SLOT:
-            self.note.clear()
+            self._clear_quick_save_note()
 
     @Slot(int)
     def _slot_loaded(self, _slot):

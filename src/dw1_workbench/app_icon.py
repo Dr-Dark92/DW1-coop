@@ -9,9 +9,9 @@ import sys
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QStandardPaths
 from PySide6.QtGui import QIcon
 
+from .shared_data import icons_folder
 from .avatars import render_character
 from .errors import DiscFormatError, ValidationError
 
@@ -22,8 +22,7 @@ SHORTCUTS = {"DW1-settings": "dw1_workbench.app", "DW1-play": "dw1_workbench.pla
 
 
 def icon_folder() -> Path:
-    data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
-    return Path(data) / "DW1-coop" / "icons"
+    return icons_folder()
 
 
 def ensure_icon(disc: Path, folder: Path | None = None) -> Path | None:

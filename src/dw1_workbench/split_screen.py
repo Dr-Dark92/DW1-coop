@@ -321,7 +321,10 @@ def _child(memory_name: str, raw: str) -> int:
     config = PlayConfig(Path(settings["core"]), Path(settings["bios"]), Path(settings["disc"]), Path(settings["store"]),
                         launch_slot=settings["slot"], resume_on_close=True, live_ram=settings["live_ram"],
                         game_rules=settings["game_rules"],
-                        hd_pictures=Path(settings["hd"]) if settings.get("hd") else None, options=settings["options"])
+                        hd_pictures=Path(settings["hd"]) if settings.get("hd") else None, options=settings["options"],
+                        character=Path(settings["character"]) if settings.get("character") else None,
+                        keep_tamer=settings.get("keep_tamer", True),
+                        framerate=settings.get("framerate", 0.0))
     memory = _attach(memory_name)
     parent_running = parent_watch(settings["parent"])
     worker = EmulatorWorker(config)

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from .app_icon import apply_icon, set_app_id
 from .catalog import open_catalogue
 from .gui import LAST_PROJECT, Workspace, workbench_settings
+from .shared_data import bring_in_old_data
 
 NAME = "DW1-play"
 
@@ -19,6 +20,7 @@ def main() -> int:
     application = QApplication(sys.argv)
     application.setApplicationName(NAME)
     application.setQuitOnLastWindowClosed(False)  # the app ends with the game, reported by the Play panel
+    bring_in_old_data()
     path = workbench_settings().value(LAST_PROJECT, "")
     try:
         catalogue = open_catalogue(Path(path)) if path else None

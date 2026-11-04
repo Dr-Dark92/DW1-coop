@@ -2,9 +2,11 @@
 
 Nothing in the disc image or the catalogue changes. A package is checked first — format, the release it was
 made from, which files were edited since export (their SHA-256 no longer matches the manifest), and every map
-against the running project: an edited background-palette0.png is converted into the TFS, the MAP
-must parse with this disc's map table, the TFS must parse, warps must lead to real maps, and each file must
-fit the sectors its original occupies. Files identical to the disc's are recorded as such and not stored.
+against the running project: a background-palette0.png that isn't what the TFS holds is converted into the TFS
+(tools that repaint pictures may also update the manifest, so its hash alone doesn't say), the MAP must parse with this
+disc's map table, the TFS must parse, warps must lead to real maps, and each file must fit the sectors its original
+occupies. A map whose picture is damaged is skipped, not the package. Files identical to the disc's are recorded as such
+and not stored.
 Changed files are kept under <project>/overrides/, from which a patched copy of the disc is built for play.
 """
 from __future__ import annotations
@@ -22,7 +24,7 @@ from PIL import Image
 from .background_import import encode_background
 from .errors import DiscFormatError
 from .hd_background import HdPictures
-from .maps import MAP_COUNT, MapEntry, map_exits, parse_map, parse_tfs
+from .maps import MAP_COUNT, MapEntry, map_exits, parse_map, parse_tfs, render_background
 from .quicksave import _atomic_write
 from .zone_export import PACKAGE_FORMAT, PACKAGE_VERSION
 
@@ -44,6 +46,7 @@ class MapImport:
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     picture: bytes | None = None  # the edited background picture, kept full size for the player's HD layer
+    skipped: str | None = None  # why this map is left as the project has it
 
     @property
     def ok(self) -> bool:
@@ -133,6 +136,11 @@ def check_package(path: Path, meta: dict, entries: list[MapEntry], originals: di
         maps.append(item)
         if "MAP" not in item.files:
             item.problems.append("the package has no MAP file for it"); continue
+        picture = f"{folder}/background-palette0.png"
+        if picture in files and not _picture_is_whole(files[picture]):
+            item.skipped = "background-palette0.png is damaged, so this map stays as it is; export it again to import it"
+            item.files = {}
+            continue
         for name in sorted(name for name in edited if name.startswith(folder + "/")):
             short = name.rsplit("/", 1)[1]
             if short.endswith((".MAP", ".TFS")):
@@ -147,9 +155,11 @@ def check_package(path: Path, meta: dict, entries: list[MapEntry], originals: di
             scene = parse_map(item.files["MAP"], entry)
         except DiscFormatError as exc:
             item.problems.append(f"MAP does not parse: {exc}"); continue
-        picture = f"{folder}/background-palette0.png"
-        if picture in edited:
-            if f"{folder}/{entry.name}.TFS" in edited:
+        tfs_name = f"{folder}/{entry.name}.TFS"
+        repainted = picture in edited or (picture in files and "TFS" in item.files and tfs_name not in edited
+                                          and _picture_differs(files[picture], item.files["TFS"], scene))
+        if repainted:
+            if tfs_name in edited:
                 item.problems.append("both the TFS and background-palette0.png were edited; keep only one")
             elif "TFS" not in item.files:
                 item.problems.append("background-palette0.png was edited but the package has no TFS to write it into")
@@ -184,6 +194,25 @@ def check_package(path: Path, meta: dict, entries: list[MapEntry], originals: di
     if not maps:
         problems.append("The package lists no maps.")
     return ImportReport(Path(path), manifest, maps, problems)
+
+
+def _picture_is_whole(data: bytes) -> bool:
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return True
+
+
+def _picture_differs(data: bytes, tfs: bytes, scene) -> bool:
+    """Whether a picture is something other than the background this TFS draws, as an export would have written it."""
+    try:
+        own = render_background(parse_tfs(tfs), scene.setup, 0).convert("RGBA")
+    except (DiscFormatError, ValueError, IndexError):
+        return False  # the checks after this report a TFS that doesn't parse
+    with Image.open(io.BytesIO(data)) as image:
+        return image.size != own.size or image.convert("RGBA").tobytes() != own.tobytes()
 
 
 def _set_status(item: MapImport, kind: str, originals, room):
@@ -221,6 +250,8 @@ class OverrideStore:
         pictures = HdPictures(self.directory / "hd")
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for item in report.maps:
+            if item.skipped:
+                continue
             files = {}
             for kind in item.changed:
                 path = self.directory / f"{item.index:03d}-{item.name}.{kind}"

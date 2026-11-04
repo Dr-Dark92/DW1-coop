@@ -90,7 +90,6 @@ def test_play_panel_checks_launches_and_lists_slots(application, fake_core, tmp_
     import dw1_workbench.play_panel as play_panel
     monkeypatch.setattr(play_panel, "saves_root", lambda: tmp_path / "root")
     monkeypatch.setattr(play_panel, "find_installed_core", lambda: None)  # ignore a core installed on this machine
-    monkeypatch.setattr(play_panel, "QSettings", lambda *args: QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat))
     game = tmp_path / "game.cue"; game.write_bytes(b"G")
     bios = tmp_path / "bios"; bios.mkdir(); (bios / "scph1001.bin").write_bytes(b"")
     panel = play_panel.PlayPanel({"source_path": str(game), "source_sha256": "ab" * 32}, True, "ok")
@@ -100,6 +99,8 @@ def test_play_panel_checks_launches_and_lists_slots(application, fake_core, tmp_
     assert "Found scph1001.bin" in panel.bios_status.text()
     assert not play_panel.bios_report(tmp_path / "nothing")[0]
     assert panel.play.isEnabled() and panel.store.directory == tmp_path / "root" / ("ab" * 8)
+    assert not panel.resume.isChecked()  # opt-in: closing the game keeps only what was saved
+    panel.resume.setChecked(True)
     panel.launch(None)
     assert not panel.play.isEnabled()
     wait(application, lambda: panel.window.view.image is not None)
@@ -108,6 +109,53 @@ def test_play_panel_checks_launches_and_lists_slots(application, fake_core, tmp_
     assert panel.slots.rowCount() == 1 and panel.slots.item(0, 0).text() == "Resume"
     assert "Game closed" in panel.log.toPlainText()
     assert (panel.store.directory / "launch.log").is_file()
+
+
+def test_game_window_keeps_three_buttons_and_settings_reach_it(application, fake_core, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QToolBar
+    import dw1_workbench.play_panel as play_panel
+    import dw1_workbench.player as player
+    monkeypatch.setattr(play_panel, "saves_root", lambda: tmp_path / "root")
+    monkeypatch.setattr(play_panel, "find_installed_core", lambda: None)
+    game = tmp_path / "game.cue"; game.write_bytes(b"G")
+    bios = tmp_path / "bios"; bios.mkdir(); (bios / "scph1001.bin").write_bytes(b"")
+    panel = play_panel.PlayPanel({"source_path": str(game), "source_sha256": "ab" * 32}, True, "ok")
+    panel.core.setText(str(fake_core)); panel.bios.setText(str(bios)); panel._check()
+    assert not panel.game_pause.isEnabled() and not panel.game_reset.isEnabled()
+    panel.quick_slot.setCurrentIndex(2)
+    panel.smooth.setChecked(False)
+    panel.launch(None)
+    wait(application, lambda: panel.window is not None and panel.window.view.image is not None)
+    window = panel.window
+    bar = window.findChild(QToolBar)
+    assert [item.text() for item in bar.actions()] == ["Save", "Load", "Full screen"]
+    assert bar.findChildren(player.QCheckBox) == [] and bar.findChildren(player.QComboBox) == []
+    # What was chosen before the game opened is what it opens with, and changes reach it while it runs.
+    assert window.current_slot == 3 and window.view.smooth is False
+    panel.smooth.setChecked(True)
+    assert window.view.smooth is True
+    panel.screen.setCurrentText(player.SCREENS[1])
+    assert window.view.screen == player.SCREENS[1]
+    panel.hud.setChecked(False)
+    assert window.worker.hud_enabled is False
+    panel.quick_slot.setCurrentIndex(4)
+    assert window.current_slot == 5
+    # The game window's keys show in Settings.
+    window._step_slot(1)
+    assert panel.quick_slot.currentIndex() == 5
+    window.pause.trigger()
+    assert window.worker.paused and panel.game_pause.isChecked()
+    panel.game_pause.click()
+    assert not window.worker.paused and not window.pause.isChecked()
+    # A note goes with the next quick save, then it is gone.
+    panel.quick_note.setText("by the gym")
+    assert window.quick_save_note == "by the gym"
+    window._clear_quick_save_note()
+    assert panel.quick_note.text() == "" and window.quick_save_note == ""
+    panel.close_player()
+    wait(application, lambda: panel.window is None)
+    assert not panel.game_pause.isEnabled()
 
 
 def test_live_map_and_inspection(application, fake_core, tmp_path, monkeypatch):

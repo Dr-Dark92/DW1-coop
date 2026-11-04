@@ -122,10 +122,12 @@ class Panel:
         self.window = object() if self.starts else None
 
 
-def test_direct_launch_carries_on_from_resume(tmp_path):
+def test_direct_launch_powers_on_even_with_a_resume_slot(tmp_path):
     store = QuickSaveStore(tmp_path)
     panel = Panel(store)
-    assert panel.launch_directly() and panel.launched == [None]  # no Resume yet: power on
+    assert panel.launch_directly() and panel.launched == [None]
     store.save(0, b"state", None, "core", "1")
+    panel = Panel(store)
+    assert panel.launch_directly() and panel.launched == [None]
     panel = Panel(store, starts=False)
-    assert not panel.launch_directly() and panel.launched == [0]
+    assert not panel.launch_directly() and panel.launched == [None]
