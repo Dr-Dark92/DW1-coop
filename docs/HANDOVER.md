@@ -1,5 +1,13 @@
 # Handover
 
+## HD backgrounds (2026-11-04, Claude, Linux, branch `python-player`)
+
+User asked to force 16-bit backgrounds; after the numbers (FORMATS.md) and a before/after they said the target is PC only with plenty of resources, so the full-size layer was built instead. `hd_background.py` (MapBackground, compose, BackgroundLayer, Compositor, HdPictures); `PlayConfig.hd_pictures`; toolbar **HD backgrounds**; Maps and Zones **Set HD picture…** / **Remove HD picture**; zone import keeps an edited picture in `overrides/hd/`. New dependency: numpy. Scripts outside Git in `DW1-coop-data/dev-tools/hd_*.py`; `hd_gate.py`, `hd_e2e.py`, `hd_pace.py` are the useful ones. dw_decomp is now at `DW1-coop-data/references/dw_decomp` (aaf69a4).
+
+The user tried it on the desktop with a rebuilt picture for File City `TWNA02` (map 168) and reports much better results. Their inspection there, noted "check it", has not been looked at.
+
+Next: foreground pieces with their own palette (e.g. the top-left bush on `MAYO00`) and semi-transparent boxes stay low-res; only `MAYO00` was measured, indoor and small maps untested; other video modes pass through. Avatar rendering (`avatars.py`) holds the GIL on a store with no cache (first launch on this Linux store): frame rate about 30 for about a minute, unrelated to HD.
+
 ## Claude P6 entry point (2026-11-03)
 
 Read [CLAUDE_HANDOVER.md](CLAUDE_HANDOVER.md) first for the consolidated current Windows/P6 guide, setup, settled decisions, verification and remaining work. P6_HANDOVER.md is chronological evidence. Old Claude/P4 notes are preserved in CLAUDE_P4_HANDOVER_HISTORY.md. No commit/push.

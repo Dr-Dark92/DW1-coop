@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 # Essentials supplies widgets; Addons supplies QtMultimedia for player audio.
-dependencies = ["PySide6-Essentials>=6.8,<7", "PySide6-Addons>=6.8,<7", "Pillow>=11,<13"]
+dependencies = ["PySide6-Essentials>=6.8,<7", "PySide6-Addons>=6.8,<7", "Pillow>=11,<13", "numpy>=2,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]

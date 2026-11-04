@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import html
+import io
 import struct
 import threading
 import traceback
 from pathlib import Path
 
+from PIL import Image
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QPixmap
@@ -38,6 +40,7 @@ from .digimon_package import (BUNDLE_SUFFIX as DIGIMON_BUNDLE_SUFFIX, DigimonOve
                               load_source as load_digimon_source, prepare_bundle_import as prepare_digimon_bundle,
                               prepare_import as prepare_digimon_import)
 from .characters import STAGES
+from .hd_background import HdPictures
 from .zone_import import OverrideStore, check_package
 from .zone_export import SUFFIX as ZONE_SUFFIX, MapSource, export_package, pathing_image, slug as zone_slug
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
@@ -511,6 +514,7 @@ class Workspace(QWidget):
         self.associations = catalogue.associations()
         self.labels = {(row["resource_id"], row["kind"]): row for row in catalogue.labels()}
         self.overrides = OverrideStore(catalogue.project_dir)
+        self.hd_pictures = HdPictures(self.overrides.directory / "hd")
         self.digimon_overrides = DigimonOverrides(catalogue.project_dir, catalogue.meta().get('source_sha256'))
         self.digimon_thread = self.digimon_worker = self.digimon_progress = None
         self._digimon_result = None
@@ -543,7 +547,7 @@ class Workspace(QWidget):
         self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid,
                                     self._character_names(), self._item_names(),
                                     (lambda: len(self.overrides.records()) + len(self.digimon_overrides.records()),
-                                     self._build_patched_disc))
+                                     self._build_patched_disc), self.hd_pictures.directory)
         self.play_panel.show_map_requested.connect(self.show_map)
         self.tabs.addTab(self.play_panel, "Play")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
@@ -1088,7 +1092,11 @@ class Workspace(QWidget):
         self.imported_button = QPushButton(f"Imported zones ({len(self.overrides.records())})…")
         self.imported_button.clicked.connect(self._manage_overrides)
         export_row = QHBoxLayout()
-        for button in (export, export_zone, import_zone, self.imported_button):
+        set_hd = QPushButton("Set HD picture…"); set_hd.clicked.connect(self._set_hd_picture)
+        set_hd.setToolTip("Show a full-size picture for this map in the player instead of its 8-bit tiles. "
+                          "It must line up with the map's background.")
+        remove_hd = QPushButton("Remove HD picture"); remove_hd.clicked.connect(self._remove_hd_picture)
+        for button in (export, export_zone, import_zone, self.imported_button, set_hd, remove_hd):
             export_row.addWidget(button)
         browser_layout.addWidget(split, 1); browser_layout.addLayout(export_row)
         self.maps_tabs = QTabWidget()
@@ -1649,6 +1657,38 @@ class Workspace(QWidget):
             return None
         entry = self._map_entry(row)
         return parse_map(self._map_file(entry.index, "MAP", scene_row, MAX_MAP_FILE), entry).floor_grid
+
+    def _set_hd_picture(self):
+        try:
+            row = self._selected_map()
+            if self._map_scene is None:
+                raise ValueError("This map has no decoded background.")
+            entry, setup = self._map_entry(row), self._map_scene.setup
+            path, _ = QFileDialog.getOpenFileName(self, f"HD picture for {entry.name}", "",
+                                                  "Images (*.png *.jpg *.jpeg *.webp)")
+            if not path:
+                return
+            data = Path(path).read_bytes()
+            with Image.open(io.BytesIO(data)) as picture:
+                picture.verify()
+                size = picture.size
+            shape, map_shape = size[0] / size[1], setup.grid_width / setup.grid_height
+            if abs(shape / map_shape - 1) > 0.02 and QMessageBox.question(
+                    self, "Different shape", f"The picture is {size[0]}×{size[1]} but the map is {setup.grid_width}×"
+                    f"{setup.grid_height} tiles, so it will be stretched and may not line up. Use it anyway?"
+                    ) != QMessageBox.StandardButton.Yes:
+                return
+            self.hd_pictures.store(entry.index, entry.name, data)
+            QMessageBox.information(self, "HD picture set", f"{entry.name} now shows {Path(path).name} ({size[0]}×"
+                                    f"{size[1]}) in the player. It applies the next time the map loads.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Cannot set the HD picture", str(exc))
+
+    def _remove_hd_picture(self):
+        try:
+            self.hd_pictures.remove(self._map_entry(self._selected_map()).index)
+        except Exception as exc:
+            QMessageBox.critical(self, "Cannot remove the HD picture", str(exc))
 
     def _export_map_background(self):
         try:

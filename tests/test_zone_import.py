@@ -110,6 +110,12 @@ def test_edited_background_picture_becomes_the_tfs(tmp_path, monkeypatch):
     tfs = parse_tfs(item.files["TFS"])
     assert len(item.files["TFS"]) == originals[0]["TFS"]["size"]
     assert render_background(tfs, scene.setup, 0).getpixel((30, 30))[:3] == (0, 0, 255)
+    # The picture itself is kept at full size for the player's HD layer.
+    assert item.picture == buffer.getvalue()
+    store = OverrideStore(tmp_path / "project")
+    store.apply(report)
+    kept = store.directory / "hd" / "000-TEST01.png"
+    assert kept.read_bytes() == buffer.getvalue() and Image.open(kept).size == picture.size
 
 
 def tim(depth, x, width_units, height, pixels, clut=None):

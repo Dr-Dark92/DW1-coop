@@ -117,7 +117,7 @@ class PlayPanel(QWidget):
 
     def __init__(self, meta: dict, source_ok: bool, source_message: str, map_names: dict[int, str] | None = None,
                  decoded_grid=None, character_names: dict[int, str] | None = None,
-                 item_names: list[str] | None = None, imports=None, parent=None):
+                 item_names: list[str] | None = None, imports=None, hd_pictures: Path | None = None, parent=None):
         super().__init__(parent)
         self.meta, self.source_ok = meta, source_ok
         self.map_names, self.decoded_grid = map_names or {}, decoded_grid
@@ -125,6 +125,7 @@ class PlayPanel(QWidget):
         self.item_names = item_names or []
         # imports: (count of maps/characters with overrides, build(cancelled, progress) -> patched disc path)
         self.imports = imports or (lambda: 0, None)
+        self.hd_pictures = hd_pictures
         self._patch_thread = self._patch_worker = self._patch_dialog = None
         self._pending_launch = None
         # Live RAM addresses come from the USA executable's decompilation; other releases differ.
@@ -372,7 +373,7 @@ class PlayPanel(QWidget):
         config = PlayConfig(Path(self.core.text()), Path(self.bios.text() or "."), disc or self.disc, self.store.directory,
                             launch_slot=slot, launch_inspection=inspection_id,
                             resume_on_close=self.resume.isChecked(), live_ram=self.live_ram,
-                            game_rules=self.game_rules.isChecked(),
+                            game_rules=self.game_rules.isChecked(), hd_pictures=self.hd_pictures,
                             options=core_options(self.resolution.currentText(), self.smooth_colours.isChecked(),
                                                  self.steady_3d.isChecked()))
         start = (f" from slot {slot}" if slot is not None else

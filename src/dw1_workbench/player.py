@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import (QBuffer, QCoreApplication, QPointF, QByteArray, QIODevice, QObject, QRectF, QSettings, Qt,
                             QThread, Signal, Slot)
@@ -28,6 +29,7 @@ from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Fra
                        LibretroError)
 from .live import LiveNpc, LiveState, grid_differences, read_live_state
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
+from .hd_background import BackgroundLayer, Compositor, HdPictures
 from .progression import BattleResult, GameRules, Progress
 from .avatars import load_avatars
 from .evolution import EvolutionController, EvolutionHistory
@@ -69,6 +71,7 @@ class PlayConfig:
     launch_inspection: str | None = None  # start from an inspection's save state instead of a slot
     resume_on_close: bool = True
     live_ram: bool = False  # read map/position/grid from RAM; the addresses are only valid for USA SLUS_010.32
+    hd_pictures: Path | None = None  # folder of full-size backgrounds (hd_background.py); needs live_ram
     game_rules: bool = False  # P6 rules (progression.py): levels/EXP, no aging or death; needs live_ram
     options: dict[str, str] = field(default_factory=dict)
 
@@ -129,6 +132,9 @@ class EmulatorWorker(QObject):
         super().__init__()
         self.config = config
         self.store = QuickSaveStore(config.store_dir)
+        self.hd_enabled = True
+        self.hd_layer: BackgroundLayer | None = None
+        self._compositor: Compositor | None = None
         self.buttons = 0
         self.paused = False
         self.fast_forward = False
@@ -228,6 +234,10 @@ class EmulatorWorker(QObject):
                     self.history = EvolutionHistory(config.store_dir / "evolution_history.json")
                 except (OSError, ValueError) as exc:
                     self.message.emit(f"Evolution history unavailable ({exc}); the chart shows every linked form")
+            if config.live_ram and config.hd_pictures is not None:
+                self.hd_layer = BackgroundLayer(core.read_memory, core.serialize, HdPictures(config.hd_pictures).path,
+                                                on_error=self.message.emit)
+                self._compositor = Compositor(self.hd_layer, self._publish_composed, self.message.emit)
             if config.game_rules and config.live_ram:
                 self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path))
                 self.evolution = EvolutionController(core, self.rules.progress, self.dex, self.dex_map_names,
@@ -292,7 +302,10 @@ class EmulatorWorker(QObject):
                 if menu is not None and menu.layout == "relation" and not self._portraits_attempted:
                     self._portraits = native_portraits(core)
                     self._portraits_attempted = True
-                self._publish(evolution_menu_image(image, menu, self._menu_icons, self._portraits, self.avatars))
+                image = evolution_menu_image(image, menu, self._menu_icons, self._portraits, self.avatars)
+                if not self._submit_hd(image):
+                    self._publish(image)
+                self._last_image = image
             fast = self.fast_forward
             if audio and not fast:
                 self.audio_ready.emit(audio)
@@ -345,8 +358,36 @@ class EmulatorWorker(QObject):
         except OSError as exc:
             self.message.emit(f"Level/EXP could not be written: {exc}")
 
+    def _submit_hd(self, image: QImage) -> bool:
+        """Send the frame to the HD compositor when this map has a picture; False to show it as it is."""
+        if self.hd_layer is None or not self.hd_enabled or self._compositor is None:
+            return False
+        if image.format() != QImage.Format.Format_RGB32:
+            image = image.convertToFormat(QImage.Format.Format_RGB32)
+        pixels = np.frombuffer(image.constBits(), np.uint32).reshape(image.height(), image.bytesPerLine() // 4)
+        pixels = pixels[:, :image.width()] & 0xFFFFFF
+        try:
+            job = self.hd_layer.prepare(pixels)
+        except (LibretroError, ValueError) as exc:
+            self.message.emit(f"HD backgrounds turned off: {exc}")
+            self.hd_layer = None
+            return False
+        if job is None:
+            return False
+        self._compositor.submit(job)
+        return True
+
+    def _publish_composed(self, composed):
+        pixels = composed.pixels
+        image = QImage(pixels.data, pixels.shape[1], pixels.shape[0], pixels.shape[1] * 4, QImage.Format.Format_RGB32)
+        image.pixels = pixels  # the QImage does not own the array's memory
+        self._publish(image)
+
+    def _forget_hd_ram(self):
+        if self.hd_layer is not None:
+            self.hd_layer.reset()
+
     def _publish(self, image: QImage):
-        self._last_image = image
         with self._image_lock:
             self._image, notify = image, not self._image_pending
             self._image_pending = True
@@ -373,6 +414,7 @@ class EmulatorWorker(QObject):
                         self.evolution.reset()
                     if self.rules is not None:
                         self.rules.reset()
+                    self._forget_hd_ram()
                 elif command[0] == "camera_scale":
                     self._camera_scale = command[1]
                     if self._camera_scale == 256:
@@ -415,6 +457,7 @@ class EmulatorWorker(QObject):
             self.dex.reset_runtime()
         if self.evolution is not None:
             self.evolution.reset()
+        self._forget_hd_ram()
         if self.rules is not None:
             self.rules.reset()
             saved = self.store.progress(slot)
@@ -442,6 +485,7 @@ class EmulatorWorker(QObject):
             self.dex.reset_runtime()
         if self.evolution is not None:
             self.evolution.reset()
+        self._forget_hd_ram()
         if self.rules is not None:
             self.rules.reset()
         self.message.emit(f"Started from the inspection at {record.map_name if record else inspection_id}")
@@ -510,6 +554,8 @@ class EmulatorWorker(QObject):
             self.message.emit("Memory card written")
 
     def _shutdown(self, core: LibretroCore):
+        if self._compositor is not None:
+            self._compositor.stop()
         try:
             if self.config.resume_on_close and core.av is not None and self._has_run_frame:
                 self.slot_saved.emit(self._save(RESUME_SLOT, "Saved when the game was closed"))
@@ -781,6 +827,7 @@ class PlayWindow(QMainWindow):
         self.thread = QThread(self)
         self._dex_snapshot = {"entries": {}, "catalog": []}
         self.worker = EmulatorWorker(config)
+        self.worker.hd_enabled = self.hd_check.isChecked()
         self.worker.dex_map_names = dict(self.map_names)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -853,6 +900,11 @@ class PlayWindow(QMainWindow):
         smooth.setToolTip("Blend pixels when the picture is enlarged (softer, less blocky)")
         smooth.toggled.connect(self._set_smooth); bar.addWidget(smooth)
         smooth.setChecked(settings.value("play/smooth", True, type=bool))
+        self.hd_check = hd = QCheckBox("HD backgrounds"); hd.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        hd.setToolTip("Show the full-size picture set for a zone (Maps and Zones) instead of the game's 8-bit tiles")
+        hd.setEnabled(self.config.live_ram and self.config.hd_pictures is not None)
+        hd.toggled.connect(self._set_hd); bar.addWidget(hd)
+        hd.setChecked(hd.isEnabled() and settings.value("play/hd_backgrounds", True, type=bool))
         screen = QComboBox(); screen.addItems(SCREENS); screen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         screen.setToolTip("4:3: the original shape. 16:9 fill: the original shape in a 16:9 screen, with a blurred copy "
                           "of the picture at the sides. 16:9 stretch: the picture stretched to 16:9 (wider characters).")
@@ -1056,6 +1108,12 @@ class PlayWindow(QMainWindow):
     def _set_smooth(self, smooth: bool):
         QSettings("DW1-coop", "workbench").setValue("play/smooth", smooth)
         self.view.smooth = smooth; self.view.update(); self.view.setFocus()
+
+    def _set_hd(self, enabled: bool):
+        QSettings("DW1-coop", "workbench").setValue("play/hd_backgrounds", enabled)
+        if getattr(self, "worker", None) is not None:
+            self.worker.hd_enabled = enabled
+        self.view.setFocus()
 
     def _set_screen(self, screen: str):
         QSettings("DW1-coop", "workbench").setValue("play/screen", screen)

@@ -21,6 +21,7 @@ from PIL import Image
 
 from .background_import import encode_background
 from .errors import DiscFormatError
+from .hd_background import HdPictures
 from .maps import MAP_COUNT, MapEntry, map_exits, parse_map, parse_tfs
 from .quicksave import _atomic_write
 from .zone_export import PACKAGE_FORMAT, PACKAGE_VERSION
@@ -42,6 +43,7 @@ class MapImport:
     status: dict[str, str] = field(default_factory=dict)  # "unchanged", "changed" or "missing"
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    picture: bytes | None = None  # the edited background picture, kept full size for the player's HD layer
 
     @property
     def ok(self) -> bool:
@@ -160,6 +162,7 @@ def check_package(path: Path, meta: dict, entries: list[MapEntry], originals: di
                     item.problems.append(f"background-palette0.png could not be converted: {exc}")
                 else:
                     item.files["TFS"] = result.tfs
+                    item.picture = files[picture]
                     item.notes.append("background-palette0.png edited: " + "; ".join(result.notes))
                     _set_status(item, "TFS", originals, room)
                     if result.map is not None:
@@ -215,6 +218,7 @@ class OverrideStore:
             raise ZoneImportError("The package has problems; nothing was imported.")
         data = self._load()
         stored = data.setdefault("maps", {})
+        pictures = HdPictures(self.directory / "hd")
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for item in report.maps:
             files = {}
@@ -228,6 +232,8 @@ class OverrideStore:
                                            "package": report.path.name, "imported": now}
             else:
                 self._drop(stored, item.index)
+            if item.picture is not None:
+                pictures.store(item.index, item.name, item.picture)
         _atomic_write(self.index_path, json.dumps(data, indent=2).encode())
         return report.changed_maps
 

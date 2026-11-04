@@ -283,6 +283,22 @@ Reading rejects duplicates, more than 180 packages, members other than `bundle.j
 
 Real USA disc (2026-11-03): Rookie bundle 28 packaged and 11 skipped (1.2 MB, 1.3 s); all stages 144 packaged and 24 skipped (6.4 MB, 6.5 s); both re-imported with no changes. An In-Training bundle with Koromon's member replaced by the in-game-verified inverted palette imported only that change, and the resulting `ALLTIM.TIM` equals the one played in game.
 
+### HD background layer (USA, in the player)
+
+Why not 16-bit in the game: a 16-bit tile keeps the same 128×128 detail, its 4×3 ring needs 512×384 of VRAM where 256×384 plus a 64×256 gap are free, a 35-tile map needs 1.12 MB of the 2 MB of RAM, and a TFS twice the size no longer fits its sectors. `hd_background.py` works on finished frames instead and patches nothing.
+
+- **Game's background:** `MapTileData.imagePtr` tiles in RAM (equal to the VRAM ring on every tile measured), palette from VRAM row 480 (read from the save state four times a second, 2–5 ms). Screen = map − camera (`cameraX/Y`, `MAP_TILE_DATA + 0x1BB4`). The state reads do not disturb the game: RAM hashes over 1,000 frames of a battle were identical with and without them.
+- **Tile rows:** tiles with `texV % 256 != 0` are drawn with a V span of `0x7F` over 128 lines (`renderMap`). At 1× the source row is floor(line × 127/128 + ½). Above 1× the rounding varies with the camera, so those lines accept the row above as well.
+- **Camera:** the frame on screen was drawn with an earlier camera than the one in RAM, so the last 4 values are scored on a sample of the frame. This took walking from about 50% to 93% coverage.
+- **Battles:** the battle code loads over the tiles in RAM (`startBattle` re-reads the TFS after a win). Tiles read earlier stay in use; a state loaded mid-battle takes the visible tiles from VRAM; outside battle they are re-read twice a second.
+- **Merge:** the commonest difference from the background is a screen-wide shift (some battle saves have −4 per channel; the game's fades clamp at black). A pixel equal to background + shift, or the same pixel with all channels darkened alike (at most 16 levels), takes the picture with that darkening; anything else stays the game's. Below 25% coverage the frame is shown unchanged (menus, cutscenes, map changes).
+- **Time of day:** a per-channel linear fit from the TFS's first palette to the live one tints the picture. Whole-map tinted copies are cached per look; a look that changes every frame is applied to the screen part only.
+- **Threads:** the picture is resampled in the background (the frame shows normally until it is ready), composing runs on its own thread at 1280×960, and only the newest frame waits.
+
+Pictures live in `<project>/overrides/hd/NNN-MAPNAME.png`, stored by **Set HD picture…** or by importing an edited `background-palette0.png`. They are not part of the patched disc.
+
+Checked on the real game, `MAYO00` (640×768 native, picture 1145×1374), 2× internal resolution, Linux, 12 threads: coverage 94.1% standing, 92.7% walking over 259 camera positions, 93.8% in a real battle, 94% at night after the game's own day-to-night transition (a brief 60% during it), 94% after the win and map reload. About 60 frames per second in the play window with the layer on and off (no avatar rendering running); composing takes about 14 ms on its own thread and preparation about 3 ms on the emulator thread.
+
 ### Game rules (P6, USA)
 
 `progression.py` applies these rules to console RAM every frame while the player runs the game (Play tab: **Game rules (P6)**). Nothing on the disc or memory card changes.
