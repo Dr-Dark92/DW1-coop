@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QLockFile, QObject, QSettings, QStandardPaths, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QSpinBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QGroupBox, QScrollArea, QTabWidget, QCheckBox, QSpinBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -19,7 +19,8 @@ from .graphics import DEFAULT_RESOLUTION, RESOLUTIONS, core_options
 from .inspection import InspectionStore, SpawnLog
 from .libretro import LibretroError, core_info
 from .maps import trigger_description
-from .player import KEY_HELP, PlayConfig, PlayWindow
+from .controls_view import ControlsPanel
+from .player import DEFAULT_KEYS, KEY_HELP, SPLIT_KEYS, PlayConfig, PlayWindow
 from .quicksave import RESUME_SLOT, QuickSaveStore
 
 LIBRARY_SUFFIX = ".dll" if sys.platform == "win32" else ".dylib" if sys.platform == "darwin" else ".so"
@@ -141,10 +142,17 @@ class PlayPanel(QWidget):
         self.window: PlayWindow | None = None
 
         layout = QVBoxLayout(self)
+        self.pages = QTabWidget(); layout.addWidget(self.pages, 1)
+        settings_page = QWidget(); settings_layout = QVBoxLayout(settings_page)
         intro = QLabel("Play your own disc through a libretro PlayStation core loaded by the workbench. The disc is "
                        "only read; memory card and quick saves are kept in the saves folder below.")
-        intro.setWordWrap(True); layout.addWidget(intro)
-        form = QFormLayout(); layout.addLayout(form)
+        intro.setWordWrap(True); settings_layout.addWidget(intro)
+
+        def group(title):
+            box = QGroupBox(title); box_form = QFormLayout(box); settings_layout.addWidget(box)
+            return box_form
+
+        form = group("Game files")
         self.core = QLineEdit(self.settings.value("play/core_path", "") or str(find_installed_core() or ""))
         self.core_status = QLabel(); self.core_status.setWordWrap(True)
         form.addRow("Core", self._with_browse(self.core, self._browse_core)); form.addRow("", self.core_status)
@@ -165,6 +173,7 @@ class PlayPanel(QWidget):
         self.use_imports.setChecked(self.settings.value("play/use_imports", False, type=bool))
         self.use_imports.toggled.connect(lambda value: self.settings.setValue("play/use_imports", value))
         form.addRow("", self.use_imports)
+        form = group("Gameplay")
         self.game_rules = QCheckBox("Game rules (P6): partner levels and EXP from battles, no aging or death")
         self.game_rules.setToolTip(
             "Applied to the running game's memory (USA release only). Your partner starts at level 20 with at least "
@@ -198,6 +207,7 @@ class PlayPanel(QWidget):
             coop_row.addWidget(widget)
         coop_row.addStretch()
         form.addRow("Co-op", coop_row)
+        form = group("Graphics")
         picture = QHBoxLayout()
         self.resolution = QComboBox(); self.resolution.addItems(RESOLUTIONS)
         self.resolution.setCurrentText(self.settings.value("play/resolution", DEFAULT_RESOLUTION))
@@ -215,7 +225,15 @@ class PlayPanel(QWidget):
         for widget in (self.resolution, self.smooth_colours, self.steady_3d):
             picture.addWidget(widget)
         picture.addStretch(1)
-        form.addRow("Graphics", picture)
+        form.addRow("Picture", picture)
+        form = group("Imported Digimon")
+        self.offer_forms = QCheckBox("Offer imported Digimon in the Digi-Bank's egg list (WarGreymon)")
+        self.offer_forms.setToolTip("Needs imported resources on. When off they aren't offered as new eggs; one you "
+                                    "already have in the bank or as your partner keeps working.")
+        self.offer_forms.setChecked(self.settings.value("play/offer_forms", False, type=bool))
+        self.offer_forms.toggled.connect(lambda value: self.settings.setValue("play/offer_forms", value))
+        form.addRow("", self.offer_forms)
+        settings_layout.addStretch(1)
         self.refresh_imports()
         self.core.editingFinished.connect(self._check); self.bios.editingFinished.connect(self._check)
 
@@ -251,12 +269,17 @@ class PlayPanel(QWidget):
             inspection_buttons.addWidget(button)
         inspection_buttons.addStretch()
         lists = QSplitter(Qt.Orientation.Vertical); lists.addWidget(slots_page); lists.addWidget(inspections_page)
-        layout.addWidget(lists, 1)
-        controls = QLabel(KEY_HELP); controls.setWordWrap(True); layout.addWidget(controls)
-        layout.addWidget(QLabel("Launch log"))
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(150)
-        layout.addWidget(self.log)
+        self.pages.addTab(lists, "Play")
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(settings_page)
+        self.pages.addTab(scroll, "Settings")
+        self.controls = ControlsPanel(self.settings, [DEFAULT_KEYS, SPLIT_KEYS], KEY_HELP)
+        controls_scroll = QScrollArea(); controls_scroll.setWidgetResizable(True); controls_scroll.setWidget(self.controls)
+        self.pages.addTab(controls_scroll, "Controls")
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True)
+        self.pages.addTab(self.log, "Log")
         self._check(); self.refresh_slots(); self.refresh_inspections()
+        if not self._core_ok or not bios_report(Path(self.bios.text()) if self.bios.text() else None)[0]:
+            self.pages.setCurrentIndex(1)  # not ready to play yet: what's missing is on Settings
 
     @staticmethod
     def _with_browse(edit: QLineEdit, handler):
@@ -405,6 +428,7 @@ class PlayPanel(QWidget):
                             resume_on_close=self.resume.isChecked(), live_ram=self.live_ram,
                             game_rules=self.game_rules.isChecked(), hd_pictures=self.hd_pictures,
                             forms=self.imports[2]() if disc is not None and len(self.imports) > 2 else {},
+                            offer_forms=self.offer_forms.isChecked(),
                             coop_species=self.coop_species.currentData() if self.coop.isChecked() else None,
                             coop_level=self.coop_level.value(),
                             options=core_options(self.resolution.currentText(), self.smooth_colours.isChecked(),

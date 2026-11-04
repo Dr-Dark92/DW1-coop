@@ -274,3 +274,17 @@ def test_form_borrows_the_species_a_technique_allows(banked):
     core.put(P.GAME_STATE, "<h", 0)  # outside battle the table is as the game has it
     banked.before_frame(0)
     assert core.get(E.ORIGINAL_TYPES + 40 * 2, "<h") == -1
+
+
+def test_toggle_hides_forms_from_the_egg_list_only(banked):
+    banked.forms = {40: {"name": "WarGreymon"}}
+    banked.offer_forms = False
+    open_bank(banked)
+    for _ in range(4):
+        press(banked, "Down")
+    press(banked, "B")
+    assert banked.menu.rows == ("Botamon", "Punimon", "Poyomon", "Yuramon")
+    assert banked.read(P.DIGIMON_DATA + 40 * 52, 11) == b"WarGreymon\0"  # one already hatched keeps its data
+    banked.progress.bank[1] = B.imported_form(40)
+    press(banked, "A")
+    assert banked.menu.rows[1].startswith("WarGreymon")

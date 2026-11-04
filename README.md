@@ -77,7 +77,11 @@ The source is opened read-only. Exports run in a cancellable background worker, 
 
 ## WarGreymon (test)
 
-If WarGreymon is installed as an import (a converter run on your own Digimon World 3 disc; see `docs/HANDOVER.md`), keep **imported resources** on in the Play tab. In the game, open **Digi-Bank > Select new egg** and choose **WarGreymon**, then set it active in the bank. It starts at level 45. It replaces Andromon in that game, including any Andromon you meet, and uses Andromon's skeleton, with MetalGreymon's sounds and Fire and Battle techniques, and Terra Force as its finisher: its energy ball and throw from Digimon World 3, with Digimon World's own fire effect, since DW3's particles can't run here. Its idle and battle stance are its own from Digimon World 3; DW3 has no walk for it, so it walks with Andromon's. Remove the import in **Characters and Digimon** to get Andromon back. No DW3 data is in this repository.
+If WarGreymon is installed as an import (a converter run on your own Digimon World 3 disc; see `docs/HANDOVER.md`), keep **imported resources** on in the Play tab. Tick **Offer imported Digimon in the Digi-Bank's egg list** in the Play tab (off by default). In the game, open **Digi-Bank > Select new egg** and choose **WarGreymon**, then set it active in the bank. It starts at level 45. It replaces Andromon in that game, including any Andromon you meet, and uses Andromon's skeleton, with MetalGreymon's sounds and Fire and Battle techniques, and Terra Force as its finisher: its energy ball and throw from Digimon World 3, with Digimon World's own fire effect, since DW3's particles can't run here. Its idle and battle stance are its own from Digimon World 3; DW3 has no walk for it, so it walks with Andromon's. Remove the import in **Characters and Digimon** to get Andromon back. No DW3 data is in this repository.
+
+## Controllers
+
+**Play > Controls** in DW1-settings gives each player a controller and a button map: choose the controller, press **Set** beside a button, then press what you want for it. **Pressed** shows live what the game would receive. An Xbox-style layout is the default, the hat and left stick both work as the D-pad, and the keyboard keeps working alongside. Changes apply the next time a game starts. Controllers are read through what the system already has (winmm on Windows, `/dev/input/js*` on Linux), with no new dependency. On Windows the two triggers of an XInput pad share one axis, so pressing both cancels out.
 
 ## HD backgrounds (full-size zone pictures)
 

@@ -112,13 +112,14 @@ class EvolutionHistory:
 
 class EvolutionController:
     def __init__(self, core, progress, dex=None, map_names=None, history: EvolutionHistory | None = None,
-                 forms: dict[int, dict] | None = None):
+                 forms: dict[int, dict] | None = None, offer_forms: bool = True):
         """`forms`: Digimon imported over a native one, offered by the bank's egg list: ID -> {"name", and optionally
         "sounds_from" (a native ID), "special" (its three element types), "moves" (its 16 technique IDs),
         "skeleton_objects" (node -> extra model object), "finisher" ({"move", "name", "power"}, shown and used
         while it is the partner) and "effect_species" (technique -> a species its effect file allows, and "default")}."""
         self.core, self.progress = core, progress
         self.forms = forms or {}
+        self.offer_forms = offer_forms  # off: the egg list leaves them out; one already hatched still works
         self._native_moves = {}  # move -> its (name pointer, power) from the running game
         self.dex, self.map_names = dex, map_names or {}
         self.history = history  # None: the chart shows every linked form (no record available)
@@ -496,7 +497,7 @@ class EvolutionController:
             self._bank_view = "list"
             back = cross = step = 0
         if self._bank_view == "eggs":
-            eggs = [*bank.EGGS, *self.forms]
+            eggs = [*bank.EGGS, *(self.forms if self.offer_forms else ())]
             if back:
                 if self._bank_confirm:
                     self._bank_confirm = False

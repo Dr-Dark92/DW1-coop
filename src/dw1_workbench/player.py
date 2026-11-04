@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QVBoxLayout, QWidget)
 
 from .camera import CameraZoom
+from .controls import load_controls, system_pads
 from .graphics import SCREENS, screen_rects
 from .inspection import CATEGORIES, InspectionError, InspectionStore, SpawnLog
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
@@ -55,6 +56,7 @@ FAST_FORWARD = 4  # speed while fast-forward is held
 EXTEND_HEAP_FRAMES = 30
 MEMORY_CARD_FLUSH_FRAMES = 600  # write a changed memory card about every 10 s
 AVATAR_SWITCH_INTERVAL = 0.0002  # seconds; see EmulatorWorker._start_avatars
+PAD_POLL_MS = 8  # controllers, read on the GUI thread
 LIVE_FRAMES = 10  # read the live map, positions and grid about six times a second
 IMAGE_FORMATS = {PIXEL_XRGB8888: QImage.Format.Format_RGB32, PIXEL_RGB565: QImage.Format.Format_RGB16,
                  PIXEL_0RGB1555: QImage.Format.Format_RGB555}
@@ -96,6 +98,7 @@ class PlayConfig:
     game_rules: bool = False  # P6 rules (progression.py): levels/EXP, no aging or death; needs live_ram
     options: dict[str, str] = field(default_factory=dict)
     forms: dict[int, dict] = field(default_factory=dict)  # on the patched disc: imported Digimon, see EvolutionController
+    offer_forms: bool = False  # the bank's egg list offers them
 
 
 def frame_image(frame: Frame) -> QImage:
@@ -289,7 +292,7 @@ class EmulatorWorker(QObject):
             if config.game_rules and config.live_ram:
                 self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path))
                 self.evolution = EvolutionController(core, self.rules.progress, self.dex, self.dex_map_names,
-                                                     self.history, forms=config.forms)
+                                                     self.history, forms=config.forms, offer_forms=config.offer_forms)
                 self.evolution.split_saves = lambda: choosable_saves(self.store.slots(), self.save_slot)
                 self.evolution.split_running = lambda: self.split_slot is not None
             try:
@@ -1103,6 +1106,12 @@ class PlayWindow(QMainWindow):
         self._split_held = 0
         self._split_timer = QTimer(self)
         self._split_timer.timeout.connect(self._show_split_frame)
+        self._pads = system_pads()
+        self._controls = load_controls(QSettings("DW1-coop", "workbench"))
+        self._pad_buttons = [set(), set()]  # each player's controller buttons held
+        self._pad_held = [0, 0]  # the bits of those that reach a game
+        self._pad_timer = QTimer(self)
+        self._pad_timer.timeout.connect(self._poll_pads)
         # Direct: stop() blocks the GUI thread in wait(), so a queued quit would never be delivered.
         self.worker.finished.connect(self.thread.quit, Qt.ConnectionType.DirectConnection)
         self._finished = False
@@ -1111,6 +1120,42 @@ class PlayWindow(QMainWindow):
     def start(self):
         self.show(); self.view.setFocus()
         self.thread.start()
+        self._pad_timer.start(PAD_POLL_MS)
+
+    def _send_buttons(self):
+        self.worker.buttons = self._held | self._pad_held[0]
+        if self._split is not None:
+            self._split.set_buttons(self._split_held | self._pad_held[1])
+
+    def _poll_pads(self):
+        """Controllers count only while a game window is in front, as the keyboard does."""
+        active = self.isActiveWindow()
+        for player, controls in enumerate(self._controls):
+            inputs = self._pads.read(controls.pad) if active and controls.pad is not None else set()
+            held = controls.held(inputs)
+            for button in held - self._pad_buttons[player]:
+                self._pad_button(player, button, True)
+            for button in self._pad_buttons[player] - held:
+                self._pad_button(player, button, False)
+            self._pad_buttons[player] = held
+
+    def _pad_button(self, player: int, button: str, pressed: bool):
+        """The same rules as the keys: who a button reaches depends on the shared fight and split screen."""
+        bit = 1 << BUTTON[button]
+        if not pressed:
+            self._pad_held[player] &= ~bit
+        else:
+            host = self._split.link.host() if self._split is not None else None
+            if player == 0 and host == 1:
+                if button in ALLY_BUTTONS:
+                    self._split.link.send_press(1, ALLY_BUTTONS[button])
+                return
+            if player == 1 and (self._split is None or host == 0):
+                if self.worker.coop is not None and button in ALLY_BUTTONS:
+                    self.worker.coop.press(ALLY_BUTTONS[button])
+                return
+            self._pad_held[player] |= bit
+        self._send_buttons()
 
     @Slot(object)
     def _dex_changed(self, snapshot):
@@ -1208,7 +1253,7 @@ class PlayWindow(QMainWindow):
 
     def _handle_key(self, event, pressed: bool) -> bool:
         if event is None:
-            self._held = 0; self.worker.buttons = 0; self.worker.fast_forward = False
+            self._held = 0; self._send_buttons(); self.worker.fast_forward = False
             return True
         if event.isAutoRepeat():
             return event.key() in self.keys or event.key() == Qt.Key.Key_Tab
@@ -1220,7 +1265,7 @@ class PlayWindow(QMainWindow):
         if self._split is not None and event.key() in SPLIT_KEYS:
             bit = 1 << BUTTON[SPLIT_KEYS[event.key()]]
             self._split_held = self._split_held | bit if pressed else self._split_held & ~bit
-            self._split.set_buttons(self._split_held)
+            self._send_buttons()
             return True
         if self.worker.coop is not None and event.key() in COOP_KEYS:
             if pressed:
@@ -1231,7 +1276,7 @@ class PlayWindow(QMainWindow):
             return False
         bit = 1 << BUTTON[button]
         self._held = self._held | bit if pressed else self._held & ~bit
-        self.worker.buttons = self._held
+        self._send_buttons()
         return True
 
     def focusNextPrevChild(self, _next):
@@ -1427,12 +1472,12 @@ class PlayWindow(QMainWindow):
                 return True
             bit = 1 << BUTTON[own_button]
             self._held = self._held | bit if pressed else self._held & ~bit
-            self.worker.buttons = self._held
+            self._send_buttons()
             return True
         if split_button is not None:  # player 2 hosts: their game takes their keys
             bit = 1 << BUTTON[split_button]
             self._split_held = self._split_held | bit if pressed else self._split_held & ~bit
-            self._split.set_buttons(self._split_held)
+            self._send_buttons()
             return True
         if pressed and own_button in ALLY_BUTTONS:
             self._split.link.send_press(1, ALLY_BUTTONS[own_button])
@@ -1555,6 +1600,7 @@ class PlayWindow(QMainWindow):
         return self.thread.wait(wait_ms)
 
     def closeEvent(self, event):
+        self._pad_timer.stop()
         self._stop_split()
         if not self.stop():
             self._message("The core is still shutting down…")

@@ -1,5 +1,14 @@
 # Handover
 
+## Controllers and the Play tab (2026-11-04, Claude, Windows 11)
+
+User: controller mapping for both players, reorganise the UI; WarGreymon hidden from the egg list or a toggle.
+
+- `controls.py`: `WindowsPads` (winmm `joyGetPosEx`) and `LinuxPads` (`/dev/input/js*`), no new dependency. Inputs are named `b0`, `a1-`, `h0up`; `PlayerControls` maps each game button to a list of inputs, saved as JSON in `controls/players`. `controls_view.py`: the Controls page, with Set capturing the next new input, ignoring what was already held (a trigger axis at rest).
+- `PlayWindow._poll_pads` reads on the GUI thread every 8 ms while the window is active; `_pad_button` applies the same routing as the keys in split screen and shared fights. Scan: 107 ms once, then 0.2 ms every 2 s. Mapping is read when a game window opens.
+- Play tab split into Play, Settings, Controls and Log; it opens on Settings when the core or BIOS isn't ready. `play/offer_forms` (off) controls the egg list only.
+- Only a fake controller was tested, plus a real scan with none connected. Not tested: a physical pad, on either system, or player 2's pad with real split screen. Keyboard keys stay fixed.
+
 ## WarGreymon from DW3: first test (2026-11-04, Claude, Windows 11)
 
 User's tool: `D:\DW3\dw3tool` (local, not on GitHub; European disc SLES-03936, battle model `DAT/FIGHT/MODEL/M213WGRE.BIN`, 23 bones). Scripts and output outside Git: `D:/DW1-coop-data/dw3-wargreymon/` (`convert.py`, `check_game.py`, `out/`, `game*/`, `patched/`, 365 MB). No project code changed.
