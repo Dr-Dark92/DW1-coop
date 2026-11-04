@@ -1,5 +1,14 @@
 # Handover
 
+## Next stages (2026-11-04, agreed with the user)
+
+The user tested split screen: it runs, but the two games are separate and the players can't see each other. Next, in order:
+
+1. **Shared world.** Keep two emulators. Each publishes zone, position and facing over the split-screen shared memory. In the same zone, each game spawns the other's Digimon in a free NPC slot and moves it; in different zones it is removed. First test: player 2's Digimon appears and walks in player 1's game. Untested: the Tamer isn't a normal Digimon model, animation matching, free slots in busy zones.
+2. **Co-op battles and shared progress.** A fight in a shared zone brings in the other's Digimon as the ally. Then sync Bits, items and story flags. Item throwing: either player to either Digimon, from the shared inventory (decided, not built).
+3. **LAN Co-op** (menu option 11 is a placeholder): to be discussed.
+4. **Digimon World 3 import.** Merge the evolution charts into: in-training-1 > in-training-2 > Rookie > Champion > Ultimate > Mega > Mega+, for example Botamon > Koromon > Agumon > Greymon > MetalGreymon > WarGreymon > Omnimon. WarGreymon and Omnimon come from DW3 with their animations and signature moves. First test: WarGreymon alone, standing and walking, on Andromon's base (the user's choice of closest form), possibly with Andromon's animations at first. Nothing about DW3 has been examined: disc formats, skeletons, move effects and table limits are all open. DW3 data stays outside Git.
+
 ## Co-op: ally battle test (2026-11-04, Claude, Linux, branch `python-player`)
 
 User's plan: two players in the same town with shared progress; same zone means a co-op battle using the game's multi-fighter battles, otherwise each plays normally. Design so far: two emulators side by side (one core per process); a co-op battle runs in one game, the other pauses and shows it, and results go back to both. No project code exists yet.

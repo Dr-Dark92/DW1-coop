@@ -73,6 +73,7 @@
 - Disassembly/decompilation integration.
 - Player: gamepad input, key remapping, core options UI, and audio-driven frame pacing (pacing is clock-based; audio is dropped rather than delayed).
 - Shared co-op progress, same-zone battles across the two split-screen games, native runtime, or networking.
+- Digimon World 3 import (planned, see HANDOVER.md).
 
 ## Real-disc validation (user-provided USA image)
 
