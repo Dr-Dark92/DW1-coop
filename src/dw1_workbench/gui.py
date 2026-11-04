@@ -4,13 +4,15 @@ import hashlib
 import html
 import io
 import struct
+import subprocess
+import sys
 import threading
 import traceback
 from pathlib import Path
 
 from PIL import Image
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .app_icon import apply_icon, create_shortcuts
 from .catalog import Catalogue, open_catalogue
 from .characters import PARTNER_COUNT, STAGES, parse_character_table, parse_move_names
 from .clip_names import clip_name
@@ -49,6 +52,15 @@ from .tim import decode_tim, export_png
 
 HEX_LIMIT = 256 * 1024
 PREVIEW_LIMIT = 64 * 1024 * 1024
+
+
+APP_NAME = "DW1-settings"
+LAST_PROJECT = "app/last_project"
+
+
+def workbench_settings() -> QSettings:
+    """What DW1-settings saves and DW1-play runs from."""
+    return QSettings("DW1-coop", "workbench")
 
 
 class ImportWorker(QObject):
@@ -473,7 +485,7 @@ class WelcomePage(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.addStretch()
-        title = QLabel("DW1-coop Asset Workbench")
+        title = QLabel(APP_NAME)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size: 26px; font-weight: 600")
         subtitle = QLabel("Import your own Digimon World disc image to create a read-only analysis project.\n"
@@ -1968,9 +1980,16 @@ class Workspace(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__(); self.setWindowTitle("DW1-coop Asset Workbench"); self.resize(1100, 720)
+    def __init__(self, settings: QSettings | None = None):
+        """`settings`: where the opened game is remembered; None remembers nothing."""
+        super().__init__(); self.setWindowTitle(APP_NAME); self.resize(1100, 720)
+        self.settings = settings
         self.stack = QStackedWidget(); self.setCentralWidget(self.stack)
+        game = self.menuBar().addMenu("Game")
+        game.addAction("Open another project…", self.open_project)
+        game.addAction("Import game image…", self.start_import)
+        self.shortcuts_action = game.addAction("Create desktop shortcuts", self.create_desktop_shortcuts)
+        self.shortcuts_action.setEnabled(False)
         welcome = WelcomePage(); welcome.import_requested.connect(self.start_import); welcome.open_requested.connect(self.open_project)
         self.stack.addWidget(welcome)
         self.thread = self.worker = None
@@ -2034,11 +2053,36 @@ class MainWindow(QMainWindow):
         try: self.show_workspace(open_catalogue(Path(path)))
         except Exception as exc: QMessageBox.critical(self, "Could not open project", str(exc))
 
+    def open_last_project(self) -> bool:
+        """Reopen the game opened last time; when that isn't possible the welcome page stays, with the reason."""
+        path = self.settings.value(LAST_PROJECT, "") if self.settings is not None else ""
+        if not path:
+            return False
+        try:
+            self.show_workspace(open_catalogue(Path(path)))
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not reopen your game at {path}: {exc}")
+            return False
+        return True
+
     @Slot(object)
     def show_workspace(self, catalogue):
         workspace = Workspace(catalogue, self)
         workspace.background_finished.connect(self._maybe_finish_close)
         self.stack.addWidget(workspace); self.stack.setCurrentWidget(workspace)
+        self._disc = Path(catalogue.meta().get("source_path", ""))
+        self.shortcuts_action.setEnabled(sys.platform == "win32")
+        if self.settings is not None:
+            self.settings.setValue(LAST_PROJECT, str(catalogue.project_dir))
+            apply_icon(QApplication.instance(), self._disc)
+
+    def create_desktop_shortcuts(self):
+        try:
+            create_shortcuts(self._disc)
+        except (OSError, subprocess.SubprocessError) as exc:
+            QMessageBox.warning(self, "Desktop shortcuts", f"The shortcuts could not be created: {exc}")
+        else:
+            self.statusBar().showMessage("DW1-settings and DW1-play are on your desktop")
 
     def _active_workspaces(self):
         return [self.stack.widget(index) for index in range(self.stack.count())

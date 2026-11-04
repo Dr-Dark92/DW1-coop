@@ -15,8 +15,9 @@ dependencies = ["PySide6-Essentials>=6.8,<7", "PySide6-Addons>=6.8,<7", "Pillow>
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
 
-[project.scripts]
-dw1-workbench = "dw1_workbench.app:main"
+[project.gui-scripts]
+dw1-settings = "dw1_workbench.app:main"
+dw1-play = "dw1_workbench.play_app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

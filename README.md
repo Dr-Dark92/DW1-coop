@@ -1,4 +1,4 @@
-# DW1-coop Asset Workbench — milestone 1
+# DW1-coop: DW1-settings and DW1-play
 
 A read-only desktop workbench for importing a user-owned Digimon World 1 disc image, validating one evidenced release, inventorying its ISO 9660 filesystem, and preserving resource provenance in a local SQLite catalogue.
 
@@ -38,10 +38,12 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -c constraints.lock -e '.[dev]'
-dw1-workbench
+dw1-settings
 ```
 
 Alternatively: `python -m dw1_workbench.app`.
+
+There are two apps. **DW1-settings** (`dw1-settings`) is the full workbench: it reopens the game you opened last, and its **Game** menu opens another project, imports a disc or creates desktop shortcuts. **DW1-play** (`dw1-play`, or `python -m dw1_workbench.play_app`) goes straight into the game with the settings from DW1-settings' Play tab, from the Resume slot when there is one, and closes with the game. The two can't run the same game at once, since they share its saves. Both use an Agumon icon rendered once from your own disc and kept on this computer; no game art is bundled. DW1-play has no window of its own for changing settings: use DW1-settings for that.
 
 Run tests with:
 

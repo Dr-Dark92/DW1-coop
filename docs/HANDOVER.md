@@ -1,5 +1,16 @@
 # Handover
 
+## DW1-settings and DW1-play (2026-11-04, Claude, Windows 11)
+
+User: remember the mounted game; the current app is DW1-settings; another app runs the game directly from its configuration; Agumon icon.
+
+- `MainWindow(settings)` saves `app/last_project` in `show_workspace`; `app.main` calls `open_last_project` (a failure leaves the welcome page, a status message and the remembered path). `MainWindow()` remembers nothing, so tests can't touch the real settings. New **Game** menu.
+- `play_app.py`: builds a hidden `Workspace` and calls `PlayPanel.launch_directly` (Resume, else power on), so it uses exactly the Play tab's settings, patched disc and names. Quits on `PlayPanel.player_closed`.
+- `player.lock` (`QLockFile`, stale only when the holder died) in the store: added on my initiative, since the apps share saves and two games would overwrite each other's memory card. Split screen's player 2 uses its own store.
+- `app_icon.py`: `avatars.render_character` at 256 px to `<data>/DW1-coop/icons/agumon.png` and `.ico`, not in Git; `set_app_id` for the Windows taskbar; `create_shortcuts` writes both `.lnk` files with PowerShell.
+- `pyproject`: gui-scripts `dw1-settings`, `dw1-play` replace `dw1-workbench`; rerun `pip install -e .`.
+- Real check (`D:/DW1-coop-data/windows-validation/check_play_app.py`, project `D:/DW1`, saves and settings copied): window in 3.3 s, frames running, rules on, second game refused, lock released, exit 0, Resume written to the copy, user store unchanged. Offscreen, so the taskbar icon and shortcuts' look are for the user to confirm. `app/last_project` was seeded to `D:\\DW1` and the shortcuts created on the user's desktop. Tests: `tests/test_apps.py`.
+
 ## Windows check of the CachyOS work (2026-11-04, Claude, Windows 11, branch `python-player`)
 
 The six commits from HD backgrounds to the shared world were made on Linux (CachyOS). Run here on the real core with copies of the user's saves (user store hashes unchanged). Scripts and captures outside Git: `D:/DW1-coop-data/windows-validation/` (`check_split.py run|same|kill|nocache|hd|hd4`, `check_hd.py`). `dev-tools` and `saves-before-8mb` are not on this PC.

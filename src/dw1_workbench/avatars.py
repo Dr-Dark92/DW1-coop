@@ -40,6 +40,22 @@ def render_avatar(model_data: bytes, texture_data: bytes, skeleton, size: int = 
     return snapshot.image(size)
 
 
+def render_character(disc: Path, kind: int, size: int = AVATAR_SIZE) -> QImage | None:
+    """One Digimon's avatar straight from the disc; None when it isn't on the disc."""
+    with inspect_image(Path(disc)).open() as reader:
+        inventory = {entry.path: entry for entry in read_inventory(reader)}
+        exe = inventory[EXECUTABLE]
+        executable = reader.read_extent(exe.extent, exe.size, 2 * 1024 * 1024)
+        character = next((entry for entry in parse_character_table(executable) if entry.resource_id == kind), None)
+        mmd = inventory.get(character.model_path) if character else None
+        if mmd is None:
+            return None
+        alltim = inventory[ALLTIM]
+        return render_avatar(reader.read_extent(mmd.extent, mmd.size, 4 * 1024 * 1024),
+                             reader.read_extent_range(alltim.extent, alltim.size, character.texture_slot * SLOT_SIZE, SLOT_SIZE),
+                             parse_usa_skeleton(executable, kind), size)
+
+
 def load_avatars(disc: Path, cache_dir: Path, order, publish, cancelled=lambda: False):
     """Call publish(kind, QImage) for every Digimon in `order` whose model renders. Runs on any thread."""
     cache_dir = Path(cache_dir)

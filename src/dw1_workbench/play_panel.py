@@ -8,7 +8,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtCore import QLockFile, QObject, QSettings, QStandardPaths, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QSpinBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
@@ -20,7 +20,7 @@ from .inspection import InspectionStore, SpawnLog
 from .libretro import LibretroError, core_info
 from .maps import trigger_description
 from .player import KEY_HELP, PlayConfig, PlayWindow
-from .quicksave import QuickSaveStore
+from .quicksave import RESUME_SLOT, QuickSaveStore
 
 LIBRARY_SUFFIX = ".dll" if sys.platform == "win32" else ".dylib" if sys.platform == "darwin" else ".so"
 CORE_NAMES = ("mednafen_psx_libretro", "swanstation_libretro", "pcsx_rearmed_libretro")
@@ -114,6 +114,7 @@ class PatchWorker(QObject):
 class PlayPanel(QWidget):
     show_map_requested = Signal(int)  # map-table index
     inspections_changed = Signal()
+    player_closed = Signal()  # the game window closed, or a launch ended without one
 
     def __init__(self, meta: dict, source_ok: bool, source_message: str, map_names: dict[int, str] | None = None,
                  decoded_grid=None, character_names: dict[int, str] | None = None,
@@ -128,6 +129,7 @@ class PlayPanel(QWidget):
         self.hd_pictures = hd_pictures
         self._patch_thread = self._patch_worker = self._patch_dialog = None
         self._pending_launch = None
+        self._player_lock = None
         # Live RAM addresses come from the USA executable's decompilation; other releases differ.
         self.live_ram = meta.get("executable") == "SLUS_010.32"
         self.disc = Path(meta.get("source_path", ""))
@@ -380,6 +382,11 @@ class PlayPanel(QWidget):
                                  "copy of the disc is built, the original is untouched)")
         self.use_imports.setEnabled(count > 0)
 
+    def launch_directly(self) -> bool:
+        """DW1-play: carry on from the Resume slot, or power on without one. False when no game is starting."""
+        self.launch(RESUME_SLOT if self.store.info(RESUME_SLOT) else None)
+        return self.window is not None or self._patch_thread is not None
+
     def launch(self, slot: int | None, inspection_id: str | None = None, disc: Path | None = None):
         if self.window is not None:
             self.window.raise_(); self.window.activateWindow()
@@ -404,6 +411,14 @@ class PlayPanel(QWidget):
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
         self._write_log(f"Launching {config.disc_path.name}{start}"
                         + (" with imported resources (patched copy)" if disc is not None else ""))
+        # DW1-settings and DW1-play share these saves: two games at once would overwrite each other's memory card.
+        self.store.directory.mkdir(parents=True, exist_ok=True)
+        lock = QLockFile(str(self.store.directory / "player.lock"))
+        lock.setStaleLockTime(0)  # only a dead holder (a crash) frees it
+        if not lock.tryLock(0):
+            QMessageBox.information(self, "Already playing", "This game is already running in DW1-settings or DW1-play.")
+            return
+        self._player_lock = lock
         window = PlayWindow(config, self.meta.get("release", "Digimon World"), self.map_names, self.decoded_grid,
                             self.character_names, self.item_names)
         window.log.connect(self._write_log)
@@ -452,6 +467,8 @@ class PlayPanel(QWidget):
         pending, self._pending_launch = getattr(self, "_pending_launch", None), None
         if pending is not None:
             self.launch(*pending)
+        if self.window is None:
+            self.player_closed.emit()  # nothing started: the build failed or was cancelled
 
     def wait_for_patch(self, timeout_ms: int = 60000):
         if self._patch_thread is not None:
@@ -460,6 +477,10 @@ class PlayPanel(QWidget):
     @Slot()
     def _window_closed(self):
         self.window = None
+        if self._player_lock is not None:
+            self._player_lock.unlock()
+            self._player_lock = None
+        self.player_closed.emit()
         self.refresh_slots()
 
     @Slot(str)

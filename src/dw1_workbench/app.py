@@ -4,13 +4,16 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from .gui import MainWindow
+from .app_icon import set_app_id
+from .gui import APP_NAME, MainWindow, workbench_settings
 
 
 def main() -> int:
+    set_app_id(APP_NAME)
     application = QApplication(sys.argv)
-    application.setApplicationName("DW1-coop Asset Workbench")
-    window = MainWindow(); window.show()
+    application.setApplicationName(APP_NAME)
+    window = MainWindow(workbench_settings()); window.show()
+    window.open_last_project()
     return application.exec()
 
 
