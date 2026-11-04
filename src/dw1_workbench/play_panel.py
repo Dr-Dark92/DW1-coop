@@ -124,7 +124,8 @@ class PlayPanel(QWidget):
         self.map_names, self.decoded_grid = map_names or {}, decoded_grid
         self.character_names = character_names or {}
         self.item_names = item_names or []
-        # imports: (count of maps/characters with overrides, build(cancelled, progress) -> patched disc path)
+        # imports: (count of maps/characters with overrides, build(cancelled, progress) -> patched disc path,
+        # and optionally forms() -> imported Digimon the patched disc adds to the bank, see EvolutionController)
         self.imports = imports or (lambda: 0, None)
         self.hd_pictures = hd_pictures
         self._patch_thread = self._patch_worker = self._patch_dialog = None
@@ -403,6 +404,7 @@ class PlayPanel(QWidget):
                             launch_slot=slot, launch_inspection=inspection_id,
                             resume_on_close=self.resume.isChecked(), live_ram=self.live_ram,
                             game_rules=self.game_rules.isChecked(), hd_pictures=self.hd_pictures,
+                            forms=self.imports[2]() if disc is not None and len(self.imports) > 2 else {},
                             coop_species=self.coop_species.currentData() if self.coop.isChecked() else None,
                             coop_level=self.coop_level.value(),
                             options=core_options(self.resolution.currentText(), self.smooth_colours.isChecked(),

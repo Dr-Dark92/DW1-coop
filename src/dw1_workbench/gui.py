@@ -559,7 +559,7 @@ class Workspace(QWidget):
         self.play_panel = PlayPanel(catalogue.meta(), *source_state(catalogue), self._map_names(), self._decoded_grid,
                                     self._character_names(), self._item_names(),
                                     (lambda: len(self.overrides.records()) + len(self.digimon_overrides.records()),
-                                     self._build_patched_disc), self.hd_pictures.directory)
+                                     self._build_patched_disc, self._imported_forms), self.hd_pictures.directory)
         self.play_panel.show_map_requested.connect(self.show_map)
         self.tabs.addTab(self.play_panel, "Play")
         layout = QVBoxLayout(self); layout.addWidget(self.tabs)
@@ -1632,6 +1632,11 @@ class Workspace(QWidget):
         self._all_pathing = None
         self.play_panel.refresh_imports()
         self._preview_map()
+
+    def _imported_forms(self) -> dict[int, dict]:
+        """Digimon imported as a new form over a native one (their record describes the form)."""
+        return {resource_id: record["form"] for resource_id, record in self.digimon_overrides.records().items()
+                if record.get("form")}
 
     def _build_patched_disc(self, cancelled, progress) -> Path:
         """Runs on the Play tab's worker thread: a patched copy of the disc with every imported file."""

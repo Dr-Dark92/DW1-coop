@@ -168,3 +168,68 @@ def test_worker_saves_bank_changes(banked, tmp_path):
     worker._bank_events()
     saved = P.Progress.from_json((tmp_path / "progression.json").read_bytes())
     assert saved.bank[0] == B.egg(43) and not banked.events and not banked.notices
+
+
+def test_imported_form_is_offered_named_and_grown(banked):
+    core = banked.core
+    name(core, 40, b"Andromon")
+    core.put(P.DIGIMON_DATA + 40 * 52 + 29, "<B", 5)
+    banked.forms = {40: {"name": "WarGreymon"}}
+    open_bank(banked)
+    for _ in range(4):
+        press(banked, "Down")
+    press(banked, "B")
+    assert banked.menu.rows == ("Botamon", "Punimon", "Poyomon", "Yuramon", "WarGreymon")  # the table's name is replaced
+    assert banked.menu.icons[-1] == 40
+    for _ in range(4):
+        press(banked, "Down")
+    press(banked, "B"); press(banked, "B")
+    assert banked.progress.bank[0] == B.imported_form(40)
+    press(banked, "B")
+    assert banked.menu.title == "WarGreymon"
+    assert "HP 4500/4500   MP 4500/4500" in banked.menu.rows
+    press(banked, "B"); press(banked, "B")
+    assert banked.number(E.EVOLUTION_TARGET) == 40 and banked.progress.level == 45
+    finish_sequence(banked, 40)
+    assert core.get(P.PARTNER_STATS + 16, "<h") == 4500
+
+
+def test_form_name_returns_after_a_state_load(banked):
+    banked.forms = {40: {"name": "WarGreymon"}}
+    banked.before_frame(0)
+    assert banked.read(P.DIGIMON_DATA + 40 * 52, 11) == b"WarGreymon\0"
+    name(banked.core, 40, b"Andromon")
+    banked.before_frame(0)
+    assert banked.read(P.DIGIMON_DATA + 40 * 52, 11) == b"WarGreymon\0"
+
+
+def test_without_the_import_nothing_extra_is_offered(banked):
+    open_bank(banked)
+    for _ in range(4):
+        press(banked, "Down")
+    press(banked, "B")
+    assert len(banked.menu.rows) == 4
+
+
+WARGREYMON = {"name": "WarGreymon", "sounds_from": 12, "special": [0, 1, 255],
+              "moves": [46, 45, 47, 40, 48, 1, 0, 4, 2, 5, 3, 6, 7, 41, 63, 255]}
+
+
+def test_form_tables_and_learned_techniques(banked):
+    core = banked.core
+    core.put(E.SOUND_BANK_VOICE + 12, "<B", 10); core.put(E.SOUND_BANK_EFFECTS + 12, "<B", 12)
+    core.put(E.SOUND_BANK_EFFECTS + 40, "<B", 36)
+    core.put(P.PARTNER_ENTITY + E.LEARNED_MOVES, "<Q", 1 << 12)
+    banked.forms = {40: WARGREYMON}
+    banked.before_frame(0)
+    record = P.DIGIMON_DATA + 40 * 52
+    assert list(banked.read(record + E.DIGIMON_SPECIAL, 3)) == [0, 1, 255]
+    assert list(banked.read(record + E.DIGIMON_MOVES, 16)) == WARGREYMON["moves"]
+    assert core.get(E.SOUND_BANK_EFFECTS + 40, "<B") == 12 and core.get(E.SOUND_BANK_VOICE + 40, "<B") == 10
+    assert core.get(P.PARTNER_ENTITY + E.LEARNED_MOVES, "<Q") == 1 << 12  # not learned while another partner is active
+    core.put(P.PARTNER_ENTITY, "<i", 40)
+    banked.before_frame(0)
+    learned = core.get(P.PARTNER_ENTITY + E.LEARNED_MOVES, "<Q")
+    assert learned & (1 << 12)
+    assert all(learned >> move & 1 for move in WARGREYMON["moves"] if move < 64)
+    assert not learned >> 42 & 1  # War Cry isn't on its list

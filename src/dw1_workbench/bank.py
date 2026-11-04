@@ -15,9 +15,10 @@ import struct
 from .digidex import read_skill
 from .live import ram_offset
 from .progression import (CLASS_NAMES, DIGIMON_DATA, DIGIMON_LEVEL, DIGIMON_PARA_SIZE, FULL_LIFETIME, PARTNER_ENTITY,
-                          PARTNER_PARA, PARTNER_STATS, Progress)
+                          PARTNER_PARA, PARTNER_STATS, Progress, level_for, stats_for, total_exp)
 
 STATS_SIZE, PARA_SIZE = 32, 0x84
+IMPORTED_FORM_LEVEL = 45  # an imported form the egg list offers (a test entry): it starts as a grown partner
 RAISE_DATA, RAISE_DATA_SIZE, DEFAULT_WEIGHT = 0x801225BC, 28, 21
 # setReincarnateStats arguments: HP, MP, Offense, Defense, Speed, Brains (no inheritance: not a natural death).
 EGGS = {1: (90, 110, 10, 11, 9, 10), 15: (120, 100, 16, 8, 8, 6), 29: (100, 140, 12, 6, 6, 8), 43: (100, 120, 8, 8, 8, 8)}
@@ -52,12 +53,25 @@ def egg(kind: int) -> dict:
     return {"kind": kind, "exp": 0, "stats": None, "para": None}
 
 
+def imported_form(kind: int) -> dict:
+    """A partner for a form imported over a native Digimon; its stats are its level's."""
+    return {"kind": kind, "exp": total_exp(IMPORTED_FORM_LEVEL), "stats": None, "para": None}
+
+
+def _new_stats(record: dict) -> tuple:
+    """HP, MP, Offense, Defense, Speed, Brains of a partner that has never been active."""
+    if record["kind"] in EGGS:
+        return EGGS[record["kind"]]
+    stats = stats_for(level_for(record["exp"]))
+    return tuple(stats[name] for name in ("hp", "mp", "offense", "defense", "speed", "brains"))
+
+
 def apply(read, write, record: dict):
     """Write a stored partner over the active one, after the evolution sequence loaded its form."""
     if record["stats"] is not None:
         write(ram_offset(PARTNER_STATS), bytes.fromhex(record["stats"]))
     else:
-        hp, mp, offense, defense, speed, brains = EGGS[record["kind"]]
+        hp, mp, offense, defense, speed, brains = _new_stats(record)
         write(ram_offset(PARTNER_STATS), struct.pack("<4h", offense, defense, speed, brains))
         write(ram_offset(PARTNER_STATS + 16), struct.pack("<4h", hp, mp, hp, mp))
     if record["para"] is not None:
@@ -77,7 +91,7 @@ def values(read, record: dict) -> dict:
         hp, mp, current_hp, current_mp = struct.unpack_from("<4h", stats, 16)
         moves = stats[12:16]
     else:
-        hp, mp, offense, defense, speed, brains = EGGS[record["kind"]]
+        hp, mp, offense, defense, speed, brains = _new_stats(record)
         current_hp, current_mp, moves = hp, mp, bytes([0x2E, 255, 255, 255])
     if record["para"] is not None:
         para = bytes.fromhex(record["para"])
@@ -105,7 +119,7 @@ def pages(read, record: dict) -> list[list[tuple]]:
              ("stat", f"Speed {v['speed']}   Brains {v['brains']}", None),
              ("stat", f"Age {v['age']}d   Weight {v['weight']}g", None)]
     if record["stats"] is None:
-        first.append(("note", "Newly hatched from an egg.", None))
+        first.append(("note", "Newly hatched from an egg." if record["kind"] in EGGS else "A new partner.", None))
     second = [("header", "Care", None), ("stat", f"Discipline {v['discipline']}   Happiness {v['happiness']}", None),
               ("stat", f"Battles {v['battles']}   Mistakes {v['mistakes']}", None), ("header", "Equipped techniques", None)]
     second += [("skill", read_skill(read, move)["name"], move) for move in v["techniques"]] or [("note", "None", None)]

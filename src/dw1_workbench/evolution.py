@@ -24,6 +24,10 @@ CHAMPION_LEVEL = 21
 # Level needed to leave each stage (DigimonPara.level): Fresh, In-Training, Rookie (Champion 21 is a test value).
 STAGE_LEVELS = {1: 6, 2: 12, 3: CHAMPION_LEVEL}
 FRESH_TARGETS = {1: 2, 15: 16, 29: 30, 43: 44}  # hardcoded in native getFreshEvolutionTarget
+DIGIMON_SPECIAL, DIGIMON_MOVES = 30, 35  # DigimonPara: special[3], moves[16]
+LEARNED_MOVES = 88  # PartnerEntity.learnedMoves[2]; a bit per technique, kept across partners as in the original game
+LINKED_MOVES = {44: (44, 48), 48: (44, 48), 55: (55, 57), 57: (55, 57)}  # learnMove sets these pairs together
+SOUND_BANK_VOICE, SOUND_BANK_EFFECTS = 0x80127EFC, 0x80127F40  # DIGIMON_VLALL_SOUND_ID, DIGIMON_VBALL_SOUND_ID
 EVOLUTION_PATHS = 0x8012B66C  # 62 EvolutionPath {from[5], to[6]}
 EVOLUTION_TARGET = 0x80134E50
 TAMER_STATE, PARTNER_STATE = 0x80134C91, 0x80134C5B
@@ -102,8 +106,12 @@ class EvolutionHistory:
 
 
 class EvolutionController:
-    def __init__(self, core, progress, dex=None, map_names=None, history: EvolutionHistory | None = None):
+    def __init__(self, core, progress, dex=None, map_names=None, history: EvolutionHistory | None = None,
+                 forms: dict[int, dict] | None = None):
+        """`forms`: Digimon imported over a native one, offered by the bank's egg list: ID -> {"name", and optionally
+        "sounds_from" (a native ID), "special" (its three element types) and "moves" (its 16 technique IDs)}."""
         self.core, self.progress = core, progress
+        self.forms = forms or {}
         self.dex, self.map_names = dex, map_names or {}
         self.history = history  # None: the chart shows every linked form (no record available)
         self.installed = False
@@ -271,10 +279,37 @@ class EvolutionController:
         slot = next((i for i, record in enumerate(self.progress.bank) if record is None), None)
         if slot is None:
             raise ValueError("The Digi-Bank is full.")
-        self.progress.bank[slot] = bank.egg(kind)
+        self.progress.bank[slot] = bank.imported_form(kind) if kind in self.forms else bank.egg(kind)
         self.notices.append(f"Digi-Bank: {bank.species(self.read_ram, kind)[0]} hatched and waits in slot {slot + 1}")
         self.events.append("bank")
         return slot
+
+    def _ram_table(self, address, wanted):
+        if self.read(address, len(wanted)) != wanted:
+            self.core.write_memory(ram_offset(address), wanted)
+
+    def _apply_forms(self):
+        """The game reads names, skills and sound banks from these tables in RAM; a loaded state brings the originals
+        back, so they are kept every frame. While a form is the partner its techniques count as learned."""
+        partner = self.number(PARTNER_ENTITY, "<i")
+        for kind, form in self.forms.items():
+            record = DIGIMON_DATA + kind * DIGIMON_PARA_SIZE
+            self._ram_table(record, form["name"].encode("ascii")[:19].ljust(20, b"\0"))
+            if "special" in form:
+                self._ram_table(record + DIGIMON_SPECIAL, bytes(form["special"]))
+            if "moves" in form:
+                self._ram_table(record + DIGIMON_MOVES, bytes(form["moves"]))
+                if kind == partner:
+                    learned = int.from_bytes(self.read(PARTNER_ENTITY + LEARNED_MOVES, 8), "little")
+                    for move in form["moves"]:
+                        for bit_number in LINKED_MOVES.get(move, (move,)):
+                            if bit_number < 64:
+                                learned |= 1 << bit_number
+                    self._ram_table(PARTNER_ENTITY + LEARNED_MOVES, learned.to_bytes(8, "little"))
+            source = form.get("sounds_from")
+            if source is not None:
+                for table in (SOUND_BANK_VOICE, SOUND_BANK_EFFECTS):
+                    self._ram_table(table + kind, self.read(table + source, 1))
 
     def read_ram(self, offset, size):
         return self.core.read_memory(offset, size)
@@ -419,7 +454,7 @@ class EvolutionController:
             self._bank_view = "list"
             back = cross = step = 0
         if self._bank_view == "eggs":
-            eggs = list(bank.EGGS)
+            eggs = [*bank.EGGS, *self.forms]
             if back:
                 if self._bank_confirm:
                     self._bank_confirm = False
@@ -527,6 +562,7 @@ class EvolutionController:
         self.previous_buttons = buttons
         if not self.install():
             return buttons
+        self._apply_forms()
         if self._swap is not None:
             self._finish_swap()
         if not self.main_menu_open():

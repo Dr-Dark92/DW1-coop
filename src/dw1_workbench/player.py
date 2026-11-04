@@ -95,6 +95,7 @@ class PlayConfig:
     coop_level: int = 20  # player 2's starting level
     game_rules: bool = False  # P6 rules (progression.py): levels/EXP, no aging or death; needs live_ram
     options: dict[str, str] = field(default_factory=dict)
+    forms: dict[int, dict] = field(default_factory=dict)  # on the patched disc: imported Digimon, see EvolutionController
 
 
 def frame_image(frame: Frame) -> QImage:
@@ -288,7 +289,7 @@ class EmulatorWorker(QObject):
             if config.game_rules and config.live_ram:
                 self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path))
                 self.evolution = EvolutionController(core, self.rules.progress, self.dex, self.dex_map_names,
-                                                     self.history)
+                                                     self.history, forms=config.forms)
                 self.evolution.split_saves = lambda: choosable_saves(self.store.slots(), self.save_slot)
                 self.evolution.split_running = lambda: self.split_slot is not None
             try:

@@ -75,6 +75,10 @@ Quick saves and the memory card are stored per disc image (keyed by its SHA-256)
 
 The source is opened read-only. Exports run in a cancellable background worker, never overwrite existing files, and use a temporary file that is removed on cancellation or error. Failed and cancelled imports are recorded as distinct states. Closing the application requests cancellation and waits for active workers; it never forcibly terminates a thread.
 
+## WarGreymon (test)
+
+If WarGreymon is installed as an import (a converter run on your own Digimon World 3 disc; see `docs/HANDOVER.md`), keep **imported resources** on in the Play tab. In the game, open **Digi-Bank > Select new egg** and choose **WarGreymon**, then set it active in the bank. It starts at level 45. It replaces Andromon in that game, including any Andromon you meet, and uses Andromon's skeleton, with MetalGreymon's sounds and Fire and Battle techniques. Its idle and battle stance are its own from Digimon World 3; DW3 has no walk for it, so it walks with Andromon's. Remove the import in **Characters and Digimon** to get Andromon back. No DW3 data is in this repository.
+
 ## HD backgrounds (full-size zone pictures)
 
 In **Maps and Zones**, select a map and choose **Set HD picture…**, then pick your upscaled or repainted picture (the whole map, lined up with its background). Importing a zone package with an edited `background-palette0.png` also keeps that picture at full size. Play as usual: the game window's **HD backgrounds** box turns the layer on and off while playing, and maps without a picture look as they always did.
