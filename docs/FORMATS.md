@@ -301,6 +301,12 @@ Pictures live in `<project>/overrides/hd/NNN-MAPNAME.png`, stored by **Set HD pi
 
 Checked on the real game, `MAYO00` (640×768 native, picture 1145×1374), 2× internal resolution, Linux, 12 threads: coverage 94.1% standing, 92.7% walking over 259 camera positions, 93.8% in a real battle, 94% at night after the game's own day-to-night transition (a brief 60% during it), 94% after the win and map reload. File City `TWNA02` (picture 1374×1145) at 4×: 94.1% standing, 94.2% walking over 153 camera positions. About 57–60 frames per second in the play window at 1×, 2× and 4× with the layer on (no avatar rendering running); composing takes 8 / 11 / 14 ms on its own thread and preparation under 1 ms on the emulator thread (it was 46 and 10 ms at 4× before the per-block compare, about 23 frames per second). If composing fails, the player falls back to plain frames.
 
+### On-screen HUD (USA, in the player)
+
+`hud_view.py` draws over the finished frame, at the frame's own size, in 320 × 240 units. The game's status bars are at x = `STATUS_UI_OFFSET_X` (`0x80134C50`, i16) + 160, y = 205 and 217, 75 × 8, and that offset moves between 75 and 240 by 50 per frame with `IS_GAMETIME_RUNNING` (`renderStatusBars`, `renderGameClock`). The HP and MP bars are at y = 181 and 193 with the same x, and the map moves by the same amount, so they appear and hide with the native HUD. The bar frame is the game's own, decoded once from VRAM (4-bit page at x 320, u 0, v 236, CLUT at (96, 500)); a hand-drawn copy stands in if it is not resident. The fill follows the game's: 25 blocks of 2 × 2 from x + 18, y + 3. The heart, drop and digits are the workbench's own pixel art. The map is the live 100 × 100 tile grid cropped to the tiles in use; the Tamer and partner markers use their exact positions each frame, and NPCs update six times a second.
+
+Quick saves and inspections keep the plain frame. Checked in the real play window at 1×, 2× and 4×, with and without an HD picture: File City, Native Forest and Green Gym in the field; a real battle (nothing drawn, native HUD alone), the win (returns with live values, 484/802); regen visibly raising the numbers; the in-game menu (hidden, back on closing); about 56 frames per second at 4× with HD.
+
 ### Game rules (P6, USA)
 
 `progression.py` applies these rules to console RAM every frame while the player runs the game (Play tab: **Game rules (P6)**). Nothing on the disc or memory card changes.

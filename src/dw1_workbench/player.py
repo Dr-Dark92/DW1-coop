@@ -30,6 +30,7 @@ from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Fra
 from .live import LiveNpc, LiveState, grid_differences, read_live_state
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
 from .hd_background import BackgroundLayer, Compositor, HdPictures
+from .hud_view import HudPainter, HudState, read_hud
 from .progression import BattleResult, GameRules, Progress
 from .avatars import load_avatars
 from .evolution import EvolutionController, EvolutionHistory
@@ -133,6 +134,9 @@ class EmulatorWorker(QObject):
         self.config = config
         self.store = QuickSaveStore(config.store_dir)
         self.hd_enabled = True
+        self.hud_enabled = True
+        self._hud: HudState | None = None
+        self._hud_painter: HudPainter | None = None
         self.hd_layer: BackgroundLayer | None = None
         self._compositor: Compositor | None = None
         self.buttons = 0
@@ -303,6 +307,7 @@ class EmulatorWorker(QObject):
                     self._portraits = native_portraits(core)
                     self._portraits_attempted = True
                 image = evolution_menu_image(image, menu, self._menu_icons, self._portraits, self.avatars)
+                self._read_hud(core, menu)
                 if not self._submit_hd(image):
                     self._publish(image)
                 self._last_image = image
@@ -392,7 +397,28 @@ class EmulatorWorker(QObject):
         if self.hd_layer is not None:
             self.hd_layer.reset()
 
+    def _read_hud(self, core: LibretroCore, menu):
+        """What the on-screen map and bars show for this frame; nothing over the workbench's own game menus."""
+        self._hud = None
+        if not self.hud_enabled or not self.config.live_ram or menu is not None:
+            return
+        try:
+            self._hud = read_hud(core.read_memory, self.live)
+            if self._hud is not None:
+                if self._hud_painter is None:
+                    self._hud_painter = HudPainter(core.serialize)
+                self._hud_painter.prepare()
+        except LibretroError as exc:
+            self.message.emit(f"On-screen map and bars turned off: {exc}")
+            self.hud_enabled = False
+
     def _publish(self, image: QImage):
+        hud = self._hud
+        if hud is not None and self._hud_painter is not None:
+            # Quick saves and inspections keep the plain frame: draw on a copy unless this is a composed picture.
+            if not hasattr(image, "pixels"):
+                image = image.convertToFormat(QImage.Format.Format_RGB32).copy()
+            self._hud_painter.draw(image, hud)
         with self._image_lock:
             self._image, notify = image, not self._image_pending
             self._image_pending = True
@@ -827,12 +853,13 @@ class PlayWindow(QMainWindow):
         self.live_dock = QDockWidget("Live map", self); self.live_dock.setWidget(live_panel)
         self.live_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.live_dock)
-        self.live_dock.setVisible(config.live_ram)
+        self.live_dock.setVisible(False)  # the map is part of the game screen; F10 still opens this detailed one
         self._live: LiveState | None = None
         self.thread = QThread(self)
         self._dex_snapshot = {"entries": {}, "catalog": []}
         self.worker = EmulatorWorker(config)
         self.worker.hd_enabled = self.hd_check.isChecked()
+        self.worker.hud_enabled = self.hud_check.isChecked()
         self.worker.dex_map_names = dict(self.map_names)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -910,6 +937,11 @@ class PlayWindow(QMainWindow):
         hd.setEnabled(self.config.live_ram and self.config.hd_pictures is not None)
         hd.toggled.connect(self._set_hd); bar.addWidget(hd)
         hd.setChecked(hd.isEnabled() and settings.value("play/hd_backgrounds", True, type=bool))
+        self.hud_check = hud = QCheckBox("Map and HP/MP"); hud.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        hud.setToolTip("Show the map and your partner's HP and MP on the game screen, with the game's own status bars")
+        hud.setEnabled(self.config.live_ram)
+        hud.toggled.connect(self._set_hud); bar.addWidget(hud)
+        hud.setChecked(hud.isEnabled() and settings.value("play/hud", True, type=bool))
         screen = QComboBox(); screen.addItems(SCREENS); screen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         screen.setToolTip("4:3: the original shape. 16:9 fill: the original shape in a 16:9 screen, with a blurred copy "
                           "of the picture at the sides. 16:9 stretch: the picture stretched to 16:9 (wider characters).")
@@ -1113,6 +1145,12 @@ class PlayWindow(QMainWindow):
     def _set_smooth(self, smooth: bool):
         QSettings("DW1-coop", "workbench").setValue("play/smooth", smooth)
         self.view.smooth = smooth; self.view.update(); self.view.setFocus()
+
+    def _set_hud(self, enabled: bool):
+        QSettings("DW1-coop", "workbench").setValue("play/hud", enabled)
+        if getattr(self, "worker", None) is not None:
+            self.worker.hud_enabled = enabled
+        self.view.setFocus()
 
     def _set_hd(self, enabled: bool):
         QSettings("DW1-coop", "workbench").setValue("play/hd_backgrounds", enabled)

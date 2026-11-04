@@ -1,5 +1,9 @@
 # Handover
 
+## On-screen map and HP/MP (2026-11-04, Claude, Linux, branch `python-player`)
+
+User (AFK): map at the top right as part of the game screen, not the sidebar; HP and MP above the happiness and discipline bars; match the theme. `hud_view.py`, `EmulatorWorker._read_hud` and `_publish`, toolbar **Map and HP/MP**, `play/hud`. Scripts outside Git: `DW1-coop-data/dev-tools/hud_check.py`, `hud_check2.py`, `hud_menu.py`. The map can cover something at the top right (Koromon in Green Gym).
+
 ## HD backgrounds (2026-11-04, Claude, Linux, branch `python-player`)
 
 User asked to force 16-bit backgrounds; after the numbers (FORMATS.md) and a before/after they said the target is PC only with plenty of resources, so the full-size layer was built instead. `hd_background.py` (MapBackground, compose, BackgroundLayer, Compositor, HdPictures); `PlayConfig.hd_pictures`; toolbar **HD backgrounds**; Maps and Zones **Set HD picture…** / **Remove HD picture**; zone import keeps an edited picture in `overrides/hd/`. New dependency: numpy. Scripts outside Git in `DW1-coop-data/dev-tools/hd_*.py`; `hd_gate.py`, `hd_e2e.py`, `hd_pace.py` are the useful ones. dw_decomp is now at `DW1-coop-data/references/dw_decomp` (aaf69a4).

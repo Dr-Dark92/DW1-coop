@@ -79,6 +79,10 @@ In **Maps and Zones**, select a map and choose **Set HD picture…**, then pick 
 
 The player compares every finished frame with the game's own background and replaces only the pixels that are background, so characters, the HUD and menus stay the game's, while shadows, fades and the time of day carry over to your picture. The picture isn't converted to 8-bit, shrunk or written to the disc, and it applies only in this player. Animated foreground pieces, effects, art that isn't part of the background, and semi-transparent menu boxes stay at the game's resolution. See `docs/FORMATS.md` for details and measurements.
 
+## Map and HP/MP on the game screen
+
+While you play, the top right of the game screen shows the map: the walkable floor, exits in gold, you in white, your partner in cyan, and other Digimon in red (they chase you), yellow (they watch you) or orange (they ignore you). Your partner's HP and MP sit directly above the game's happiness and discipline bars, in the same bar style with current/maximum values. They slide in and out with the game's own status bars, so they hide in battles, menus and text scenes. The **Map and HP/MP** box in the game window turns them off. F10 still opens the larger Live map panel beside the game for inspection work; it now starts closed.
+
 ## Game rules (levels, EXP, no aging or death)
 
 In the Play tab, tick **Game rules (P6)** (USA release only) before **Play**. Your partner then:
