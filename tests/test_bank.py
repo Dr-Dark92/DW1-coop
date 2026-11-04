@@ -233,3 +233,44 @@ def test_form_tables_and_learned_techniques(banked):
     assert learned & (1 << 12)
     assert all(learned >> move & 1 for move in WARGREYMON["moves"] if move < 64)
     assert not learned >> 42 & 1  # War Cry isn't on its list
+
+
+def test_form_finisher_applies_only_while_it_is_the_partner(banked):
+    core = banked.core
+    core.put(E.MOVE_NAMES + 63 * 4, "<I", 0x80100000); core.put(E.MOVE_NAMES + E.SPARE_NAME_MOVE * 4, "<I", 0x80100100)
+    core.write(ram_offset(0x80100000), b"Mega Flame\0"); core.write(ram_offset(0x80100100), b"Glacial Blast\0")
+    core.put(E.MOVE_DATA + 63 * 16 + 4, "<h", 196)
+    core.put(E.SKELETON_POINTERS + 40 * 4, "<I", 0x80100200)
+    core.write(ram_offset(0x80100200), bytes([255, 255] * 21))
+    banked.forms = {40: {"name": "WarGreymon", "skeleton_objects": {"4": 15}, "finisher": {"move": 63, "name": "Terra Force", "power": 500}}}
+    banked.before_frame(0)
+    assert core.get(E.MOVE_NAMES + 63 * 4, "<I") == 0x80100000 and core.get(E.MOVE_DATA + 63 * 16 + 4, "<h") == 196
+    assert banked.read(0x80100200 + 8, 1) == bytes([15])
+    core.put(P.PARTNER_ENTITY, "<i", 40)
+    banked.before_frame(0)
+    assert core.get(E.MOVE_NAMES + 63 * 4, "<I") == 0x80100100 and core.get(E.MOVE_DATA + 63 * 16 + 4, "<h") == 500
+    assert banked.read(0x80100100, 12) == b"Terra Force\0"
+    core.put(P.PARTNER_ENTITY, "<i", 3)
+    banked.before_frame(0)
+    assert core.get(E.MOVE_NAMES + 63 * 4, "<I") == 0x80100000 and core.get(E.MOVE_DATA + 63 * 16 + 4, "<h") == 196
+
+
+def test_form_borrows_the_species_a_technique_allows(banked):
+    core = banked.core
+    moves = [46, 1] + [255] * 14
+    banked.forms = {40: {"name": "WarGreymon", "moves": moves, "effect_species": {"default": 5, "46": 12}}}
+    core.put(E.ORIGINAL_TYPES + 40 * 2, "<h", -1)
+    core.put(P.PARTNER_ENTITY, "<i", 40)
+    core.put(P.GAME_STATE, "<h", 2)
+    core.put(P.COMBAT_DATA_PTR, "<I", 0x80100000)
+    banked.before_frame(0)  # nothing queued: ready for a technique that starts within the frame
+    assert core.get(E.ORIGINAL_TYPES + 40 * 2, "<h") == 5
+    core.put(0x80100000 + E.FIGHTER_QUEUED_ANIM, "<B", 0x2E)
+    banked.before_frame(0)
+    assert core.get(E.ORIGINAL_TYPES + 40 * 2, "<h") == 12
+    core.put(0x80100000 + E.FIGHTER_QUEUED_ANIM, "<B", 0x2E + 1)
+    banked.before_frame(0)
+    assert core.get(E.ORIGINAL_TYPES + 40 * 2, "<h") == 5
+    core.put(P.GAME_STATE, "<h", 0)  # outside battle the table is as the game has it
+    banked.before_frame(0)
+    assert core.get(E.ORIGINAL_TYPES + 40 * 2, "<h") == -1

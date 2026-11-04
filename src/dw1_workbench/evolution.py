@@ -16,7 +16,7 @@ from .camera import sync_instruction_cache
 from .libretro import BUTTON
 from .digidex import entry_rows
 from .live import ram_offset
-from .progression import (BANK_SLOTS, Progress, DIGIMON_DATA, DIGIMON_LEVEL, DIGIMON_PARA_SIZE, GAME_STATE, PARTNER_ENTITY,
+from .progression import (BANK_SLOTS, COMBAT_DATA_PTR, Progress, DIGIMON_DATA, DIGIMON_LEVEL, DIGIMON_PARA_SIZE, GAME_STATE, PARTNER_ENTITY,
                           PARTNER_STATS, UI_BOX_DATA)
 from .quicksave import _atomic_write
 
@@ -27,6 +27,11 @@ FRESH_TARGETS = {1: 2, 15: 16, 29: 30, 43: 44}  # hardcoded in native getFreshEv
 DIGIMON_SPECIAL, DIGIMON_MOVES = 30, 35  # DigimonPara: special[3], moves[16]
 LEARNED_MOVES = 88  # PartnerEntity.learnedMoves[2]; a bit per technique, kept across partners as in the original game
 LINKED_MOVES = {44: (44, 48), 48: (44, 48), 55: (55, 57), 57: (55, 57)}  # learnMove sets these pairs together
+ORIGINAL_TYPES = 0x8012A84C  # ORIGINAL_DIGIMON_TYPES: int16 per Digimon, -1 for itself
+FIGHTER_QUEUED_ANIM = 56  # FighterData.queuedAnim; the partner is the first fighter
+SKELETON_POINTERS = 0x8011CE60  # per Digimon: its nodes, {object, parent} bytes
+MOVE_NAMES, MOVE_DATA = 0x80126054, 0x8012623C
+SPARE_NAME_MOVE = 110  # "Glacial Blast", 13 letters, on nobody's technique list: its text can hold a form's finisher
 SOUND_BANK_VOICE, SOUND_BANK_EFFECTS = 0x80127EFC, 0x80127F40  # DIGIMON_VLALL_SOUND_ID, DIGIMON_VBALL_SOUND_ID
 EVOLUTION_PATHS = 0x8012B66C  # 62 EvolutionPath {from[5], to[6]}
 EVOLUTION_TARGET = 0x80134E50
@@ -109,9 +114,12 @@ class EvolutionController:
     def __init__(self, core, progress, dex=None, map_names=None, history: EvolutionHistory | None = None,
                  forms: dict[int, dict] | None = None):
         """`forms`: Digimon imported over a native one, offered by the bank's egg list: ID -> {"name", and optionally
-        "sounds_from" (a native ID), "special" (its three element types) and "moves" (its 16 technique IDs)}."""
+        "sounds_from" (a native ID), "special" (its three element types), "moves" (its 16 technique IDs),
+        "skeleton_objects" (node -> extra model object), "finisher" ({"move", "name", "power"}, shown and used
+        while it is the partner) and "effect_species" (technique -> a species its effect file allows, and "default")}."""
         self.core, self.progress = core, progress
         self.forms = forms or {}
+        self._native_moves = {}  # move -> its (name pointer, power) from the running game
         self.dex, self.map_names = dex, map_names or {}
         self.history = history  # None: the chart shows every linked form (no record available)
         self.installed = False
@@ -306,10 +314,44 @@ class EvolutionController:
                             if bit_number < 64:
                                 learned |= 1 << bit_number
                     self._ram_table(PARTNER_ENTITY + LEARNED_MOVES, learned.to_bytes(8, "little"))
+            skeleton = self.number(SKELETON_POINTERS + kind * 4, "<I")
+            for node, obj in form.get("skeleton_objects", {}).items():
+                self._ram_table(skeleton + int(node) * 2, bytes([obj]))
+            if "finisher" in form:
+                self._apply_finisher(form["finisher"], kind == partner)
+            if "effect_species" in form:
+                self._apply_effect_species(kind, form)
             source = form.get("sounds_from")
             if source is not None:
                 for table in (SOUND_BANK_VOICE, SOUND_BANK_EFFECTS):
                     self._ram_table(table + kind, self.read(table + source, 1))
+
+    def _apply_effect_species(self, kind, form):
+        """A technique's effect file lists the species allowed to use it, and stops for any other (no effect or damage):
+        BTL_checkTechCompatibility asks getOriginalType, which reads this table. A ranged technique can queue and start
+        within one frame, so "default" must be allowed for those; others are followed through the queue while it is seen."""
+        species = -1
+        combat = self.number(COMBAT_DATA_PTR, "<I")
+        if self.number(GAME_STATE) != 0 and 0x80000000 <= combat < 0x80200000 and self.number(PARTNER_ENTITY, "<i") == kind:
+            queued = self.read(combat + FIGHTER_QUEUED_ANIM, 1)[0]
+            tech = form["moves"][queued - 0x2E] if 0x2E <= queued < 0x3E and "moves" in form else None
+            species = form["effect_species"].get(str(tech), form["effect_species"].get("default", -1))
+        self._ram_table(ORIGINAL_TYPES + kind * 2, struct.pack("<h", species))
+
+    def _apply_finisher(self, finisher, active):
+        move = finisher["move"]
+        names, power = MOVE_NAMES + move * 4, MOVE_DATA + move * 16 + 4
+        pointer, value = self.read(names, 4), self.read(power, 2)
+        spare = struct.pack("<I", self.number(MOVE_NAMES + SPARE_NAME_MOVE * 4, "<I"))
+        if move not in self._native_moves and pointer != spare:
+            self._native_moves[move] = (pointer, value)
+        native = self._native_moves.get(move)
+        if native is None:
+            return
+        if active:
+            self._ram_table(int.from_bytes(spare, "little"), finisher["name"].encode("ascii")[:12] + b"\0")
+        self._ram_table(names, spare if active else native[0])
+        self._ram_table(power, struct.pack("<h", finisher["power"]) if active else native[1])
 
     def read_ram(self, offset, size):
         return self.core.read_memory(offset, size)

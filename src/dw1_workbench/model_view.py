@@ -80,7 +80,9 @@ class StaticModelView(QWidget):
                 object_world[node.object_index] = world[index]
         triangles, points = [], []
         for object_index, obj in enumerate(model.objects):
-            matrix = object_world.get(object_index, QMatrix4x4())
+            if object_index not in object_world:
+                continue  # an imported form's extra object, on a node only the running game's table names
+            matrix = object_world[object_index]
             # PS1 model space has screen-down Y. Flip only in the renderer so decoded
             # coordinates and exported provenance remain untouched.
             mapped = [matrix.map(QVector3D(vertex.x, vertex.y, vertex.z)) for vertex in obj.vertices]

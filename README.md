@@ -77,7 +77,7 @@ The source is opened read-only. Exports run in a cancellable background worker, 
 
 ## WarGreymon (test)
 
-If WarGreymon is installed as an import (a converter run on your own Digimon World 3 disc; see `docs/HANDOVER.md`), keep **imported resources** on in the Play tab. In the game, open **Digi-Bank > Select new egg** and choose **WarGreymon**, then set it active in the bank. It starts at level 45. It replaces Andromon in that game, including any Andromon you meet, and uses Andromon's skeleton, with MetalGreymon's sounds and Fire and Battle techniques. Its idle and battle stance are its own from Digimon World 3; DW3 has no walk for it, so it walks with Andromon's. Remove the import in **Characters and Digimon** to get Andromon back. No DW3 data is in this repository.
+If WarGreymon is installed as an import (a converter run on your own Digimon World 3 disc; see `docs/HANDOVER.md`), keep **imported resources** on in the Play tab. In the game, open **Digi-Bank > Select new egg** and choose **WarGreymon**, then set it active in the bank. It starts at level 45. It replaces Andromon in that game, including any Andromon you meet, and uses Andromon's skeleton, with MetalGreymon's sounds and Fire and Battle techniques, and Terra Force as its finisher: its energy ball and throw from Digimon World 3, with Digimon World's own fire effect, since DW3's particles can't run here. Its idle and battle stance are its own from Digimon World 3; DW3 has no walk for it, so it walks with Andromon's. Remove the import in **Characters and Digimon** to get Andromon back. No DW3 data is in this repository.
 
 ## HD backgrounds (full-size zone pictures)
 
