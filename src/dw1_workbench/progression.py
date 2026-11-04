@@ -178,6 +178,8 @@ class BattleResult:
 
 
 class GameRules:
+    excluded_slot = None  # an entity slot in the battle that is not an enemy (coop.py)
+
     """Applied once per frame by the emulator worker. `read(offset, size)` / `write(offset, data)` use main RAM."""
 
     def __init__(self, read, write, progress: Progress | None = None):
@@ -303,6 +305,8 @@ class GameRules:
         ids = self.read(ram_offset(combat + COMBAT_ENTITY_IDS), 4)
         levels = []
         for entity_id in ids[1:1 + count]:
+            if entity_id == self.excluded_slot:  # player 2's Digimon is not an enemy
+                continue
             if not 2 <= entity_id < 10:
                 return []
             entity = self._u32(ENTITY_TABLE + entity_id * 4)

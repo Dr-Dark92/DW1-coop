@@ -307,6 +307,26 @@ Checked on the real game, `MAYO00` (640×768 native, picture 1145×1374), 2× in
 
 Quick saves and inspections keep the plain frame. Checked in the real play window at 1×, 2× and 4×, with and without an HD picture: File City, Native Forest and Green Gym in the field; a real battle (nothing drawn, native HUD alone), the win (returns with live values, 484/802); regen visibly raising the numbers; the in-game menu (hidden, back on closing); about 56 frames per second at 4× with HD.
 
+### Co-op battle prototype (USA, in the player)
+
+`coop.py`, run between frames by the emulator worker. No existing game code changes. A one-shot `WORLD_OBJECTS` entry (`0x80137418`, 12 bytes each) runs a routine in unused RAM (`0x801C0000`, written once, arguments at `0x801C0200`), which calls a game function on the game's own thread and removes itself.
+
+When a battle-on-contact script starts (`IS_SCRIPT_PAUSED` `0x80134FF4` is 0, `TALKED_TO_ENTITY` `0x80134C9C` set, that NPC's autotalk 1), it calls `loadNPCModel` (`0x800B6110`, about 70 frames of CD reading) and then `scriptSetDigimon` (`0x800B6118`), which needs a `MAP_DIGIMON_TABLE` entry for the species in a slot whose type is -1, so no map script needs that slot. The highest such slot is used, so `handleBattleStart` appends the ally last. The entry's `padding0` is marked `0x7A7A` so a loaded state finds it again. The ally is off the map (`isOnMap` 0) except during such a script and the fight, and `FLEE_CHANCES` (`0x8012BB14`) is set to 100 until the battle starts; two other on-screen enemies can still take the room, in which case it sits that fight out.
+
+In battle: `FIGHTER_FLAG_10` keeps a written `targetId`; enemies aim at the nearer of the partner and ally, re-chosen every 300 frames; the partner is turned away from the ally; `movesPrio` (+64) selects its technique; charge mode 2 (+86) with `FIGHTER_FLAG_ON_CHARGEUP` and cooldown 0x50 holds it back. Stats are the level's values (`stats_for`), and techniques the species' first four (`DigimonPara.moves[i]` plays animation `0x2E + i`). When all enemies are down, the partner falls or it flees, `ENEMY_COUNT` drops by one, so the game ends the battle for the real enemies alone: no defeat sequence for the ally, and stat rewards, drops and Bits count the real enemies. `GameRules` and `DigiDex` skip its slot (`excluded_slot`). Player 2 then receives the same EXP and the change in `MONEY` (`0x80134EB8`).
+
+Checked in the real play window from a copy of slot 2 (Native Forest, Greymon level 20, 2x), with player 2's keys through the window's key handler and only the battle trigger scripted: a fight won with both players at +10 EXP and +100 Bits; "Victory over 1 (Rookie)"; Digi-Dex unlocking ModokiBetamon only; keys 2, 6 and 0 applied, no MP spent while holding; quick save and load mid-battle; a second fight without a second model load; a loss ending normally with the ally gone; the Tamer walking afterwards.
+
+### Split screen (in the player)
+
+`split_screen.py`. The core allows one copy per process, so player 2's game is a second process (`python -m dw1_workbench.split_screen`) running the same `EmulatorWorker` with Qt's offscreen platform. `multiprocessing.shared_memory` carries one block: a header `<IIIII` (frame sequence, width, height, buttons, quit) and one RGB32 frame up to 1280x960. The sequence is odd while a frame is being written. The child opens the block untracked, because Python's resource tracker would otherwise delete it when the child exits. The child also quits if its parent changes.
+
+The chosen save is copied to `<store>/player2` (state, info, picture, progress and, once, the memory card); the originals are never written. Player 1 can't choose or load player 2's slot, and player 2 can't choose player 1's. The child doesn't render Digi-Dex avatars: with a new store this held the interpreter for a minute and cut its game to 22 fps; without it both games measured 60.5 fps.
+
+Checked in the real window, offscreen (slot 3 and a copy as slot 4): chooser and refusal, independent input, player 1's load of player 2's save refused, stop from the menu, close, child exit, no shared-memory block left behind, and slot files byte-identical afterward. Not synchronised: time, progress and battles are separate.
+
+The battle cursor's CLUT is requested as (282,497), but the GPU keeps x in multiples of 16, so the colours come from (272,497).
+
 ### Game rules (P6, USA)
 
 `progression.py` applies these rules to console RAM every frame while the player runs the game (Play tab: **Game rules (P6)**). Nothing on the disc or memory card changes.

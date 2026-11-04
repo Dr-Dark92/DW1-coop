@@ -9,12 +9,13 @@ import hashlib
 import queue
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import (QBuffer, QCoreApplication, QPointF, QByteArray, QIODevice, QObject, QRectF, QSettings, Qt,
+from PySide6.QtCore import (QTimer, QBuffer, QCoreApplication, QPointF, QByteArray, QIODevice, QObject, QRectF, QSettings, Qt,
                             QThread, Signal, Slot)
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
@@ -29,8 +30,10 @@ from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Fra
                        LibretroError)
 from .live import LiveNpc, LiveState, grid_differences, read_live_state
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
+from .coop import CONFIRM, LEFT, RIGHT, SQUARE, CoopBattle, PlayerTwo
 from .hd_background import BackgroundLayer, Compositor, HdPictures
-from .hud_view import HudPainter, HudState, read_hud
+from .split_screen import SplitGame, choosable_saves, copy_save
+from .hud_view import HudPainter, HudState, command_icons, draw_ally_panel, read_hud
 from .progression import BattleResult, GameRules, Progress
 from .avatars import load_avatars
 from .evolution import EvolutionController, EvolutionHistory
@@ -57,9 +60,17 @@ DEFAULT_KEYS = {
     Qt.Key.Key_Q: "L", Qt.Key.Key_W: "R", Qt.Key.Key_E: "L2", Qt.Key.Key_R: "R2",
     Qt.Key.Key_Return: "Start", Qt.Key.Key_Enter: "Start", Qt.Key.Key_Backspace: "Select",
 }
+# Player 2's battle controls in the co-op test, the same as player 1's: Left, Right, confirm and finisher.
+COOP_KEYS = {Qt.Key.Key_J: LEFT, Qt.Key.Key_L: RIGHT, Qt.Key.Key_K: CONFIRM, Qt.Key.Key_U: SQUARE}
+
+
+# Player 2's whole controller while split screen is on.
+SPLIT_KEYS = {Qt.Key.Key_I: "Up", Qt.Key.Key_K: "Down", Qt.Key.Key_J: "Left", Qt.Key.Key_L: "Right", Qt.Key.Key_U: "B",
+              Qt.Key.Key_O: "A", Qt.Key.Key_Y: "Y", Qt.Key.Key_H: "X", Qt.Key.Key_N: "Start", Qt.Key.Key_M: "Select",
+              Qt.Key.Key_7: "L", Qt.Key.Key_8: "R"}
 KEY_HELP = ("Arrows: D-pad  •  Z Cross  X Circle  A Square  S Triangle  •  Q/W L1/R1  E/R L2/R2  •  "
             "Enter Start  Backspace Select  •  F4 Digi-Dex  •  F5 quick save  F8 quick load  F6/F7 slot  •  "
-            "F9 inspect here  F10 live map  •  hold Tab fast-forward  •  P pause  •  F11 full screen")
+            "Co-op player 2: J/L command, K confirm, U finisher  •  Split screen player 2: I/J/K/L D-pad, U Cross, O Circle, Y Square, H Triangle, N Start  •  F9 inspect here  F10 live map  •  hold Tab fast-forward  •  P pause  •  F11 full screen")
 
 
 @dataclass(frozen=True)
@@ -73,6 +84,8 @@ class PlayConfig:
     resume_on_close: bool = True
     live_ram: bool = False  # read map/position/grid from RAM; the addresses are only valid for USA SLUS_010.32
     hd_pictures: Path | None = None  # folder of full-size backgrounds (hd_background.py); needs live_ram
+    coop_species: int | None = None  # player 2's Digimon for the co-op battle prototype (coop.py); needs live_ram
+    coop_level: int = 20  # player 2's starting level
     game_rules: bool = False  # P6 rules (progression.py): levels/EXP, no aging or death; needs live_ram
     options: dict[str, str] = field(default_factory=dict)
 
@@ -127,6 +140,7 @@ class EmulatorWorker(QObject):
     camera_zoom_changed = Signal(int, int)  # requested/effective fixed-point scale
     dex_changed = Signal(object)  # immutable snapshot from the core thread
     progress_changed = Signal(str)  # level/EXP summary while the game rules are on
+    split_requested = Signal(object)  # a save slot for player 2, or "stop"
     finished = Signal()
 
     def __init__(self, config: PlayConfig):
@@ -137,6 +151,12 @@ class EmulatorWorker(QObject):
         self.hud_enabled = True
         self._hud: HudState | None = None
         self._hud_painter: HudPainter | None = None
+        self.save_slot: int | None = config.launch_slot  # the save player 1 is playing, which player 2 may not take
+        self.split_slot: int | None = None  # the save player 2 started from
+        self.coop: CoopBattle | None = None
+        self._coop_icons = None
+        self._coop_icon_tries = 0
+        self._coop_frames = 0
         self.hd_layer: BackgroundLayer | None = None
         self._compositor: Compositor | None = None
         self.buttons = 0
@@ -242,10 +262,17 @@ class EmulatorWorker(QObject):
                 self.hd_layer = BackgroundLayer(core.read_memory, core.serialize, HdPictures(config.hd_pictures).path,
                                                 on_error=self.message.emit)
                 self._compositor = Compositor(self.hd_layer, self._publish_composed, self._hd_failed)
+            if config.coop_species is not None and config.live_ram:
+                path = config.store_dir / "coop_player2.json"
+                self.coop = CoopBattle(core.read_memory, core.write_memory,
+                                       PlayerTwo.load(path, config.coop_species, config.coop_level), path)
+                self.message.emit(f"Co-op test: player 2 starts at {self.coop.player.summary()}")
             if config.game_rules and config.live_ram:
                 self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path))
                 self.evolution = EvolutionController(core, self.rules.progress, self.dex, self.dex_map_names,
                                                      self.history)
+                self.evolution.split_saves = lambda: choosable_saves(self.store.slots(), self.save_slot)
+                self.evolution.split_running = lambda: self.split_slot is not None
             try:
                 if config.launch_slot is not None:
                     self._load(config.launch_slot)
@@ -287,6 +314,8 @@ class EmulatorWorker(QObject):
             frame, audio = core.run_frame()
             self._has_run_frame = True
             audio = self._menu_audio.mix(audio)
+            if self.coop is not None:
+                self._apply_coop()
             if self.rules is not None:
                 self._apply_rules()
             self._ensure_camera()
@@ -328,6 +357,34 @@ class EmulatorWorker(QObject):
             elif delay < -0.25:  # far behind (a slow frame or a breakpoint): do not try to catch up
                 deadline = time.perf_counter()
 
+    def _apply_coop(self):
+        try:
+            for text in self.coop.tick():
+                self.message.emit(text)
+        except Exception as exc:  # whatever went wrong in this prototype, the game must keep running
+            traceback.print_exc()
+            self.message.emit(f"Co-op test turned off: {exc}")
+            self.coop = None
+            if self.rules is not None:
+                self.rules.excluded_slot = None
+            if self.dex is not None:
+                self.dex.excluded_slot = None
+            return
+        for event in self.coop.sound_events:
+            self._menu_audio.trigger(event)
+        self.coop.sound_events = []
+        if self.coop.panel is not None:
+            if self._coop_icons is None and self._coop_icon_tries < 3:
+                self._coop_icon_tries += 1
+                self._coop_icons = command_icons(self.core.serialize())
+            if self._hud_painter is None:
+                self._hud_painter = HudPainter(self.core.serialize)
+            self._hud_painter.prepare()
+        if self.rules is not None:
+            self.rules.excluded_slot = self.coop.excluded_slot
+        if self.dex is not None:
+            self.dex.excluded_slot = self.coop.excluded_slot
+
     def _apply_rules(self):
         before = self.rules.progress.exp
         try:
@@ -341,6 +398,11 @@ class EmulatorWorker(QObject):
             return
         for text in messages:
             self.message.emit(text)
+        if self.rules.progress.exp != before and self.coop is not None:
+            gained = self.rules.progress.exp - before
+            if gained > 0:
+                for text in self.coop.gain_exp(gained):
+                    self.message.emit(text)
         if self.rules.progress.exp != before:
             self._write_progress()
             self.progress_changed.emit(self.rules.progress.summary())
@@ -351,6 +413,9 @@ class EmulatorWorker(QObject):
         for text in self.evolution.notices:
             self.message.emit(text)
         self.evolution.notices.clear()
+        if self.evolution.split_request is not None:
+            self.split_requested.emit(self.evolution.split_request)
+            self.evolution.split_request = None
         if self.evolution.events:
             self.evolution.events.clear()
             self.rules.reset()
@@ -396,6 +461,8 @@ class EmulatorWorker(QObject):
     def _forget_hd_ram(self):
         if self.hd_layer is not None:
             self.hd_layer.reset()
+        if self.coop is not None:
+            self.coop.reset()
 
     def _read_hud(self, core: LibretroCore, menu):
         """What the on-screen map and bars show for this frame; nothing over the workbench's own game menus."""
@@ -419,6 +486,12 @@ class EmulatorWorker(QObject):
             if not hasattr(image, "pixels"):
                 image = image.convertToFormat(QImage.Format.Format_RGB32).copy()
             self._hud_painter.draw(image, hud)
+        panel = self.coop.panel if self.coop is not None else None
+        if panel is not None:
+            if not hasattr(image, "pixels") and hud is None:
+                image = image.convertToFormat(QImage.Format.Format_RGB32).copy()
+            self._coop_frames += 1
+            draw_ally_panel(image, panel, self._coop_icons, self._hud_painter, self._coop_frames % 16 < 8)
         with self._image_lock:
             self._image, notify = image, not self._image_pending
             self._image_pending = True
@@ -471,6 +544,8 @@ class EmulatorWorker(QObject):
         return self.core.serialize()
 
     def _save(self, slot: int, note: str = ""):
+        if slot != RESUME_SLOT:
+            self.save_slot = slot
         core = self.core
         self._restore_camera()  # Save native game RAM; reapply the selected zoom on the next frame.
         info = self.store.save(slot, self._serialize_native(), png_bytes(self._last_image), core.info.name,
@@ -480,6 +555,9 @@ class EmulatorWorker(QObject):
         return info
 
     def _load(self, slot: int):
+        if slot == self.split_slot:
+            raise QuickSaveError("Player 2 is playing from that save; choose another one.")
+        self.save_slot = slot
         core = self.core
         info = self.store.info(slot)
         core.unserialize(self.store.load(slot, core=core.info.name))
@@ -661,6 +739,7 @@ class FrameView(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(320, 240)
         self.image: QImage | None = None
+        self.second: QImage | None = None  # player 2's game, in split screen
         self.aspect = 4 / 3
         self.smooth = False
         self.screen = SCREENS[0]
@@ -673,7 +752,14 @@ class FrameView(QWidget):
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("black"))
-        if self.image is not None:
+        if self.second is not None and self.image is not None:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.smooth)
+            half = self.width() / 2
+            for left, picture in ((0, self.image), (half, self.second)):
+                x, y, w, h = screen_rects(half - 1, self.height(), self.aspect, SCREENS[0])[1]
+                painter.drawImage(QRectF(left + x, y, w, h), picture)
+            painter.fillRect(QRectF(half - 1, 0, 2, self.height()), QColor("#3080c0"))
+        elif self.image is not None:
             area, game = (QRectF(*rect) for rect in screen_rects(self.width(), self.height(), self.aspect, self.screen))
             if area != game:  # 16:9 fill: a blurred, darkened copy of the picture behind it, so the sides match
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -833,9 +919,9 @@ class PlayWindow(QMainWindow):
         self.inspections = InspectionStore(config.store_dir / "inspections")
         self.live_label = QLabel("Live map: off (USA release only)" if not config.live_ram else "Live map: waiting")
         self.statusBar().addPermanentWidget(self.live_label)
-        for label in (self.status, self.live_label):  # long map names/messages clip instead of widening the window
-            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.live_label.setMinimumWidth(220)
+        # Long map names and messages clip instead of widening the window. A fixed width keeps the map text off its neighbours.
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.live_label.setFixedWidth(320)
         self.level_label = QLabel()
         self.level_label.setVisible(config.game_rules and config.live_ram)
         self.level_label.setToolTip("P6 game rules: level and EXP of your partner. Aging and death are off.")
@@ -876,6 +962,11 @@ class PlayWindow(QMainWindow):
         self.worker.camera_zoom_changed.connect(self._camera_zoom_changed)
         self.worker.dex_changed.connect(self._dex_changed)
         self.worker.progress_changed.connect(self._progress_changed)
+        self.worker.split_requested.connect(self._split_requested)
+        self._split: SplitGame | None = None
+        self._split_held = 0
+        self._split_timer = QTimer(self)
+        self._split_timer.timeout.connect(self._show_split_frame)
         # Direct: stop() blocks the GUI thread in wait(), so a queued quit would never be delivered.
         self.worker.finished.connect(self.thread.quit, Qt.ConnectionType.DirectConnection)
         self._finished = False
@@ -987,6 +1078,15 @@ class PlayWindow(QMainWindow):
             return event.key() in self.keys or event.key() == Qt.Key.Key_Tab
         if event.key() == Qt.Key.Key_Tab:
             self.worker.fast_forward = pressed
+            return True
+        if self._split is not None and event.key() in SPLIT_KEYS:
+            bit = 1 << BUTTON[SPLIT_KEYS[event.key()]]
+            self._split_held = self._split_held | bit if pressed else self._split_held & ~bit
+            self._split.set_buttons(self._split_held)
+            return True
+        if self.worker.coop is not None and event.key() in COOP_KEYS:
+            if pressed:
+                self.worker.coop.press(COOP_KEYS[event.key()])
             return True
         button = self.keys.get(event.key())
         if button is None:
@@ -1176,6 +1276,57 @@ class PlayWindow(QMainWindow):
         if self.audio is not None:
             self.audio.write(data)
 
+    @Slot(object)
+    def _split_requested(self, request):
+        if request == "stop":
+            self._stop_split()
+            return
+        if self._split is not None or request == self.worker.save_slot:
+            return
+        target = self.config.store_dir / "player2"
+        try:
+            copy_save(self.config.store_dir, request, target)
+            self._split = SplitGame({
+                "core": str(self.config.core_path), "bios": str(self.config.bios_dir), "disc": str(self.config.disc_path),
+                "store": str(target), "slot": request, "live_ram": self.config.live_ram, "game_rules": self.config.game_rules,
+                "hd": str(self.config.hd_pictures) if self.config.hd_pictures else None, "options": self.config.options})
+        except (OSError, ValueError) as exc:
+            self._message(f"Split screen could not start: {exc}")
+            return
+        self.worker.split_slot = request
+        self._split_timer.start(16)
+        self.live_dock.setVisible(False)
+        if not self.isFullScreen():
+            self.resize(max(self.width(), 1500), self.height())
+        self._message(f"Split screen: player 2 is starting from slot {request}")
+
+    @Slot()
+    def _show_split_frame(self):
+        if self._split is None:
+            return
+        if not self._split.running():
+            self._message("Player 2's game has stopped")
+            self._stop_split()
+            return
+        frame = self._split.newest_frame()
+        if frame is not None:
+            width, height, data = frame
+            self.view.second = QImage(data, width, height, width * 4, QImage.Format.Format_RGB32).copy()
+            self.view.update()
+
+    def _stop_split(self):
+        self._split_timer.stop()
+        if self._split is not None:
+            split, self._split = self._split, None
+            self._split_held = 0
+            try:
+                split.stop()
+            except (OSError, BufferError, ValueError) as exc:
+                self._message(f"Split screen did not stop cleanly: {exc}")
+        self.worker.split_slot = None
+        self.view.second = None
+        self.view.update()
+
     @Slot(str)
     def _progress_changed(self, text: str):
         self.level_label.setText(text)
@@ -1234,6 +1385,7 @@ class PlayWindow(QMainWindow):
         return self.thread.wait(wait_ms)
 
     def closeEvent(self, event):
+        self._stop_split()
         if not self.stop():
             self._message("The core is still shutting down…")
             event.ignore()

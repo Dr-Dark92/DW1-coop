@@ -83,6 +83,12 @@ The player compares every finished frame with the game's own background and repl
 
 While you play, the top right of the game screen shows the map: the walkable floor, exits in gold, you in white, your partner in cyan, and other Digimon in red (they chase you), yellow (they watch you) or orange (they ignore you). Your partner's HP and MP sit directly above the game's happiness and discipline bars, in the same bar style with current/maximum values. They slide in and out with the game's own status bars, so they hide in battles, menus and text scenes. The **Map and HP/MP** box in the game window turns them off. F10 still opens the larger Live map panel beside the game for inspection work; it now starts closed.
 
+## Co-op battle test (prototype)
+
+In the Play tab, tick **Co-op battle test**, choose player 2's Digimon and starting level, and tick **Game rules (P6)** so EXP is earned. When an enemy starts a fight with you, player 2's Digimon joins beside your partner. In battle a panel at the bottom of the screen shows it, in the game's own command art, and player 2 uses the same controls as you on the same keyboard: **J/L** move along the commands, **K** confirms, **U** fires the finisher when it's ready. The game's AI picks the techniques, as it does for your partner. Player 2 gains the same EXP and Bits as you (kept in `coop_player2.json` in the save folder), levels up from it, and shares the Digi-Dex. It runs in one game window, for battles only, and is a prototype: there is no item throwing for player 2 yet. Quick saves don't record player 2's progress. If it hits an error, it turns itself off and the game carries on.
+
+**Split screen** is option 10 in the game menu (S). Player 2 chooses a save, which can't be the one player 1 is playing from, and their game starts beside yours. Player 2's keys: **I/J/K/L** D-pad, **U** Cross, **O** Circle, **Y** Square, **H** Triangle, **N** Start, **M** Select, **7/8** L/R. The same option stops it. Player 2 plays a copy of that save in the `player2` folder inside the save folder, so your saves aren't changed. These are two separate games for now: progress isn't shared, nothing connects them when both are in the same zone, and player 2's game is silent. While split screen is on, those keys go to player 2's game, so the co-op battle keys don't work. Option 11, **LAN Co-op**, is a placeholder.
+
 ## Game rules (levels, EXP, no aging or death)
 
 In the Play tab, tick **Game rules (P6)** (USA release only) before **Play**. Your partner then:

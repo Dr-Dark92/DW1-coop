@@ -43,6 +43,8 @@ def period(hour):
 
 
 class DigiDex:
+    excluded_slot = None  # an entity slot in the battle that is not an opponent (coop.py)
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self.entries = {}
@@ -153,7 +155,7 @@ class DigiDex:
         if not 1 <= count <= 3 or not 0x80000000 <= combat <= 0x80200000 - COMBAT_ENTITY_IDS - 4:
             self.dirty |= changed
             return []
-        slots = list(read(ram_offset(combat + COMBAT_ENTITY_IDS + 1), count))
+        slots = [slot for slot in read(ram_offset(combat + COMBAT_ENTITY_IDS + 1), count) if slot != self.excluded_slot]
         if len(set(slots)) != len(slots) or any(not 2 <= slot < 10 for slot in slots):
             self.dirty |= changed
             return []

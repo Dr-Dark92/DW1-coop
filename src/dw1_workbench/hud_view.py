@@ -10,7 +10,7 @@ import struct
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter
 
 from .live import LiveState, ram_offset
 from .maps import follow_kind, trigger_kind
@@ -58,6 +58,97 @@ class HudState:
     live: LiveState | None
     tamer: tuple[float, float] | None
     partner: tuple[float, float] | None
+
+
+# The battle command icons in VRAM, on the 4-bit page at (960, 256) with the CLUT at (272, 496) (BTL_renderCommandMenu).
+ICON_PAGE_X, ICON_PAGE_Y, ICON_CLUT = 960, 256, (272, 496)
+CURSOR_UV, CURSOR_SIZE, CURSOR_CLUT = (0x3D, 0xE0), 22, (272, 497)  # the game asks for x 282; the GPU keeps only multiples of 16
+ICON_W, ICON_H, ICON_STEP = 16, 15, 14
+# The band behind the icons: pieces of the same page, joined by BTL_COMMAND_MENU_LAYOUTS (end, middle, middle, end, end).
+STRIP_CLUT, STRIP_H, STRIP_PIECES = (272, 497), 32, ((0, 11), (11, 14), (25, 14), (39, 11), (50, 11))
+STRIP_LAYOUTS = {3: (0, 1, 3), 4: (0, 1, 2, 4), 5: (0, 1, 2, 1, 3), 7: (0, 1, 2, 1, 2, 1, 3), 8: (0, 1, 2, 1, 2, 1, 2, 4),
+                 6: (0, 1, 2, 1, 2, 4), 9: (0, 1, 2, 1, 2, 1, 2, 1, 3)}
+# Player 2's menu mirrors player 1's at the top: same x; rows at 23 and 33 from the top are here that far from the bottom.
+P2_ROW_TOP, P2_ROW_LOW, P2_BAR_X, P2_BAR_Y = 197, 207, 235, 206
+
+
+def _vram_image(vram: bytes, u: int, v: int, width: int, height: int, clut: tuple[int, int]) -> QImage:
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    for y in range(height):
+        for x in range(width):
+            word = struct.unpack_from("<H", vram, ((ICON_PAGE_Y + v + y) * 1024 + ICON_PAGE_X + (u + x) // 4) * 2)[0]
+            index = (word >> (((u + x) % 4) * 4)) & 15
+            colour = struct.unpack_from("<H", vram, (clut[1] * 1024 + clut[0] + index) * 2)[0]
+            image.setPixelColor(x, y, QColor((colour & 31) * 255 // 31, ((colour >> 5) & 31) * 255 // 31,
+                                             ((colour >> 10) & 31) * 255 // 31, 0 if colour == 0 else 255))
+    return image
+
+
+def command_icons(state: bytes) -> dict | None:
+    """The game's own battle command art, from the player's VRAM while a battle is on: {command: (icon, lit)}, "cursor"."""
+    at = state.find(GPURAM_FIELD)
+    if at < 0:
+        return None
+    vram = state[at + len(GPURAM_FIELD) + 4:at + len(GPURAM_FIELD) + 4 + 1024 * 512 * 2]
+    if len(vram) != 1024 * 512 * 2:
+        return None
+    icons: dict = {command: (_vram_image(vram, (command - 1) * 0x20, 0xC0, ICON_W, ICON_H, ICON_CLUT),
+                             _vram_image(vram, (command - 1) * 0x20 + 0x10, 0xC0, ICON_W, ICON_H, ICON_CLUT))
+                   for command in range(1, 8)}
+    icons["cursor"] = _vram_image(vram, *CURSOR_UV, CURSOR_SIZE, CURSOR_SIZE, CURSOR_CLUT)
+    icons["strip"] = [_vram_image(vram, u, 0xE0, width, STRIP_H, STRIP_CLUT) for u, width in STRIP_PIECES]
+    return icons
+
+
+def _shadow_text(painter, x, y, text, colour="#ffffff"):
+    painter.setPen(QColor("#000000"))
+    painter.drawText(QPointF(x + 0.5, y + 0.5), text)
+    painter.setPen(QColor(colour))
+    painter.drawText(QPointF(x, y), text)
+
+
+def draw_ally_panel(image: QImage, panel, icons: dict | None, bars: "HudPainter", blink: bool = False) -> None:
+    """Player 2's battle controls, mirroring player 1's at the top of the screen: command icons bottom left, bars bottom right."""
+    from .coop import COMMAND_NAMES
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    painter.scale(image.width() / 320, image.height() / 240)
+    font = QFont("Arial"); font.setPixelSize(9); font.setBold(True); painter.setFont(font)
+    entries = len(panel.commands)
+    if panel.down:
+        _shadow_text(painter, 20, 205, f"P2 {panel.name} is down", "#ff9090")
+    else:
+        for index, command in enumerate(panel.commands):
+            x = 20 + (entries - 1 - index) * ICON_STEP
+            upper = (index + 1) % 2 == (0 if entries % 2 == 0 else 1)
+            y = P2_ROW_TOP if upper else P2_ROW_LOW
+            if icons is not None:
+                if index == 0:
+                    strip_x = 17
+                    painter.setOpacity(0.75)
+                    pieces = STRIP_LAYOUTS.get(entries + 1, ())
+                    for number, piece in enumerate(pieces):
+                        width = STRIP_PIECES[piece][1]
+                        painter.drawImage(QRectF(strip_x, P2_ROW_TOP - 3, width, STRIP_H), icons["strip"][piece])
+                        strip_x += width
+                    painter.setOpacity(1)
+                if index == panel.hovered:
+                    painter.drawImage(QRectF(x - 3, y - 3, CURSOR_SIZE, CURSOR_SIZE), icons["cursor"])
+                pair = icons.get(command)
+                if pair is not None:
+                    painter.drawImage(QRectF(x, y, ICON_W, ICON_H), pair[1 if index == panel.hovered and blink else 0])
+            else:
+                painter.fillRect(QRectF(x, y, ICON_W - 2, ICON_H - 2), QColor(FRAME_BLUE if index == panel.hovered else FRAME_MID))
+        _shadow_text(painter, 20, 192, COMMAND_NAMES.get(panel.commands[panel.hovered], ""))
+    _shadow_text(painter, 20, 232, f"P2 {panel.name} · {panel.progress}", "#fad990")
+    bars._bar_row(painter, P2_BAR_X, P2_BAR_Y, "hp", HEART, panel.hp, panel.max_hp)
+    bars._bar_row(painter, P2_BAR_X, P2_BAR_Y + BAR_STEP, "mp", ORB, panel.mp, panel.max_mp)
+    if not panel.down:
+        text, colour = (("FINISH!! [U]", "#ffd040") if panel.finisher_ready
+                        else (f"{COMMAND_NAMES.get(panel.current, '')} > {panel.target}", "#a0c8f0"))
+        _shadow_text(painter, 314 - QFontMetrics(font).horizontalAdvance(text), P2_BAR_Y - 3, text, colour)
+    painter.end()
 
 
 def _floor_position(read, entity: int) -> tuple[float, float] | None:

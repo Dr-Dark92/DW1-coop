@@ -61,6 +61,11 @@ def _new_icon(painter, x, y, kind):
     elif kind == "Digi-Bank":  # a storage box: lid, body, latch
         painter.drawRoundedRect(QRectF(2,8,20,13),2,2); painter.drawRoundedRect(QRectF(1,3,22,6),2,2)
         painter.setBrush(QColor("#f9d78a")); painter.drawRect(QRectF(10,7,4,5))
+    elif kind == "Split Screen":  # two screens side by side
+        painter.drawRoundedRect(QRectF(0,4,11,15),1,1); painter.drawRoundedRect(QRectF(13,4,11,15),1,1)
+    elif kind == "LAN Co-op":  # two linked computers
+        painter.drawRect(QRectF(1,2,9,8)); painter.drawRect(QRectF(14,14,9,8))
+        painter.drawLine(5,10,5,18); painter.drawLine(5,18,14,18)
     else:
         painter.drawEllipse(QRectF(3,3,18,18))
         _label(painter,QRectF(1,2,22,22),kind[:1],12)

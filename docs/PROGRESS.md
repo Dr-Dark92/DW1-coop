@@ -39,6 +39,9 @@
 - P6 game rules (USA, in the player): partner levels 0–99 from battle EXP (Rookie 10, Champion 30, Ultimate 90; ×1.5/×2/×3 for 2/3/4 enemies; (L+1)(L+20)/2 EXP per level), start at level 20, +100 HP/MP and +10 other stats per level, aging and death off; kept with quick saves. Checked in the running game, including a real won battle from the user's inspections (+10 EXP for one Rookie). Manual Rookie-to-Champion evolution is now available at level 21 through option 7 of the in-game menu, restricted to native links and confirmed by the player. Automatic natural/random/virus evolution is guarded. Agumon → Greymon verified through the native sequence on Windows, with separate native/guarded automatic-evolution comparisons; user saves unchanged. Other stage thresholds, Fresh/In-Training EXP, Digimon storage and stat balance remain pending.
 - HD backgrounds (USA, in the player): a full-size picture per map replaces the game's background pixels in each finished frame, keeping characters, HUD, shadows, fades and time of day; nothing patched, on/off while playing. Checked on the real game standing, walking, in a battle through the win, and at night on `MAYO00`, and on File City `TWNA02` at 4× (about 57 frames per second at 1×, 2× and 4×). The user set a picture on File City `TWNA02` and reports the result on the desktop as much better.
 - On-screen map (top right) and partner HP/MP above the status bars, in the game's bar art, sliding with the native HUD; the Live map panel starts closed (F10). Checked in the real play window; not yet seen by the user.
+- P8 feasibility: a second Digimon can fight as an ally in the real battle code using only memory writes between frames (hits the enemy, gets hit, normal win when dropped). A different species (Greymon, Meramon) was also spawned through the game's own functions and joined a real battle through its own battle-start code. Scripted orders (which move, which target, hold back) were also obeyed against two enemies. Tests only; no co-op feature exists.
+- Co-op battle prototype in one game window: player 2's chosen Digimon joins real fights with player 1's controls (J/L, K, U for the finisher) and the game's AI choosing techniques; player 2 gains the same EXP and Bits and shares the Digi-Dex. Checked in the real play window with a scripted battle trigger; not yet played by the user.
+- Split screen (menu option 10): a second game process beside player 1's at full speed (both about 60 fps measured), from a different save, with its own keys and its own copy of the save. Two separate games: no shared progress or same-zone battle yet, and player 2's game is silent. Option 11, LAN Co-op, is a placeholder. Checked in the real window, offscreen; not yet played by the user.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
@@ -69,7 +72,7 @@
 - Audio/video decoding.
 - Disassembly/decompilation integration.
 - Player: gamepad input, key remapping, core options UI, and audio-driven frame pacing (pacing is clock-based; audio is dropped rather than delayed).
-- Co-op gameplay, native runtime, or networking.
+- Shared co-op progress, same-zone battles across the two split-screen games, native runtime, or networking.
 
 ## Real-disc validation (user-provided USA image)
 

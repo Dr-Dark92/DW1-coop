@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QSpinBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -173,6 +173,28 @@ class PlayPanel(QWidget):
         self.game_rules.setChecked(self.live_ram and self.settings.value("play/game_rules", False, type=bool))
         self.game_rules.toggled.connect(lambda value: self.settings.setValue("play/game_rules", value))
         form.addRow("", self.game_rules)
+        coop_row = QHBoxLayout()
+        self.coop = QCheckBox("Co-op battle test: player 2's Digimon joins your fights")
+        self.coop.setToolTip("A prototype in one game window. Player 2 has your battle controls on J and L (commands), K "
+                             "(confirm) and U (finisher); the AI picks the skills. They gain the same EXP and Bits. USA only.")
+        self.coop.setEnabled(self.live_ram)
+        self.coop.setChecked(self.live_ram and self.settings.value("play/coop", False, type=bool))
+        self.coop.toggled.connect(lambda value: self.settings.setValue("play/coop", value))
+        self.coop_species = QComboBox()
+        for character, name in sorted(self.character_names.items()):
+            if 0 < character < 66 and name:
+                self.coop_species.addItem(f"{name}", character)
+        saved = self.coop_species.findData(self.settings.value("play/coop_species", 5, type=int))
+        if saved >= 0:
+            self.coop_species.setCurrentIndex(saved)
+        self.coop_species.currentIndexChanged.connect(lambda _: self.settings.setValue("play/coop_species", self.coop_species.currentData()))
+        self.coop_level = QSpinBox(); self.coop_level.setRange(0, 99); self.coop_level.setPrefix("Starts at Lv ")
+        self.coop_level.setValue(self.settings.value("play/coop_level", 20, type=int))
+        self.coop_level.valueChanged.connect(lambda value: self.settings.setValue("play/coop_level", value))
+        for widget in (self.coop, self.coop_species, self.coop_level):
+            coop_row.addWidget(widget)
+        coop_row.addStretch()
+        form.addRow("Co-op", coop_row)
         picture = QHBoxLayout()
         self.resolution = QComboBox(); self.resolution.addItems(RESOLUTIONS)
         self.resolution.setCurrentText(self.settings.value("play/resolution", DEFAULT_RESOLUTION))
@@ -374,6 +396,8 @@ class PlayPanel(QWidget):
                             launch_slot=slot, launch_inspection=inspection_id,
                             resume_on_close=self.resume.isChecked(), live_ram=self.live_ram,
                             game_rules=self.game_rules.isChecked(), hd_pictures=self.hd_pictures,
+                            coop_species=self.coop_species.currentData() if self.coop.isChecked() else None,
+                            coop_level=self.coop_level.value(),
                             options=core_options(self.resolution.currentText(), self.smooth_colours.isChecked(),
                                                  self.steady_3d.isChecked()))
         start = (f" from slot {slot}" if slot is not None else

@@ -108,6 +108,11 @@ class EvolutionController:
         self.history = history  # None: the chart shows every linked form (no record available)
         self.installed = False
         self.notices: list[str] = []  # messages for the player, taken by the worker
+        self.split_saves = None  # callable giving player 2's save rows (split_screen.choosable_saves)
+        self.split_running = lambda: False
+        self.split_request = None  # a slot, or "stop"; taken by the worker
+        self._split_open = self._lan_open = False
+        self._split_index = 0
         self.events: list[str] = []  # "bank": EXP or the bank changed; save them and re-read the partner
         self.reset()
 
@@ -465,6 +470,41 @@ class EvolutionController:
             icons=tuple(record["kind"] if record else "empty" for record in stored) + ("egg",))
         return None
 
+    def _split_frame(self, pressed):
+        """Split Screen: player 2 chooses a save, which may not be player 1's. Returns a button to send, or None."""
+        if pressed & (bit("A") | bit("X")):
+            self._split_open = False
+            return None
+        if self.split_running():
+            rows, footer = ("Stop split screen",), "Cross: stop   Circle/Triangle: back"
+            if pressed & bit("B"):
+                self.split_request = "stop"
+                self._split_open = False
+                return None
+            self.menu = EvolutionMenu("Split Screen", rows, 0, footer, False)
+            return None
+        saves = self.split_saves()
+        if not any(not row["taken"] for row in saves):
+            self.menu = EvolutionMenu("Player 2: choose a save", ("No other save yet.", "Make one with F5 in another slot."),
+                                      -1, "Circle/Triangle: back", False)
+            return None
+        if pressed & (bit("Up") | bit("Down")):
+            self._split_index = (self._split_index + (-1 if pressed & bit("Up") else 1)) % len(saves)
+        self._split_index = min(self._split_index, len(saves) - 1)
+        if pressed & bit("B"):
+            row = saves[self._split_index]
+            if row["taken"]:
+                self.notices.append("Player 2 can't use player 1's save: choose another one")
+            else:
+                self.split_request = row["slot"]
+                self._split_open = False
+                self._handoff = True
+                self._handoff_button = bit("X")
+                return self._handoff_button
+        self.menu = EvolutionMenu("Player 2: choose a save", tuple(row["label"] for row in saves), self._split_index,
+                                  "Cross: start   Circle/Triangle: back", False)
+        return None
+
     def before_frame(self, buttons):
         old = self.menu
         pressed = buttons & ~self.previous_buttons
@@ -492,7 +532,7 @@ class EvolutionController:
         if not self.main_menu_open():
             self._menu_open = False
             self.choosing = self.confirming = self._handoff = False
-            self._dex_open = self._dex_detail = self._bank_open = False
+            self._dex_open = self._dex_detail = self._bank_open = self._split_open = self._lan_open = False
             return buttons
         if self._handoff:
             if buttons:
@@ -511,12 +551,26 @@ class EvolutionController:
             if self._bank_open or output is not None:
                 return output or 0
             pressed = 0
+        if self._split_open:
+            output = self._split_frame(pressed)
+            if self._split_open or output is not None:
+                return output or 0
+            pressed = 0
+        if self._lan_open:
+            if pressed & (bit("A") | bit("X")):
+                self._lan_open = False
+                pressed = 0
+            else:
+                self.menu = EvolutionMenu("LAN Co-op", ("Coming later.", "Playing over a network is", "still to be discussed."), -1,
+                                          "Circle/Triangle: back", False)
+                return 0
         choices = self.choices()
         required = self.required_level()
         ready = required is not None and self.progress.level >= required and bool(choices)
         options = ("Items", "Digimon", "Player", "Praise", "Scold", "Sleep", "Evolution")
         options += ("Digi-Dex",) if self.dex is not None else ()
         options += ("Digi-Bank",)
+        options += ("Split Screen", "LAN Co-op") if self.split_saves is not None else ()
         options += ("Fishing",) if self.number(HAS_FISHING_ROD, "<i") else ()
         count = len(options)
         if self.choosing:
@@ -581,6 +635,16 @@ class EvolutionController:
                 elif options[self.selection] == "Digi-Dex":
                     self._dex_open = True
                     self._dex_frame(0)
+                    return 0
+                elif options[self.selection] == "Split Screen":
+                    self._split_open = True
+                    self._split_index = 0
+                    self._split_frame(0)
+                    return 0
+                elif options[self.selection] == "LAN Co-op":
+                    self._lan_open = True
+                    self.menu = EvolutionMenu("LAN Co-op", ("Coming later.", "Playing over a network is", "still to be discussed."),
+                                              -1, "Circle/Triangle: back", False)
                     return 0
                 elif options[self.selection] == "Digi-Bank":
                     self._bank_open = True

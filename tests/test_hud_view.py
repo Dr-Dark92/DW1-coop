@@ -121,3 +121,21 @@ def test_native_bar_is_read_from_vram_and_missing_art_falls_back(application):
     assert U.native_bar(b"no such field") is None
     assert U.native_bar(b"x" + U.GPURAM_FIELD + bytes(4) + bytes(1024 * 512 * 2)) is None  # not resident
     assert U.fallback_bar().size() == bar.size()
+
+
+def test_ally_panel_mirrors_the_controls_at_any_size(application):
+    from dw1_workbench.coop import ATTACK, MODERATE, RUN, YOUR_CALL, AllyPanel
+    panel = AllyPanel("Greymon", "Lv 20 · EXP 10/420", 1500, 2000, 500, 2000, (RUN, MODERATE, ATTACK, YOUR_CALL), 3,
+                      YOUR_CALL, "ModokiBetamon", False, False, False)
+    for size in ((320, 240), (1280, 960)):
+        image = QImage(*size, QImage.Format.Format_RGB32)
+        image.fill(QColor(1, 2, 3))
+        U.draw_ally_panel(image, panel, None, U.HudPainter(lambda: b""))
+        k = size[0] // 320
+        assert image.pixelColor(25 * k, 200 * k) != QColor(1, 2, 3)  # the commands, bottom left
+        assert image.pixelColor(260 * k, (U.P2_BAR_Y + 3) * k) == QColor(U.FILLS["hp"][0])  # HP bar, bottom right
+        assert image.pixelColor(200 * k, 60 * k) == QColor(1, 2, 3)  # nothing over the fight
+
+
+def test_cursor_palette_is_on_the_gpus_16_pixel_grid():
+    assert U.CURSOR_CLUT[0] % 16 == 0
