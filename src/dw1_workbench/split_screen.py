@@ -240,8 +240,8 @@ class SplitGame:
         self.memory = shared_memory.SharedMemory(create=True, size=SIZE)
         HEADER.pack_into(self.memory.buf, 0, 0, 0, 0, 0, 0)
         environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
-        self.process = subprocess.Popen([sys.executable, "-m", "dw1_workbench.split_screen", self.memory.name, json.dumps(config)],
-                                        env=environment)
+        self.process = subprocess.Popen([sys.executable, "-m", "dw1_workbench.split_screen", self.memory.name,
+                                         json.dumps({**config, "parent": os.getpid()})], env=environment)
         self._last = 0
         self.link = WorldLink(self.memory, 0)
 
@@ -277,6 +277,27 @@ class SplitGame:
             pass  # already gone: nothing is left to free
 
 
+def parent_watch(pid: int):
+    """A function telling whether player 1's process (`pid`) is still running, for player 2 to stop with it.
+
+    On Windows os.getppid() keeps its value after the parent dies, and the parent may be the venv's python.exe
+    launcher rather than player 1, so the process itself is watched through a handle (which also holds its id)."""
+    if sys.platform != "win32":
+        return lambda: os.getppid() == pid
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    synchronize, wait_timeout = 0x00100000, 0x102
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return lambda: False  # already gone
+    return lambda: kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+
+
 def _attach(name: str) -> shared_memory.SharedMemory:
     """Open player 1's block without owning it: an owner's exit would delete the block while player 1 still uses it."""
     if sys.version_info >= (3, 13):
@@ -302,7 +323,7 @@ def _child(memory_name: str, raw: str) -> int:
                         game_rules=settings["game_rules"],
                         hd_pictures=Path(settings["hd"]) if settings.get("hd") else None, options=settings["options"])
     memory = _attach(memory_name)
-    parent = os.getppid()
+    parent_running = parent_watch(settings["parent"])
     worker = EmulatorWorker(config)
     worker._start_avatars = lambda: None  # rendering them would slow this game for a minute; player 1's menus have them
     worker.player_label = "Player 2"
@@ -318,7 +339,7 @@ def _child(memory_name: str, raw: str) -> int:
 
     def poll():
         worker.buttons = struct.unpack_from("<I", memory.buf, 12)[0]
-        if struct.unpack_from("<I", memory.buf, 16)[0] or os.getppid() != parent:
+        if struct.unpack_from("<I", memory.buf, 16)[0] or not parent_running():
             worker.request_stop()
             thread.quit()
             thread.wait(6000)

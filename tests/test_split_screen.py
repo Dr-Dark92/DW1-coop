@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 
 import pytest
@@ -108,3 +111,17 @@ def test_stopping_copes_with_the_memory_already_gone():
     other.close()
     other.unlink()
     game.stop()
+
+
+def test_parent_watch_sees_player_one_stop():
+    if sys.platform != "win32":
+        assert S.parent_watch(os.getppid())()
+        assert not S.parent_watch(os.getppid() + 1)()
+        return
+    process = subprocess.Popen([sys.executable, "-c", "input()"], stdin=subprocess.PIPE)
+    running = S.parent_watch(process.pid)
+    assert running()
+    process.kill()
+    process.wait()
+    assert not running()
+    assert not S.parent_watch(process.pid)()  # already gone when player 2 starts

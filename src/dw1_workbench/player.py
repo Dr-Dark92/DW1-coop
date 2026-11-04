@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import queue
+import sys
 import struct
 import threading
 import time
@@ -53,6 +54,7 @@ WORLD_ZOOM_ENABLED = False
 FAST_FORWARD = 4  # speed while fast-forward is held
 EXTEND_HEAP_FRAMES = 30
 MEMORY_CARD_FLUSH_FRAMES = 600  # write a changed memory card about every 10 s
+AVATAR_SWITCH_INTERVAL = 0.0002  # seconds; see EmulatorWorker._start_avatars
 LIVE_FRAMES = 10  # read the live map, positions and grid about six times a second
 IMAGE_FORMATS = {PIXEL_XRGB8888: QImage.Format.Format_RGB32, PIXEL_RGB565: QImage.Format.Format_RGB16,
                  PIXEL_0RGB1555: QImage.Format.Format_RGB555}
@@ -815,6 +817,10 @@ class EmulatorWorker(QObject):
             self.avatars = {**self.avatars, kind: image}  # GUI (F4) and core threads read the reference
 
         def run():
+            # Rendering is pure Python and holds the GIL: at the default 5 ms hand-over the game fell to about 9 fps
+            # on Windows while a store's cache was built. A shorter hand-over lets the game's thread keep its pace.
+            interval = sys.getswitchinterval()
+            sys.setswitchinterval(AVATAR_SWITCH_INTERVAL)
             try:
                 load_avatars(self.config.disc_path, self.config.store_dir / "avatars", order, publish,
                              self._stop.is_set)
@@ -822,6 +828,8 @@ class EmulatorWorker(QObject):
                 self.message.emit(f"Digi-Dex avatars unavailable: {exc}")
             except Exception as exc:  # never take the game down for a picture
                 self.message.emit(f"Digi-Dex avatars stopped: {exc}")
+            finally:
+                sys.setswitchinterval(interval)
 
         self._avatar_thread = threading.Thread(target=run, name="dex-avatars", daemon=True)
         self._avatar_thread.start()

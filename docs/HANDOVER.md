@@ -1,5 +1,17 @@
 # Handover
 
+## Windows check of the CachyOS work (2026-11-04, Claude, Windows 11, branch `python-player`)
+
+The six commits from HD backgrounds to the shared world were made on Linux (CachyOS). Run here on the real core with copies of the user's saves (user store hashes unchanged). Scripts and captures outside Git: `D:/DW1-coop-data/windows-validation/` (`check_split.py run|same|kill|nocache|hd|hd4`, `check_hd.py`). `dev-tools` and `saves-before-8mb` are not on this PC.
+
+- **Fixed: player 2 outlived player 1.** `os.getppid()` keeps its value on Windows after the parent dies, and player 2's parent is the venv's `python.exe` launcher, not player 1. Player 1 now passes its id and `split_screen.parent_watch` waits on a process handle. Hard-killing player 1 left player 2 running before; it now stops itself (seen gone on a later check; the exit time was not measured).
+- **Fixed: about 9 fps while avatars render** on a store with no cache. Rendering holds the GIL; `sys.setswitchinterval(0.0002)` while it runs gives about 58 fps.
+- **Fixed: HD tint tables truncated** instead of rounding (`b6bb995`); the failing test showed it here.
+- **Works:** split screen with both games at 2× (player 1 p99 24 ms, player 2 59.8 fps), world link, clean stop (0.17 s, exit 0); HUD; HD backgrounds in the right places.
+- **Open: HD backgrounds display at about 30 fps at 2× and 22 at 4×** on the indoor map 218 with a flat test picture; the game keeps 60. Compose takes about 27 ms alone with the emulator stopped, so it is plain numpy cost, not timing or the GIL. Linux recorded about 57 at 4× on another map; no same-map comparison exists.
+- **Open: the 8 MB core has no Windows build.** MSYS2 with gcc and make is installed and the source is at `D:/DW1-coop-data/core-8mb/beetle-psx-libretro` (`71ee81e`, the installed core's revision; the patch's `git apply --check` passes, not applied). The tool's safety check blocked compiling downloaded code from the session, so the user builds it (`make -j8 HAVE_LIGHTREC=0 platform=win` in the MSYS2 MinGW64 shell) or adds a permission rule. On the standard core map 218 refuses the visitor with the expected memory message, so a visitor walking in the other game is unverified on Windows. Back up the Windows saves first.
+- Not run on Windows: a shared fight, the co-op battle test, gamepads.
+
 ## Next stages (2026-11-04, agreed with the user)
 
 The user tested split screen: it runs, but the two games are separate and the players can't see each other. Next, in order:
