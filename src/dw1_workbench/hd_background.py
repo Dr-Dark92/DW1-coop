@@ -81,7 +81,7 @@ def channel_tables(base: np.ndarray, target: np.ndarray) -> np.ndarray | None:
     tables = np.empty((3, 256), np.uint8)
     for channel in range(3):
         gain, bias = np.polyfit(base[:, channel].astype(float), target[:, channel].astype(float), 1)
-        tables[channel] = np.clip(np.arange(256) * gain + bias * 8, 0, 255).astype(np.uint8)
+        tables[channel] = np.rint(np.clip(np.arange(256) * gain + bias * 8, 0, 255)).astype(np.uint8)
     return tables
 
 
