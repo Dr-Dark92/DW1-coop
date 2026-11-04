@@ -42,6 +42,14 @@
 - P8 feasibility: a second Digimon can fight as an ally in the real battle code using only memory writes between frames (hits the enemy, gets hit, normal win when dropped). A different species (Greymon, Meramon) was also spawned through the game's own functions and joined a real battle through its own battle-start code. Scripted orders (which move, which target, hold back) were also obeyed against two enemies. Tests only; no co-op feature exists.
 - Co-op battle prototype in one game window: player 2's chosen Digimon joins real fights with player 1's controls (J/L, K, U for the finisher) and the game's AI choosing techniques; player 2 gains the same EXP and Bits and shares the Digi-Dex. Checked in the real play window with a scripted battle trigger; not yet played by the user.
 - Split screen (menu option 10): a second game process beside player 1's at full speed (both about 60 fps measured), from a different save, with its own keys and its own copy of the save. On the same map each game shows the other's Digimon, moving and animated (`visitor.py`); on the standard core limited by the game's memory; the extended 8 MB core lifts that. A fight started by either player on a shared map runs in that game with the other's real Digimon as the ally, shown on both halves, with both players rewarded. Story progress and inventory aren't shared yet, and player 2's game is silent. Option 11, LAN Co-op, is a placeholder. Checked in the real window, offscreen; not yet played by the user.
+- Playing as another character (USA): a character chosen at game start replaces the Tamer in RAM and VRAM and uses his animations. Tai Kamiya's full 2,228-triangle model was tested through walking, six map changes, a state round trip and a whole battle, at the same speed as the default Tamer. The model isn't bundled. The other player's Tamer in split screen stays the default.
+- Zone import finds repainted backgrounds by what the file draws, not the manifest's hash, and a damaged picture skips its own map only. 47 maps from two re-rendered bundles are imported into the working project; four had cut-off PNGs and were left as they were (TWNB13, TWNB23, TWNA01, ROOM10).
+- Title screens: both can be replaced from Settings. The game gets a 320-wide copy on the patched disc and the player draws the full picture over it, with Press Start and the menu on top and the game's fades followed. Checked on real frames at 4x and in the user's own DW1-play.
+- Typed frame rate (20-360): the game's speed and the sound's pitch follow it. Reached exactly at 30 and 60 fps; the top speed depends on resolution (about 60 at 4x, 105 at 2x, 155 at Native).
+- Game window reduced to Save, Load and Full screen; the rest is under Play > Settings and reaches an open game straight away.
+- DW1-play always powers on to the title screens, and closing the game writes no Resume slot unless that is ticked.
+- One folder for settings, saves and icons, `~/.dw1-coop`, so an app started from inside a packaged Windows app and from a shortcut have the same data. The user's real saves came across on their first start from the shortcut.
+- Repeated pictures are skipped: at 4x with HD backgrounds, walking on map 168 went from 45.8 to 59.8 emulated fps. Measured without a real window; the user hasn't yet confirmed it in play.
 - Catalogue-backed empty/unsupported category views.
 - Synthetic tests for valid/invalid layouts, missing CUE tracks, malformed/truncated input, traversal rejection, persistence, cancellation recovery, safe export, and known TIM output.
 
@@ -59,6 +67,9 @@
 - TIM: standard standalone images only; no automatic embedded/container scan.
 - Executable analysis: identity/header, character resource tables, skeleton tables, and the map table only.
 - MMD static geometry: 151 of 178 models accepted and matching the reference converter; 27 rejected for unsupported primitive types (translucent, flat-shaded, untextured, unlit) or invalid normal indices.
+- Playing as another character: each body part moves rigidly, so shoulders and elbows can show gaps; the texture stays the Tamer's 256 x 128 sheet at 16 colours per palette; facial expressions don't change. Draw buffer peaked at 55 KB of 80 KB in a battle with Terra Force; busier scenes are unmeasured and nothing guards an overflow.
+- Imported maps seen in the real game: 168, 218, 112 and 109. The others passed the same import checks only; most File City stages appear only as the city grows.
+- Physical controllers, and Reset and Digi-Dex from Settings, haven't been used for real. The layout test using the fake core is skipped on the Windows PC, which has no C compiler; a real-window run covered the same behaviour once.
 - Maps: sprite objects are parsed but not rendered; embedded map TIMs are located, not previewed; door models are not shown; palette time-of-day meaning is unverified; script-driven transitions are missing from the relation map until map scripts are decoded.
 
 ## Not implemented

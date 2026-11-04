@@ -25,3 +25,27 @@ def test_same_length_comes_back_untouched():
 
 def test_framerate_defaults_to_the_game_s_own():
     assert PlayConfig.__dataclass_fields__["framerate"].default == 0.0
+
+
+def repeat_state(menu=None, visitors=()):
+    from types import SimpleNamespace
+    return SimpleNamespace(_previous_picture=None, _repeats=0, visitors=list(visitors),
+                           evolution=SimpleNamespace(menu=menu) if menu is not None else None)
+
+
+def test_the_same_picture_is_skipped_but_not_for_ever():
+    from types import SimpleNamespace
+    from dw1_workbench.player import MOST_REPEATS, EmulatorWorker
+    state, frame = repeat_state(), SimpleNamespace(data=b"picture")
+    results = [EmulatorWorker._is_repeat(state, frame) for _ in range(MOST_REPEATS + 3)]
+    assert results[0] is False and all(results[1:MOST_REPEATS + 1])
+    assert results[MOST_REPEATS + 1] is False  # redrawn now and then, for the map and bars over a still picture
+    assert EmulatorWorker._is_repeat(state, SimpleNamespace(data=b"another")) is False
+
+
+def test_a_menu_or_a_visitor_over_the_picture_always_counts():
+    from types import SimpleNamespace
+    from dw1_workbench.player import EmulatorWorker
+    frame = SimpleNamespace(data=b"picture")
+    for state in (repeat_state(menu=object()), repeat_state(visitors=[object()])):
+        assert [EmulatorWorker._is_repeat(state, frame) for _ in range(3)] == [False, False, False]

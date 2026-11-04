@@ -1,5 +1,47 @@
 # Handover
 
+## Characters, title screens and shared data (2026-11-04, Claude, Windows 11, branch `python-player`)
+
+User asked for: a playable Tai, full detail instead of a reduced model, 2 re-rendered zone bundles imported, frame rate input, title screen editing at full quality, a smaller game window, no resume on exit, and the two ways of starting the app made the same.
+
+**The trap that cost the most time.** Claude Code here runs inside the Claude desktop app's MSIX package, so everything it starts sees a private HKCU and `%LOCALAPPDATA%`. "The user's settings" and "the user's saves" as read from these tools were for a long time that private copy, and the user's own shortcut was running with imports off on the original disc. See the section below. Now that data is in `~/.dw1-coop` the two agree, but keep test runs on a copy: set `DW1_COOP_HOME`.
+
+What changed, beyond the two sections that follow:
+
+- `zone_import.py`: a picture counts as repainted when it isn't what the TFS renders, unless the TFS itself was hand-edited. `MapImport.skipped` keeps a damaged map out without blocking the package, and without dropping that map's earlier import.
+- `title_screens.py` (TIM encoding and `overrides/title`) and `title_hd.py` (`TitleLayer`). A frame is a title when 60% of it matches the TIM at one brightness, since there's no map in RAM. The game's fade is a multiply, its 255-to-256 texel stretch needs one column of tolerance, and only the first 240 rows show: `TITLE256` rows 241-250 hold the Press Start text the game tints green. A picture within 1% of the file's whole shape keeps every row; before that, 1402 x 1122 was cropped 8 rows at each end.
+- `player.py`: `framerate` in `PlayConfig` paces the loop and `stretched_audio` keeps the sound in step. `_is_repeat` skips all image work on a picture identical to the last, since the game draws about 20 a second out of 60. It always counts when a workbench menu or a visitor is drawn over the picture, and at least every 15 frames for the HUD. `_read_hud` now assigns `_hud` in one step: the compositor's thread reads it, and an empty moment made the bars flicker in about 5% of pictures.
+- `play_panel.py`: Game screen, Quick saves, During a game and Title screens groups. `PlayWindow` keeps the behaviour; `quick_save_changed` and `zoom_reported` bring its changes back to Settings. The slot and note are in settings as `play/slot` and `play/save_note`.
+- `launch_directly` always powers on. `play/resume` now defaults to off. An old Resume slot isn't deleted and can be opened from the Quick saves list.
+
+Outside Git: `D:/DW1-coop-data/tai` (`convert_tai.py`, `install_tai.py`, `check_full.py`, `check_zones2.py`) and `D:/DW1-coop-data/title` (`check_hud_walk.py`, `check_speed.py`, `check_noresume.py`). Backups of the overrides from before each bundle are in `D:/DW1-coop-data/backup-overrides-before-bundle-2` and `-3`. On the first move to the shared folder, Claude's private saves went to slots 8 and 9 and `play/<disc>/private-copy`; the user's real saves kept their own slots.
+
+Open:
+
+1. The user reports the HP/MP bars missing while walking on a map. They draw on every picture in `check_hud_walk.py` on the same save and settings, standing and in all four directions, without a real window. A screenshot and the map name were requested. Besides the flicker fix, nothing here explains it yet.
+2. The speed fix hasn't been confirmed in the user's own window. Composing still takes about 38 ms at 4x (27 ms at 2x) on its own thread. If it still feels slow: run the compositor in another process (the machine has 32 logical CPUs, and this code holds the GIL part of the time), or use 2x. The core's software renderer is single-threaded; a hardware renderer would need a GL context in this front end.
+3. Re-render the 4 damaged pictures. The 8 MB core is still unbuilt.
+4. Tai's joints: skinning would need a PC-side renderer, and there's no depth information from the core to composite it with.
+
+## Where settings and saves live (`shared_data.py`)
+
+Settings are in `~/.dw1-coop/settings.ini`, saves in `~/.dw1-coop/play`. They were in the registry and AppData, but the Claude desktop app on Windows is an MSIX package: anything started from it, Bash and PowerShell tools included, gets a private copy of HKCU and of `%LOCALAPPDATA%` under `Packages\Claude_*\LocalCache`. The same command then had different settings and saves depending on who ran it, and test output described the private copy, not the user's. `D:` and the home folder aren't redirected. Set `DW1_COOP_HOME` to run against another folder; `tests/conftest.py` does.
+
+## Playing as another character (`tamer_skin.py`)
+
+The Tamer is replaced in RAM and VRAM while the game runs, because he is loaded only at a new game or memory-card load and a quick save holds its copy. Writes must match what the game did at load: `as_loaded` makes offsets absolute, sets the texture page, and writes each polygon run's length into its first packet. A wrong run length hangs the renderer.
+
+Memory, measured on map 168 with `_stack_addr` 0x801FFF00 and `_stack_size` 64 KB:
+
+- The Tamer slot holds 15,048 bytes of model before the animations, which must stay where they are.
+- 0x801BFC00-0x801D5F00 looks empty but is free heap. The next Digimon a map loads can land there, so do not use it.
+- 0x801EFF00 up is the bottom of the reserved stack, out of the heap's reach. `detail.bin` goes there, up to 48 KB. Marker bytes from 0x801FBF00 to 0x801FE000 stayed untouched through 6 map changes and a full battle.
+- Draw buffer is 80 KB a frame. Full Tai (2,228 triangles, 894 pairs as quads) peaked at 40 KB in the world against 29 KB for the default Tamer, and 55 KB in a battle with Terra Force. Busier scenes have not been measured; nothing guards an overflow.
+
+The title pictures work the same way as HD maps but keyed by frame content, in `title_hd.py`: a frame is a title when 60% of it matches the TIM at one brightness, since there is no map in RAM to read. The game's fade is a multiply, and its 255-to-256 texel stretch needs one column of tolerance.
+
+Each body part still moves rigidly, since a TMD object has one bone. Tai's converter and data live outside Git in `D:/DW1-coop-data/tai`, and his files are installed in the project's `overrides/characters/tai`.
+
 ## Controllers and the Play tab (2026-11-04, Claude, Windows 11)
 
 User: controller mapping for both players, reorganise the UI; WarGreymon hidden from the egg list or a toggle.
@@ -499,23 +541,3 @@ Implement a bounded embedded-TMD primitive parser for one known MMD, starting wi
 3. preserve MMD source path, embedded offsets, hashes, parser version, and any preview transform;
 4. add a static model preview/export only after geometry and UVs are structurally and visually verified; otherwise retain the current texture-only preview;
 5. leave animation data unsupported until its bone/channel structure is separately proven.
-
-## Where settings and saves live (`shared_data.py`)
-
-Settings are in `~/.dw1-coop/settings.ini`, saves in `~/.dw1-coop/play`. They were in the registry and AppData, but the Claude desktop app on Windows is an MSIX package: anything started from it, Bash and PowerShell tools included, gets a private copy of HKCU and of `%LOCALAPPDATA%` under `Packages\Claude_*\LocalCache`. The same command then had different settings and saves depending on who ran it, and test output described the private copy, not the user's. `D:` and the home folder aren't redirected. Set `DW1_COOP_HOME` to run against another folder; `tests/conftest.py` does.
-
-## Playing as another character (`tamer_skin.py`)
-
-The Tamer is replaced in RAM and VRAM while the game runs, because he is loaded only at a new game or memory-card load and a quick save holds its copy. Writes must match what the game did at load: `as_loaded` makes offsets absolute, sets the texture page, and writes each polygon run's length into its first packet. A wrong run length hangs the renderer.
-
-Memory, measured on map 168 with `_stack_addr` 0x801FFF00 and `_stack_size` 64 KB:
-
-- The Tamer slot holds 15,048 bytes of model before the animations, which must stay where they are.
-- 0x801BFC00-0x801D5F00 looks empty but is free heap. The next Digimon a map loads can land there, so do not use it.
-- 0x801EFF00 up is the bottom of the reserved stack, out of the heap's reach. `detail.bin` goes there, up to 48 KB. Marker bytes from 0x801FBF00 to 0x801FE000 stayed untouched through 6 map changes and a full battle.
-- Draw buffer is 80 KB a frame. Full Tai (2,228 triangles, 894 pairs as quads) peaked at 40 KB in the world against 29 KB for the default Tamer, and 55 KB in a battle with Terra Force. Busier scenes have not been measured; nothing guards an overflow.
-
-The title pictures work the same way as HD maps but keyed by frame content, in `title_hd.py`: a frame is a title when 60% of it matches the TIM at one brightness, since there is no map in RAM to read. The game's fade is a multiply, and its 255-to-256 texel stretch needs one column of tolerance.
-
-Each body part still moves rigidly, since a TMD object has one bone. Tai's converter and data live outside Git in `D:/DW1-coop-data/tai`, and his files are installed in the project's `overrides/characters/tai`.
-

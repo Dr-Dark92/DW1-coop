@@ -58,6 +58,7 @@ from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveError, QuickSaveStore, 
 # player and NPCs (2026-11-03). The code stays for later work; nothing patches the game while this is False.
 WORLD_ZOOM_ENABLED = False
 FAST_FORWARD = 4  # speed while fast-forward is held
+MOST_REPEATS = 15  # a still picture is still redrawn this often, for the map and bars over it
 EXTEND_HEAP_FRAMES = 30
 MEMORY_CARD_FLUSH_FRAMES = 600  # write a changed memory card about every 10 s
 AVATAR_SWITCH_INTERVAL = 0.0002  # seconds; see EmulatorWorker._start_avatars
@@ -200,6 +201,8 @@ class EmulatorWorker(QObject):
         self.hd_layer: BackgroundLayer | None = None
         self._compositor: Compositor | None = None
         self.title_layer: TitleLayer | None = None
+        self._previous_picture = None
+        self._repeats = 0
         self._title_compositor: Compositor | None = None
         self.buttons = 0
         self.paused = False
@@ -395,6 +398,8 @@ class EmulatorWorker(QObject):
             frames += 1
             if self.config.live_ram and core.ram_size > RAM_SIZE and frames % EXTEND_HEAP_FRAMES == 0:
                 extend_heap(core.read_memory, core.write_memory, core.ram_size)
+            if frame is not None and self._is_repeat(frame):
+                frame = None  # the game draws about 20 pictures a second: the same picture needs no work again
             if frame is not None:
                 image = battle_result_image(frame_image(frame), self.rules.battle_result if self.rules else None)
                 menu = self.evolution.menu if self.evolution else None
@@ -427,6 +432,14 @@ class EmulatorWorker(QObject):
                 time.sleep(delay)
             elif delay < -0.25:  # far behind (a slow frame or a breakpoint): do not try to catch up
                 deadline = time.perf_counter()
+
+    def _is_repeat(self, frame: Frame) -> bool:
+        """The same picture as last time, with nothing of ours drawn over it that could have changed."""
+        repeat = (frame.data == self._previous_picture and self._repeats < MOST_REPEATS
+                  and not (self.evolution is not None and self.evolution.menu is not None) and not self.visitors)
+        self._repeats = self._repeats + 1 if repeat else 0
+        self._previous_picture = frame.data
+        return repeat
 
     def _apply_visitors(self, core):
         try:
@@ -656,19 +669,22 @@ class EmulatorWorker(QObject):
             visitor.reset()
 
     def _read_hud(self, core: LibretroCore, menu):
-        """What the on-screen map and bars show for this frame; nothing over the workbench's own game menus."""
-        self._hud = None
+        """What the on-screen map and bars show for this frame; nothing over the workbench's own game menus.
+        The compositor's thread draws them too, so `_hud` changes in one step, never empty on the way."""
         if not self.hud_enabled or not self.config.live_ram or menu is not None:
+            self._hud = None
             return
         try:
-            self._hud = read_hud(core.read_memory, self.live)
-            if self._hud is not None:
+            hud = read_hud(core.read_memory, self.live)
+            if hud is not None:
                 if self._hud_painter is None:
                     self._hud_painter = HudPainter(core.serialize)
                 self._hud_painter.prepare()
+            self._hud = hud
         except LibretroError as exc:
             self.message.emit(f"On-screen map and bars turned off: {exc}")
             self.hud_enabled = False
+            self._hud = None
 
     def _publish(self, image: QImage):
         hud = self._hud
