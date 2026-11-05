@@ -297,3 +297,86 @@ def test_piece_at_the_end_of_its_page_spans_one_texel_less(game):
     column = painted[20:36, 20]
     # Row r holds texel r + 1, drawn with colour r + 2; 15 rows over 16 lines, so the last row (17) never shows.
     assert column[0] == 2 and column[8] == 10 and column[15] == 16
+
+
+def wide_frame(game, camera, factor=1):
+    """What the game draws at the ×2 frame: every second texel, the odd ones, at the half-size camera."""
+    background = MapBackground(game.read)
+    assert background.refresh()
+    half = background.indices[1::2, 1::2]
+    view = H.wide_view(*camera, half.shape[1], half.shape[0], factor)
+    levels = rgb5(palette_bytes())[half[np.ix_(view.rows, view.cols)]].astype(np.uint32)
+    return levels[..., 0] << 19 | levels[..., 1] << 11 | levels[..., 2] << 3
+
+
+@pytest.mark.parametrize("camera, extent, screen, anchor, start", [
+    (100, 640, 320, 100, 0),  # the view can't go left of the map: the anchor follows the camera
+    (160, 1024, 320, 160, 0),
+    (400, 1024, 320, 160, 120),  # free to move: half the camera's distance from the centre
+    (401, 1024, 320, 160, 121),  # rounds as the engine's arithmetic shift does
+    (320, 640, 320, 320, 0),  # the map's far edge
+])
+def test_wide_camera_matches_the_engine(camera, extent, screen, anchor, start):
+    assert H.wide_anchor(camera, extent, screen) == anchor
+    assert H.wide_camera(camera, extent, screen) == start
+
+
+def test_wide_frame_uses_a_half_size_picture_at_the_half_size_camera(tmp_path):
+    game = Game()
+    game.set(H.MAP_SIZE, "<bb", 5, 4)
+    for row in range(3, 4):
+        for column in range(5):
+            game.set(H.MAP_TILE_DATA + (row * 5 + column) * 20, "<IhhhhhHH", TILE_RAM, row * 5 + column, column * 128,
+                     row * 128, 768, 0, 0, 0x7800)
+    game.set(H.CAMERA, "<hh", 160, 136)
+    path = tmp_path / "hd.png"
+    Image.new("RGB", (640, 512), (200, 100, 50)).save(path)
+    loads = []
+    layer = BackgroundLayer(game.read, game.serialize, lambda index: path)
+    layer.wide = True
+    real = layer.picture_cache.loader
+    layer.picture_cache.loader = lambda *args: (loads.append(args[1:]), real(*args))[1]
+    frame = wide_frame(game, (H.wide_camera(160, 640, 320), H.wide_camera(136, 512, 240)))
+    frame[100:110, 50:60] = 0xFF00FF  # a character
+    deadline = __import__("time").monotonic() + 5
+    while layer.prepare(frame) is None and __import__("time").monotonic() < deadline:
+        __import__("time").sleep(0.005)
+    assert loads == [(5, 4, 2)]
+    result = layer.compose(layer.prepare(frame))
+    layer.close()
+    assert result.pixels.shape == (960, 1280)
+    assert rgb(result.pixels[0, 0]) == (200, 100, 50)
+    assert rgb(result.pixels[105 * 4, 55 * 4]) == (255, 0, 255)
+
+
+def test_wide_frame_on_a_map_with_no_picture_shows_the_full_size_tiles():
+    game = Game()
+    game.set(H.MAP_SIZE, "<bb", 5, 4)
+    for column in range(5):
+        game.set(H.MAP_TILE_DATA + (15 + column) * 20, "<IhhhhhHH", TILE_RAM, 15 + column, column * 128, 3 * 128, 768, 0, 0, 0x7800)
+    game.set(H.CAMERA, "<hh", 160, 136)
+    layer = BackgroundLayer(game.read, game.serialize, lambda index: None)
+    layer.wide = True
+    frame = wide_frame(game, (H.wide_camera(160, 640, 320), H.wide_camera(136, 512, 240)))
+    result = layer.apply(frame)
+    layer.close()
+    assert result is not None and result.coverage > 0.9
+    background = layer.background
+    start_x, start_y = H.wide_camera(160, 640, 320), H.wide_camera(136, 512, 240)
+    palette = rgb5(palette_bytes())
+    for y, x in ((40, 41), (41, 40)):  # output pixels two apart are neighbouring map texels: the detail is back
+        texel = background.indices[(start_y + y // 4) * 2 + (y % 4) // 2, (start_x + x // 4) * 2 + (x % 4) // 2]
+        assert rgb(result.pixels[y, x])[0] >> 3 == palette[texel][0]
+
+
+def test_foreground_of_the_last_map_is_not_used_on_the_next(game, tmp_path):
+    """A wider map after a narrower one used to read past the end of the old pieces, and HD turned itself off."""
+    path = picture_file(tmp_path)
+    layer = BackgroundLayer(game.read, game.serialize, lambda index: path)
+    layer.apply(game.frame()); layer._load_picture(layer._picture_key, path)
+    assert layer.apply(game.frame()) is not None
+    layer._foreground = np.zeros((10, 10), np.uint16)
+    layer._foreground_key = ("another map",)
+    assert layer._current_foreground() is None
+    layer._foreground_key = layer.background.key
+    assert layer._current_foreground() is layer._foreground

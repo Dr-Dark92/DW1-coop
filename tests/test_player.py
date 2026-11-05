@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from dw1_workbench.libretro import BUTTON
 from dw1_workbench.player import PlayConfig, PlayWindow
 from dw1_workbench.quicksave import RESUME_SLOT, QuickSaveStore
+from dw1_workbench.shared_data import app_settings
 
 
 @pytest.fixture(scope="module")
@@ -51,8 +52,8 @@ def test_plays_saves_loads_and_resumes(application, fake_core, tmp_path, monkeyp
     assert window.worker.buttons == 0
     saved = []
     window.slots_changed.connect(lambda: saved.append(True))
-    window.note.setText("Start screen")
-    window.worker.quick_save(2, window.note.text())
+    app_settings().setValue("play/save_note", "Start screen")
+    window.worker.quick_save(2, window.quick_save_note)
     wait(application, lambda: saved)
     store = QuickSaveStore(tmp_path / "saves")
     assert store.info(2).note == "Start screen"

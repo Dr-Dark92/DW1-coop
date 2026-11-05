@@ -68,7 +68,25 @@ typedef int (*DrawSyncFn)(int);
 #define DrawSync ((DrawSyncFn)0x800947B0u)
 typedef void (*SetProjectionFn)(s32);
 #define GsSetProjection ((SetProjectionFn)0x800981C8u)
-#define VIEWPORT_DISTANCE 0x80134ED4u /* camera.py keeps it at the map's value times the zoom */
+/* 16.16, unlike the library's SetGeomOffset: half pixels stop characters stepping a pixel as the camera moves. */
+static void set_geom_fine(s32 x, s32 y)
+{
+    register s32 ofx __asm__("$8") = x;
+    register s32 ofy __asm__("$9") = y;
+    /* ctc2 $8, $24; ctc2 $9, $25: the assembler won't take coprocessor 2 for mips1. */
+    __asm__ volatile(".word 0x48C8C000\n\t.word 0x48C9C800\n\tnop\n\tnop" : : "r"(ofx), "r"(ofy));
+}
+#define GPU_OFFSET_X 0x80134EDCu /* DRAWING_OFFSET_*_COPY: what the GPU applies this frame, set before the camera moves */
+#define GPU_OFFSET_Y 0x80134EE0u
+#define ENTITY_TABLE 0x8012F344u
+#define ENTITY_IS_ON_MAP 52
+#define ENTITY_IS_ON_SCREEN 53
+typedef s32 (*EntityIsOffScreenFn)(void *, s32, s32);
+#define entityIsOffScreen ((EntityIsOffScreenFn)0x800D5430u)
+typedef void (*RenderObjectsFn)(void);
+#define renderObjects ((RenderObjectsFn)0x800A315Cu)
+typedef void (*SortSpriteFn)(void *, void *, s32);
+#define VIEWPORT_DISTANCE 0x80134ED4u /* camera.py keeps it at the map's value times the zoom; fixed framing, while drawing */
 
 #define MAX_SLOTS 48
 typedef struct {
@@ -84,7 +102,7 @@ typedef struct {
     s16 slot_y[8];        /* VRAM y of each ring row */
     s16 map_screen;       /* map the ring was filled for (-1: refill) */
     s16 map_width, map_height;
-    s16 pad;
+    s16 pad;              /* 1: fixed-framing diagnostic, projection is render-only; 0: legacy prototype */
     u32 map_first_image;  /* tiles[0].imagePtr of that map */
     s8 resident[MAX_SLOTS]; /* tile index held by each slot, -1 none */
     u8 sample[128];       /* source texel for each downscaled texel: (i * 128 + 64) / T */
@@ -99,8 +117,24 @@ _Static_assert(OFFSET(slot_x) == 24 && OFFSET(slot_y) == 40 && OFFSET(map_screen
 _Static_assert(OFFSET(map_first_image) == 64 && OFFSET(resident) == 68 && OFFSET(sample) == 116, "Params layout");
 _Static_assert(OFFSET(drawn) == 244 && sizeof(Params) == 252 && sizeof(MapTileData) == 20 && sizeof(PolyFT4) == 40, "layout");
 
-#define PARAMS ((Params *)0x801D3000u)
-#define BUFFER ((u8 *)0x801C0000u) /* T * T bytes (up to 128 * 128) */
+#ifndef DW1_ENGINE_PARAMS
+#define DW1_ENGINE_PARAMS 0x801D3000u
+#endif
+#ifndef DW1_ENGINE_BUFFER
+#define DW1_ENGINE_BUFFER 0x801C0000u
+#endif
+#define PARAMS ((Params *)DW1_ENGINE_PARAMS)
+#define BUFFER ((u8 *)DW1_ENGINE_BUFFER) /* T * T bytes (up to 128 * 128) */
+
+/* Fixed framing, after Params. sprite_entry is GsSortSprite's displaced first words and a jump back (fixed_framing.py). */
+typedef struct {
+    s32 geom_x, geom_y;
+    u32 sprite_entry[4];
+    s32 drawing, native_distance;
+    u32 native_entries[6][4]; /* the same for fixed_framing.py's NATIVE_CAMERA functions, in that order */
+} FixedState;
+#define FIXED ((FixedState *)(DW1_ENGINE_PARAMS + 0x100u))
+_Static_assert(sizeof(Params) <= 0x100 && sizeof(FixedState) <= 0xE0, "Params or FixedState overflow the block");
 
 static s32 mod_small(s32 value, s32 divisor)
 {
@@ -112,6 +146,21 @@ static s32 mod_small(s32 value, s32 divisor)
 static s32 scaled(s32 coordinate, s32 centre, s32 scale)
 {
     return centre + (((coordinate - centre) * scale) >> 8);
+}
+
+/* Fixed proof: keep the expanded viewport inside existing artwork when the map is large enough.
+   Translation is expressed as an affine anchor, shared by 2D corners and GTE geometry. */
+static s32 fixed_anchor(s32 camera, s32 extent, s32 screen, s32 scale)
+{
+    s32 rest = 256 - scale;
+    s32 shift = (screen >> 1) * rest;
+    s32 low = screen * 256 - (extent - camera) * scale;
+    s32 high = camera * scale;
+    if (extent * scale < screen * 256)
+        return screen >> 1; /* finite art cannot cover the expanded view; controller must reject it */
+    if (shift < low) shift = low;
+    if (shift > high) shift = high;
+    return shift / rest;
 }
 
 static void upload(Params *p, MapTileData *tile, s32 column, s32 row)
@@ -142,6 +191,7 @@ void zoom_render_tiles(void)
     s32 camera_x = AT(CAMERA_X, s16), camera_y = AT(CAMERA_Y, s16);
     s32 ox = AT(DRAWING_OFFSET_X, s32), oy = AT(DRAWING_OFFSET_Y, s32);
     s32 scale = p->scale, inverse = p->inverse, t = p->tile;
+    s32 centre_x = 160, centre_y = 120;
     s32 x0, x1, y0, y1, tx, ty, budget = p->budget, i;
     u32 *ot;
 
@@ -149,6 +199,17 @@ void zoom_render_tiles(void)
     GsSetProjection(AT(VIEWPORT_DISTANCE, s32)); /* characters follow the zoom even on maps without foreground */
     if (width <= 0 || height <= 0 || width * height > 35)
         return;
+    if (p->pad == 1) {
+        /* tickCameraFollowPlayer has just moved the camera, and the drawing offset by the opposite amount, but the GPU
+           still uses the old offset. The two cancel at the game's own scale and wouldn't at ours: the background would
+           jump by each step's size. So draw from where the camera was when the frame began, like the characters. */
+        camera_x += ox - AT(GPU_OFFSET_X, s32);
+        camera_y += oy - AT(GPU_OFFSET_Y, s32);
+        ox = AT(GPU_OFFSET_X, s32);
+        oy = AT(GPU_OFFSET_Y, s32);
+        centre_x = fixed_anchor(camera_x, width * 128, 320, scale);
+        centre_y = fixed_anchor(camera_y, height * 128, 240, scale);
+    }
     if (p->map_screen != AT(CURRENT_SCREEN, u8) || p->map_width != width || p->map_height != height
         || p->map_first_image != (u32)tiles[0].imagePtr) {
         p->map_screen = AT(CURRENT_SCREEN, u8);
@@ -162,10 +223,10 @@ void zoom_render_tiles(void)
 
     /* Screen x = prim x + ox and native prim x = mapX - camera_x - ox, so after scaling around the screen
        centre the screen shows map x camera_x + 160 +- 160 / scale (likewise y with 120). */
-    x0 = camera_x + 160 - ((160 * inverse) >> 8);
-    x1 = camera_x + 160 + ((160 * inverse) >> 8);
-    y0 = camera_y + 120 - ((120 * inverse) >> 8);
-    y1 = camera_y + 120 + ((120 * inverse) >> 8);
+    x0 = camera_x + centre_x - ((centre_x * inverse) >> 8);
+    x1 = camera_x + centre_x + (((320 - centre_x) * inverse) >> 8);
+    y0 = camera_y + centre_y - ((centre_y * inverse) >> 8);
+    y1 = camera_y + centre_y + (((240 - centre_y) * inverse) >> 8);
     x0 = x0 < 0 ? 0 : x0 >> 7;
     y0 = y0 < 0 ? 0 : y0 >> 7;
     x1 = x1 < 0 ? -1 : x1 >> 7;
@@ -209,10 +270,10 @@ void zoom_render_tiles(void)
             }
             left = tile->posX - camera_x - ox;
             top = tile->posY - camera_y - oy;
-            prim->x0 = prim->x2 = (s16)scaled(left, 160 - ox, scale);
-            prim->x1 = prim->x3 = (s16)scaled(left + 128, 160 - ox, scale);
-            prim->y0 = prim->y1 = (s16)scaled(top, 120 - oy, scale);
-            prim->y2 = prim->y3 = (s16)scaled(top + 128, 120 - oy, scale);
+            prim->x0 = prim->x2 = (s16)scaled(left, centre_x - ox, scale);
+            prim->x1 = prim->x3 = (s16)scaled(left + 128, centre_x - ox, scale);
+            prim->y0 = prim->y1 = (s16)scaled(top, centre_y - oy, scale);
+            prim->y2 = prim->y3 = (s16)scaled(top + 128, centre_y - oy, scale);
             prim->u0 = prim->u2 = (u8)u;
             prim->u1 = prim->u3 = (u8)(u + t);
             prim->v0 = prim->v1 = (u8)v;
@@ -225,4 +286,89 @@ void zoom_render_tiles(void)
             GsSetWorkBase(prim + 1);
         }
     }
+}
+
+/* Fixed framing entry; never writes VIEWPORT_DISTANCE, used by mapToWorldPosition/game logic. */
+void fixed_set_projection(s32 distance)
+{
+    s32 ox = AT(DRAWING_OFFSET_X, s32), oy = AT(DRAWING_OFFSET_Y, s32);
+    s32 scale = PARAMS->scale;
+    s32 cx = fixed_anchor(AT(CAMERA_X, s16), AT(MAP_WIDTH, s8) * 128, 320, scale);
+    s32 cy = fixed_anchor(AT(CAMERA_Y, s16), AT(MAP_HEIGHT, s8) * 128, 240, scale);
+    GsSetProjection((distance * scale) >> 8);
+    FIXED->geom_x = (cx - ox) * (256 - scale) << 8;
+    FIXED->geom_y = (cy - oy) * (256 - scale) << 8;
+    set_geom_fine(FIXED->geom_x, FIXED->geom_y);
+}
+
+/* Sprites and effects size themselves from VIEWPORT_DISTANCE while drawing. Game logic keeps the real value. */
+void fixed_render_objects(void)
+{
+    s32 native = AT(VIEWPORT_DISTANCE, s32);
+    FIXED->native_distance = native;
+    FIXED->drawing = 1;
+    AT(VIEWPORT_DISTANCE, s32) = (native * PARAMS->scale) >> 8;
+    renderObjects();
+    AT(VIEWPORT_DISTANCE, s32) = native;
+    FIXED->drawing = 0;
+}
+
+typedef s32 (*NativeFn)(s32, s32, s32);
+
+/* The camera follows the player by how far they moved on screen. Measured through the wider projection that reads
+   half the distance, and the camera falls behind until the player has walked out of the frame. */
+static s32 native_call(s32 index, s32 a, s32 b, s32 c)
+{
+    s32 native = FIXED->drawing ? FIXED->native_distance : AT(VIEWPORT_DISTANCE, s32);
+    s32 result;
+    GsSetProjection(native);
+    set_geom_fine(0, 0);
+    result = ((NativeFn)(void *)FIXED->native_entries[index])(a, b, c);
+    GsSetProjection((native * PARAMS->scale) >> 8);
+    set_geom_fine(FIXED->geom_x, FIXED->geom_y);
+    return result;
+}
+
+s32 fixed_native_0(s32 a, s32 b, s32 c) { return native_call(0, a, b, c); }
+s32 fixed_native_1(s32 a, s32 b, s32 c) { return native_call(1, a, b, c); }
+s32 fixed_native_2(s32 a, s32 b, s32 c) { return native_call(2, a, b, c); }
+s32 fixed_native_3(s32 a, s32 b, s32 c) { return native_call(3, a, b, c); }
+s32 fixed_native_4(s32 a, s32 b, s32 c) { return native_call(4, a, b, c); }
+
+/* handleBattleStart brings every Digimon that's on screen into the fight, and the fight is on the game's own camera.
+   Only those its view can show may join, not everyone in the wider frame. */
+s32 fixed_native_5(s32 a, s32 b, s32 c)
+{
+    u8 **entities = (u8 **)ENTITY_TABLE;
+    s32 native = FIXED->drawing ? FIXED->native_distance : AT(VIEWPORT_DISTANCE, s32);
+    s32 i;
+    GsSetProjection(native);
+    set_geom_fine(0, 0);
+    for (i = 2; i < 10; i++)
+        if (entities[i] && entities[i][ENTITY_IS_ON_MAP])
+            entities[i][ENTITY_IS_ON_SCREEN] = entityIsOffScreen(entities[i], 320, 240) ^ 1;
+    return native_call(5, a, b, c);
+}
+
+/* A rotated or scaled sprite goes through RotTransPers4, which adds the GTE offset to coordinates that are already
+   on screen: HUD pieces would drift with the camera, and world sprites would get the offset twice. */
+void fixed_sort_sprite(void *sprite, void *ot, s32 priority)
+{
+    set_geom_fine(0, 0);
+    ((SortSpriteFn)(void *)FIXED->sprite_entry)(sprite, ot, priority);
+    set_geom_fine(FIXED->geom_x, FIXED->geom_y);
+}
+
+void fixed_set_foreground(PolyFT4 *prim, s32 x, s32 y, s32 w, s32 h)
+{
+    s32 scale = PARAMS->scale;
+    s32 ox = AT(GPU_OFFSET_X, s32), oy = AT(GPU_OFFSET_Y, s32); /* see zoom_render_tiles */
+    s32 camera_x = AT(CAMERA_X, s16) + AT(DRAWING_OFFSET_X, s32) - ox;
+    s32 camera_y = AT(CAMERA_Y, s16) + AT(DRAWING_OFFSET_Y, s32) - oy;
+    s32 cx = fixed_anchor(camera_x, AT(MAP_WIDTH, s8) * 128, 320, scale) - ox;
+    s32 cy = fixed_anchor(camera_y, AT(MAP_HEIGHT, s8) * 128, 240, scale) - oy;
+    prim->x0 = prim->x2 = (s16)scaled(x, cx, scale);
+    prim->x1 = prim->x3 = (s16)scaled(x + w, cx, scale);
+    prim->y0 = prim->y1 = (s16)scaled(y, cy, scale);
+    prim->y2 = prim->y3 = (s16)scaled(y + h, cy, scale);
 }

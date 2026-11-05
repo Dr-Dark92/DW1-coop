@@ -7,9 +7,10 @@ so it stretches them and the 3D characters no longer stand where the background 
 """
 from __future__ import annotations
 
-RESOLUTIONS = {"Native (1x)": "1x(native)", "2x (recommended)": "2x", "4x (may stutter)": "4x"}
+NATIVE_RESOLUTION = "Native (1x)"
+RESOLUTIONS = {NATIVE_RESOLUTION: "1x(native)", "2x (recommended)": "2x", "4x (may stutter)": "4x"}
 DEFAULT_RESOLUTION = "2x (recommended)"
-SCREENS = ("4:3", "16:9 fill", "16:9 stretch")  # fill: the game at its own shape, blurred picture at the sides
+SCREENS = ("4:3", "16:9 fill", "16:9 stretch", "Core aspect")
 WIDE = 16 / 9
 
 
@@ -34,7 +35,12 @@ def fit(width: float, height: float, aspect: float) -> tuple[float, float, float
 
 def screen_rects(width: float, height: float, aspect: float, screen: str):
     """(screen area, game picture) for a view of width × height; the area is the 16:9 frame in the wide modes."""
-    if screen not in SCREENS[1:]:
+    if screen == "Core aspect":
+        game = fit(width, height, aspect)
+        return game, game
+    # Named 4:3 modes must not silently use the core's pixel-aspect-corrected ratio (Beetle reports ~1.219).
+    aspect = 4 / 3
+    if screen not in ("16:9 fill", "16:9 stretch"):
         game = fit(width, height, aspect)
         return game, game
     area = fit(width, height, WIDE)

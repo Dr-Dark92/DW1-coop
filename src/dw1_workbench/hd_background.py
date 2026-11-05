@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 import struct
 import threading
+import time
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,12 +35,16 @@ from PIL import Image
 
 from .live import CURRENT_SCREEN, ram_offset, ram_end
 from .quicksave import _atomic_write
+from .telemetry import Telemetry
 
 MAP_TILE_DATA = 0x8014F084  # MapTileData tiles[35] (20 bytes each), then ...
 CAMERA = MAP_TILE_DATA + 0x1BB4  # i16 cameraX, cameraY
 MAP_SIZE = MAP_TILE_DATA + 0x1BB8  # i8 width, height (in tiles)
+DRAWING_OFFSET = 0x80134EC0  # i32 x, y: where the camera has just moved the drawing to
+GPU_OFFSET = 0x80134EDC  # i32 x, y: the offset the GPU applies this frame, from before the camera moved
 MAP_TILE_X, MAP_TILE_Y = 0x80134DC2, 0x80134DC4  # i8: the top-left tile of the 4 × 3 ring
-GAME_STATE = 0x80134F0A  # nonzero during a battle, whose code loads over the tile data in RAM (see below)
+GAME_STATE = 0x80134F0A  # int8: battle entry/loading/active = 1/3/2, exploration = 0 (tamer.c, btl.c)
+SCRIPT_MAP_CHANGE_STATE = 0x80134DDE  # int16, scriptTickChangeMap: 1 from fade-out until changeMap finishes
 MAP_INSTANCES = MAP_TILE_DATA + 35 * 20  # LocalMapObjectInstance[188]
 MAP_OBJECT_COUNT = 0x80134D1C  # MAP_OBJECT_INSTANCE_COUNT
 LOCAL_MAP_OBJECTS = 0x8013C060  # LocalMapObject[180]
@@ -52,11 +58,14 @@ GPURAM_FIELD = b"\r&GPURAM[0][0]"  # Beetle PSX save-state field: 1024 × 512 16
 PALETTE_ROW = 480  # the background palette in VRAM
 TILE, SCREEN_W, SCREEN_H = 128, 320, 240
 OUTPUT_SCALE = 4  # composed at 1280×960; the picture is resampled to this once per map
+ONE, WIDE_SCALE = 256, 128  # the ×2 camera frame (fixed_framing.py): tiles are held at half size, every second texel
 CAMERA_HISTORY = 4  # camera values to try for a frame
 RECHECK_FRAMES = 30  # re-read the tiles twice a second (not during a battle, which overwrites them)
 PALETTE_FRAMES = 15  # read the live palette four times a second (it changes with the time of day)
 MIN_COVERAGE = 0.25  # below this the frame is not showing the map
 MAX_LOOKS = 4  # tinted whole-map pictures kept per map
+PICTURE_BYTES = 128 * 1024 * 1024
+TINT_BYTES = 64 * 1024 * 1024
 CLEAN_SHARE = 0.5  # share of a 5×5 square that must be background for a darkened pixel to count as a shadow
 FOREGROUND_READS = 4  # re-read the foreground pieces every this many palette reads (about once a second)
 SPREAD, DARKEST = 2, 16  # 5-bit levels: channels must shift alike; how far a shadow may darken
@@ -66,6 +75,88 @@ SPREAD, DARKEST = 2, 16  # 5-bit levels: channels must shift alike; how far a sh
 class Composed:
     pixels: np.ndarray  # OUTPUT_SCALE × screen, uint32 0xFFRRGGBB
     coverage: float
+
+
+@dataclass(frozen=True)
+class BackgroundJob:
+    generation: int
+    payload: tuple
+
+
+class PictureCache:
+    """Byte-bounded LRU with one loader and a single latest pending request (no unbounded thread/queue)."""
+
+    def __init__(self, telemetry, on_error, limit=PICTURE_BYTES, loader=None):
+        self.telemetry, self.on_error, self.limit = telemetry, on_error, limit
+        self.loader = loader or load_picture
+        self._items = OrderedDict()
+        self._condition = threading.Condition()
+        self._pending = self._active = None
+        self._failed = deque(maxlen=16)
+        self._closed = False
+        self._thread = None
+
+    @property
+    def size_bytes(self):
+        with self._condition:
+            return sum(item.nbytes for item in self._items.values())
+
+    def request(self, key, path, width, height, scale):
+        with self._condition:
+            cached = self._items.get(key)
+            if cached is not None:
+                self._items.move_to_end(key)
+                self.telemetry.count("picture.cache_hit")
+                return cached
+            if self._closed or key in self._failed:
+                return None
+            if width * height * TILE * TILE * scale * scale * 4 > self.limit:
+                self._failed.append(key)
+                self.on_error("HD picture exceeds the decoded background cache limit; using native graphics.")
+                return None
+            if self._active != key and (self._pending is None or self._pending[0] != key):
+                self.telemetry.count("picture.cache_miss")
+                self._pending = key, path, width, height, scale
+                if self._thread is None:
+                    self._thread = threading.Thread(target=self._run, name="hd-picture-loader", daemon=True)
+                    self._thread.start()
+                self._condition.notify()
+            return None
+
+    def _run(self):
+        while True:
+            with self._condition:
+                while self._pending is None and not self._closed:
+                    self._condition.wait()
+                if self._closed:
+                    return
+                key, path, width, height, scale = self._pending
+                self._pending, self._active = None, key
+            try:
+                with self.telemetry.measure("picture.load_resample"):
+                    picture = self.loader(path, width, height, scale)
+                with self._condition:
+                    if not self._closed:
+                        self._items[key] = picture
+                        while sum(item.nbytes for item in self._items.values()) > self.limit:
+                            self._items.popitem(last=False)
+                            self.telemetry.count("picture.cache_eviction")
+            except Exception as exc:  # whatever a picture does, the only loader must survive for the next map
+                with self._condition:
+                    self._failed.append(key)
+                self.on_error(f"HD picture {Path(path).name} could not be loaded: {exc}")
+            finally:
+                with self._condition:
+                    self._active = None
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._pending = None
+            self._items.clear()
+            self._condition.notify()
+        if self._thread is not None:
+            self._thread.join(2)  # an in-progress Pillow call cannot be forcibly terminated
 
 
 def rgb5(palette: bytes) -> np.ndarray:
@@ -88,6 +179,8 @@ def channel_tables(base: np.ndarray, target: np.ndarray) -> np.ndarray | None:
 def load_picture(path: Path, width_tiles: int, height_tiles: int, scale: int = OUTPUT_SCALE) -> np.ndarray:
     """The whole map as uint32 0xFFRRGGBB at `scale` × native size."""
     with Image.open(path) as opened:
+        if opened.width * opened.height > 32 * 1024 * 1024:
+            raise ValueError("source picture exceeds the 32-megapixel preview limit")
         picture = opened.convert("RGB").resize((width_tiles * TILE * scale, height_tiles * TILE * scale),
                                                Image.Resampling.LANCZOS)
     rgb = np.asarray(picture, np.uint32)
@@ -315,11 +408,15 @@ class MapBackground:
 
     def refresh(self, force: bool = False, vram: bytes | None = None) -> bool:
         """Keep the indices current; False when no usable map is in RAM. `vram` is a 1024 × 512 × 2 byte copy."""
+        in_battle = self.read(ram_offset(GAME_STATE), 1)[0] in (1, 2, 3)
+        screen = self.read(ram_offset(CURRENT_SCREEN), 1)[0]
+        # Battle initialization can overwrite the map's dimensions/table as well as its tile bytes.
+        # Retain the last complete snapshot, but do not use it for a different map.
+        if in_battle and self.key is not None and self.indices is not None and screen == self.key[0]:
+            return True
         key = self._map_key()
         if key is None:
-            self.key = None
             return False
-        in_battle = struct.unpack("<h", self.read(ram_offset(GAME_STATE), 2))[0] != 0
         if key == self.key and not force and (in_battle or not self.from_vram):
             return True
         if in_battle and vram is None:
@@ -466,6 +563,34 @@ def read_foreground(read, vram: bytes, indices: np.ndarray, valid: np.ndarray, p
     return result
 
 
+def wide_anchor(camera: int, extent: int, screen: int) -> int:
+    """camera_engine.c's fixed_anchor at the ×2 frame: the screen point the view shrinks towards."""
+    rest = ONE - WIDE_SCALE
+    shift = (screen >> 1) * rest
+    low = screen * ONE - (extent - camera) * WIDE_SCALE
+    high = camera * WIDE_SCALE
+    if extent * WIDE_SCALE < screen * ONE:
+        return screen >> 1
+    return int(min(max(shift, low), high) / rest)
+
+
+def wide_camera(camera: int, extent: int, screen: int) -> int:
+    """Where the ×2 frame starts, in half-size map texels. A tile at map x is drawn at anchor + floor((x - camera -
+    anchor) / 2), and tiles start on even x."""
+    anchor = wide_anchor(camera, extent, screen)
+    return -(anchor + (-camera - anchor) // 2)
+
+
+def wide_view(camera_x: int, camera_y: int, width: int, height: int, factor: int) -> ScreenView:
+    """The screen over a half-size map. Tiles are stored and drawn at 64 texels, so no line is squeezed."""
+    rows = np.arange(SCREEN_H * factor) // factor + camera_y
+    columns = np.repeat(np.arange(SCREEN_W) + camera_x, factor)
+    inside_y = (rows >= 0) & (rows < height)
+    inside_x = (columns >= 0) & (columns < width)
+    rows = np.where(inside_y, rows, 0)
+    return ScreenView(factor, rows, rows, rows, np.where(inside_x, columns, 0), inside_y, inside_x)
+
+
 def picture_window(picture: np.ndarray, camera_x: int, camera_y: int, scale: int = OUTPUT_SCALE) -> np.ndarray:
     """The screen's part of a whole-map picture; outside the picture is black (always kept out by `valid`)."""
     height, width = picture.shape
@@ -482,12 +607,21 @@ def picture_window(picture: np.ndarray, camera_x: int, camera_y: int, scale: int
 class BackgroundLayer:
     """Prepared on the emulator thread (it reads RAM), composed anywhere. `pictures(map_index)` gives a path or None."""
 
-    def __init__(self, read, serialize, pictures, scale: int = OUTPUT_SCALE, on_error=None):
-        self.read, self.serialize, self.pictures, self.scale = read, serialize, pictures, scale
+    def __init__(self, read, serialize, pictures, scale: int = OUTPUT_SCALE, on_error=None, telemetry=None):
+        self.telemetry = telemetry or Telemetry()
+        def timed_read(offset, size):
+            with self.telemetry.measure("background.ram_read"):
+                return read(offset, size)
+        self.read, self.serialize, self.pictures, self.scale = timed_read, serialize, pictures, scale
         self.on_error = on_error or (lambda text: None)
-        self.background = MapBackground(read)
+        self.picture_cache = PictureCache(self.telemetry, self.on_error)
+        self.background = MapBackground(self.read)
         self._picture = None
         self._picture_key = None
+        self._picture_path = None
+        self._cache_key = None
+        self._known_pictures = OrderedDict()  # up to 64 previously observed map layouts; no dimensions guessed
+        self._next_maps = OrderedDict()
         self._palette = None
         self._tables = None
         self._foreground = None
@@ -499,45 +633,102 @@ class BackgroundLayer:
         self._frames = 0
         self._low_coverage = False
         self._cameras: list[tuple[int, int]] = []
+        self._wide_cameras: list[tuple[int, int]] = []
         self.coverage = 0.0
+        self.generation = 0
+        self._scene = None
+        self.wide = False  # the ×2 camera frame is on
+        self._base = None
+        self._own_picture = self._own_indices = None
 
     def reset(self):
         """Forget what was seen in RAM (after loading a state or resetting)."""
+        self.generation += 1
+        self._scene = None
         self.background.key = None
         self.background.indices = None
         self._palette = None
         self._foreground = None
         self._foreground_key = None
         self._cameras = []
+        self._wide_cameras = []
+
+    def close(self):
+        self.picture_cache.close()
 
     def _ready_picture(self, index: int) -> bool:
         """True once this map's picture is loaded; resampling runs in the background so the game never waits."""
         key = (index, self.background.width, self.background.height)
+        # The ×2 frame fits twice the map in the same output, so it uses a picture of half the size.
+        scale = self.scale // 2 if self.wide else self.scale
+        if self.wide:
+            key += (scale,)
         if key != self._picture_key:
+            if self._picture_key is not None and self._picture_key[0] != index:
+                self._next_maps[self._picture_key[0]] = index
+                while len(self._next_maps) > 64:
+                    self._next_maps.popitem(last=False)
             self._picture_key = key
             self._picture = None
             self._tinted = {}
+            self._last_look = None
             path = self.pictures(index)
+            self._picture_path = path
+            self._cache_key = None
             if path:
-                threading.Thread(target=self._load_picture, args=(key, path), daemon=True).start()
+                try:
+                    stat = Path(path).stat()
+                except OSError as exc:
+                    self._picture_path = None
+                    self.on_error(f"HD picture unavailable; using native graphics: {exc}")
+                    return False
+                self._cache_key = (*key, scale, str(path), stat.st_mtime_ns, stat.st_size)
+                self._known_pictures[index] = (self._cache_key, path, key[1], key[2], scale)
+                self._known_pictures.move_to_end(index)
+                while len(self._known_pictures) > 64:
+                    self._known_pictures.popitem(last=False)
+        if self.wide and self._picture_path is None:
+            self._picture = self._tiles_as_picture()
+        if self._picture is None and self._picture_path is not None:
+            self._picture = self.picture_cache.request(self._cache_key, self._picture_path, key[1], key[2], scale)
+        if self._picture is not None:
+            # Only revisit predictions with dimensions actually read from the game; a demand miss always wins.
+            following = self._known_pictures.get(self._next_maps.get(index))
+            if following is not None:
+                self.picture_cache.request(*following)
         return self._picture is not None
+
+    def _tiles_as_picture(self) -> np.ndarray:
+        """A map with no picture of its own: the game's full-size tiles, which video memory holds at half size at the
+        ×2 frame. Two output pixels per map texel, so the same as a loaded picture at that frame."""
+        indices = self.background.indices
+        if self._own_indices is not indices:
+            levels = self._base.astype(np.uint32)
+            colours = 0xFF000000 | (levels[:, 0] * 8) << 16 | (levels[:, 1] * 8) << 8 | levels[:, 2] * 8
+            self._own_picture = np.repeat(np.repeat(colours[indices], self.scale // 2, axis=0), self.scale // 2, axis=1)
+            self._own_indices = indices
+        return self._own_picture
 
     def _load_picture(self, key, path):
         try:
             picture = load_picture(path, key[1], key[2], self.scale)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, Image.DecompressionBombError, MemoryError) as exc:
             self.on_error(f"The HD background {Path(path).name} could not be loaded: {exc}")
             return
-        if key == self._picture_key:
+        if key == self._picture_key:  # synchronous diagnostic/test hook, not the runtime loader
             self._picture = picture
 
     def _read_vram(self) -> bytes:
-        state = self.serialize()
+        with self.telemetry.measure("background.serialize"):
+            state = self.serialize()
         at = state.find(GPURAM_FIELD)
         if at < 0:
             raise ValueError("This core's save state has no VRAM field.")
-        start = at + len(GPURAM_FIELD) + 4
-        return state[start:start + 1024 * 512 * 2]
+        with self.telemetry.measure("background.vram_read"):
+            start = at + len(GPURAM_FIELD) + 4
+            if start + 1024 * 512 * 2 > len(state):
+                raise ValueError("This core's save state has truncated VRAM.")
+            return state[start:start + 1024 * 512 * 2]
 
     def _set_palette(self, vram: bytes):
         start = PALETTE_ROW * 1024 * 2
@@ -546,9 +737,10 @@ class BackgroundLayer:
         self._palette = palette
         pointer = struct.unpack("<I", self.read(ram_offset(MAP_CLUTS), 4))[0]
         base = rgb5(self.read(ram_offset(pointer), 512)) if 0x80000000 <= pointer < ram_end() - 512 else palette
+        self._base = base
         self._tables = channel_tables(base, palette)
         self._palette_reads += 1
-        in_battle = struct.unpack("<h", self.read(ram_offset(GAME_STATE), 2))[0] != 0
+        in_battle = self.read(ram_offset(GAME_STATE), 1)[0] in (1, 2, 3)
         map_key = self.background.key
         if map_key != self._foreground_key:
             self._foreground_key = map_key
@@ -579,29 +771,96 @@ class BackgroundLayer:
         return best
 
     def prepare(self, frame: np.ndarray):
+        with self.telemetry.measure("background.prepare"):
+            return self._prepare(frame)
+
+    def observe_scene(self):
+        """Called even for repeated pictures, so old async results cannot cross a scene boundary."""
+        scene = (self.read(ram_offset(CURRENT_SCREEN), 1)[0], self.read(ram_offset(GAME_STATE), 1)[0],
+                 struct.unpack("<h", self.read(ram_offset(SCRIPT_MAP_CHANGE_STATE), 2))[0])
+        if scene != self._scene:
+            self.telemetry.event("scene", previous=self._scene, current=scene)
+            self.telemetry.count("scene.changes")
+            self.generation += 1
+            self._scene = scene
+
+    def _prepare(self, frame: np.ndarray):
         """What `compose` needs for this frame, or None when this map has no picture or the frame does not fit."""
+        self.observe_scene()
+        if self._scene[1] not in (0, 1, 2, 3) or self._scene[2]:
+            return None  # transition or an unestablished scene: native graphics only
         height, width = frame.shape
         factor = width // SCREEN_W
-        if width % SCREEN_W or height % SCREEN_H or factor != height // SCREEN_H or factor > self.scale:
+        if (not factor or width % SCREEN_W or height % SCREEN_H or factor != height // SCREEN_H
+                or factor > self.scale or self.scale % factor):
             return None  # another video mode (the game's title, some cutscenes)
         self._frames += 1
         before = self.background.key
+        vram = None
         loaded = self.background.refresh()
         if not loaded:
             if self.background._map_key() is None:
                 return None  # no map in RAM (the title screen, a map change)
-            if not self.background.refresh(vram=self._read_vram()):  # nothing cached in a battle: VRAM has the tiles
+            vram = self._read_vram()
+            if not self.background.refresh(vram=vram):  # nothing cached in a battle: VRAM has the tiles
                 return None
-        if self.background.key is None or not self._ready_picture(self.background.key[0]):
+        if before is not None and self.background.key != before:
+            self.generation += 1
+        if self.background.key is None:
+            return None
+        if self.wide and self._palette is None:
+            self._set_palette(vram if vram is not None else self._read_vram())  # the game's own tiles need its colours
+        if not self._ready_picture(self.background.key[0]):
             return None
         if (self.background.key is not before or self._palette is None or self._frames % PALETTE_FRAMES == 0):
-            self._set_palette(self._read_vram())
+            self._set_palette(vram if vram is not None else self._read_vram())
         if self._frames % RECHECK_FRAMES == 0:
             self.background.refresh(force=True)  # tiles may have finished loading, or a script changed them
+        if self.wide:
+            return self._prepare_wide(frame, factor)
         camera_x, camera_y = self._displayed_camera(frame, factor)
-        layers = MapLayers(self.background.indices, self.background.valid, self._foreground)
-        return (frame, self._palette, layers, self.background.view(camera_x, camera_y, factor),
-                (self._picture, self._tables, camera_x, camera_y))
+        layers = MapLayers(self.background.indices, self.background.valid, self._current_foreground())
+        return BackgroundJob(self.generation,
+                             (frame, self._palette, layers, self.background.view(camera_x, camera_y, factor),
+                              (self._picture, self._tables, camera_x, camera_y)))
+
+    def _current_foreground(self):
+        """The pieces are only read with the palette, a few frames apart, so just after a map change they're the last
+        map's, which may be narrower than this one."""
+        return self._foreground if self._foreground_key == self.background.key else None
+
+    def _prepare_wide(self, frame: np.ndarray, factor: int):
+        """At the ×2 frame the map is a half-size one (camera_engine.c samples tiles at every second texel, the odd
+        ones), and everything from here on works the same."""
+        indices, valid = self.background.indices[1::2, 1::2], self.background.valid[1::2, 1::2]
+        # A cut-out piece only belongs to the background of a picture that was painted with it.
+        foreground = self._current_foreground()
+        foreground = None if foreground is None or self._picture_path is None else foreground[1::2, 1::2]
+        camera_x, camera_y = struct.unpack("<hh", self.read(ram_offset(CAMERA), 4))
+        drawing = struct.unpack("<2i", self.read(ram_offset(DRAWING_OFFSET), 8))
+        drawn = struct.unpack("<2i", self.read(ram_offset(GPU_OFFSET), 8))
+        camera_x += drawing[0] - drawn[0]
+        camera_y += drawing[1] - drawn[1]
+        width, height = self.background.width * TILE, self.background.height * TILE
+        current = wide_camera(camera_x, width, SCREEN_W), wide_camera(camera_y, height, SCREEN_H)
+        if current not in self._wide_cameras:  # the frame may have been drawn with one just before
+            self._wide_cameras.insert(0, current)
+            del self._wide_cameras[CAMERA_HISTORY:]
+        step = 5
+        sample = frame_packed(frame[::step * factor, ::step * factor])
+        table = _packed(self._palette.astype(np.uint16))
+        best, best_score = current, -1
+        for camera in self._wide_cameras:
+            view = wide_view(*camera, indices.shape[1], indices.shape[0], 1)
+            grid = np.ix_(view.rows[::step], view.cols[::step])
+            shown = valid[grid] & view.inside_y[::step, None] & view.inside_x[None, ::step]
+            score = int(np.count_nonzero((sample == table[indices[grid]]) & shown))
+            if score > best_score:
+                best, best_score = camera, score
+        return BackgroundJob(self.generation,
+                             (frame, self._palette, MapLayers(indices, valid, foreground),
+                              wide_view(*best, indices.shape[1], indices.shape[0], factor),
+                              (self._picture, self._tables, *best)))
 
     def _look(self, picture, tables, shift) -> np.ndarray:
         """The whole map tinted for this time of day and fade. A look seen twice running is kept (about 60 ms to
@@ -609,12 +868,15 @@ class BackgroundLayer:
         if tables is None and not shift.any():
             return picture
         mapped = _shifted(tables, shift)
-        key = (mapped.tobytes(),)
+        key = (id(picture), mapped.tobytes())  # old in-flight jobs must not seed the new map's tint cache
         cached = self._tinted.get(key)
         if cached is not None:
             return cached
         if key == self._last_look:
-            if len(self._tinted) >= MAX_LOOKS:
+            if picture.nbytes > TINT_BYTES:
+                return None  # tint only the visible screen, not a second giant map
+            while self._tinted and (len(self._tinted) >= MAX_LOOKS
+                                   or sum(item.nbytes for item in self._tinted.values()) + picture.nbytes > TINT_BYTES):
                 self._tinted.pop(next(iter(self._tinted)))
             self._tinted[key] = cached = _tint(picture, mapped)
             return cached
@@ -622,7 +884,11 @@ class BackgroundLayer:
         return None
 
     def compose(self, job) -> Composed:
-        frame, palette, layers, view, (picture, tables, camera_x, camera_y) = job
+        with self.telemetry.measure("background.compose"):
+            return self._compose(job)
+
+    def _compose(self, job) -> Composed:
+        frame, palette, layers, view, (picture, tables, camera_x, camera_y) = job.payload
 
         def screen_picture(shift):
             look = self._look(picture, tables, shift)
@@ -643,18 +909,32 @@ class BackgroundLayer:
 class Compositor:
     """Composes on its own thread so the emulator keeps its pace; only the newest frame waits, older ones are dropped."""
 
-    def __init__(self, layer: BackgroundLayer, deliver, on_error):
+    def __init__(self, layer: BackgroundLayer, deliver, on_error, telemetry=None, paint=None):
+        """`paint` may take milliseconds and runs unlocked. `deliver` must be quick: it runs under the lock, so a
+        frame invalidated while it was being painted can't be delivered, and `submit` never waits for painting."""
         self.layer, self.deliver, self.on_error = layer, deliver, on_error
+        self.paint = paint or (lambda result: result)
+        self.telemetry = telemetry or Telemetry()
         self._wake = threading.Condition()
         self._job = None
         self._stop = False
+        self._epoch = 0
         self._thread = threading.Thread(target=self._run, name="hd-compositor", daemon=True)
         self._thread.start()
 
     def submit(self, job):
         with self._wake:
-            self._job = job
+            if self._job is not None:
+                self.telemetry.count("compositor.pending_replaced")
+            self._job = (self._epoch, time.monotonic_ns(), job)
             self._wake.notify()
+
+    def invalidate(self):
+        with self._wake:
+            self._epoch += 1
+            if self._job is not None:
+                self.telemetry.count("compositor.pending_invalidated")
+            self._job = None
 
     def _run(self):
         while True:
@@ -663,9 +943,17 @@ class Compositor:
                     self._wake.wait()
                 if self._stop:
                     return
-                job, self._job = self._job, None
+                (epoch, submitted, job), self._job = self._job, None
             try:
-                self.deliver(self.layer.compose(job))
+                self.telemetry.duration("compositor.queue_latency", time.monotonic_ns() - submitted)
+                result = self.paint(self.layer.compose(job))
+                with self._wake:
+                    current = not isinstance(job, BackgroundJob) or job.generation == self.layer.generation
+                    if not self._stop and epoch == self._epoch and current:
+                        self.deliver(result)
+                        self.telemetry.count("compositor.delivered")
+                    else:
+                        self.telemetry.count("compositor.stale_rejected")
             except Exception as exc:  # whatever went wrong, the game must keep showing frames
                 self.on_error(f"HD backgrounds turned off: {exc}")
                 return
@@ -675,6 +963,9 @@ class Compositor:
             self._stop = True
             self._wake.notify()
         self._thread.join(2)
+        close = getattr(self.layer, "close", None)
+        if close is not None:
+            close()
 
 
 class HdPictures:

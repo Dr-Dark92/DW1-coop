@@ -1,5 +1,85 @@
 # Handover
 
+## Current state (2026-11-05)
+
+Branch `python-player`. 412 tests pass:
+
+```bash
+QT_QPA_PLATFORM=offscreen PYTHONPATH=src /home/drdark/.venv/bin/python -m pytest -q
+```
+
+Use `PYTHONPATH=src`: the venv's editable install still points at an old copy in `/home/drdark/src`. To fix that, and get the `dw1-play` and `dw1-settings` launchers:
+
+```bash
+/home/drdark/.venv/bin/python -m pip install -e /home/drdark/dev/DW1-coop
+```
+
+Run the game with:
+
+```bash
+PYTHONPATH=src /home/drdark/.venv/bin/python -m dw1_workbench.play_app
+```
+
+**What's new, all in this push:**
+
+- ×2 camera frame, experimental, off by default in the code. The user's own `~/.dw1-coop/settings.ini` has it on. See [FIXED_FRAMING.md](FIXED_FRAMING.md), which also lists the known issues.
+- Resolution menu back with 4×, for quality. `saved_resolution` carries over the short-lived `play/fixed_x2` setting once.
+- LVL and NEXT on the Status screen (`status_panel.py`).
+- Codex's runtime stability work, [P0_RUNTIME.md](P0_RUNTIME.md), with five fixes after review: one read of `hd_layer` per frame, painting outside the compositor's lock (`Compositor(paint=)`), the 640 × 480 button leaving full screen properly, the picture loader surviving any error, and a pipe rather than a queue for avatars so a renderer's death can't hang the player.
+
+**How the user tests:** they play in the real window and make inspections with a note, in `~/.dw1-coop/play/06084490ea0db340/inspections`, with `launch.log` beside them. Each has `screen.png` and `inspection.json`, and `state.zz` loads through `InspectionStore.state`. `screen.png` is the plain frame before HD composition, so it looks softer than what they saw. Saves can stop matching a disc: use the disc in the latest `launch.log` entry.
+
+**Next, in order:**
+
+1. The menu staying up about a second after closing, and the floating Digimon. Both are in the known issues with their inspections.
+2. Try a group fight: the battle fix hasn't been seen with three or more enemies. The user was asked for an inspection just before one.
+3. The review's leftovers: the 32-megapixel limit in `load_picture` rejects an 8× upscale of the largest maps; scene state is read several times per frame; HD tests use `_load_picture` rather than the runtime `PictureCache`; the World zoom plumbing in `player.py` is unreachable.
+4. Then the earlier plan: shared story progress and items in co-op, item throwing, LAN, and importing Digimon from Digimon World 3.
+
+## Fixed 90% camera proof (2026-11-05, superseded by the ×2 frame above)
+
+Final suite **376 passed in 11.15 s**, including six new proof regressions; source compilation, generated MIPS instruction/hazard checks and `git diff --check` pass.
+
+Read [FIXED_FRAMING.md](FIXED_FRAMING.md) for exact evidence, commands, failed candidates and limitations. User authorized building the first small-framing proof against their inspection **check screen size 1** (`20261105-053603-355650`). Implemented `fixed_framing.py`, fixed-mode C projection/foreground entries and edge-clamped shared affine anchor; regenerated checked MIPS code. `tools/compare_framing.py` uses a disposable 8 MB core, source inspection/disc read-only, external captures. Legacy mode reproduced misplacement. Corrected mode keeps projection RAM native (1511), hooks rendering before models, scales GTE H to 1357 and compensates origin. Final standing capture visually aligns, exposes extra scenery and removes the edge strip. 37 shared complete game-clock ticks have identical player/partner/NPC world coordinates. Equal-vblank comparisons differ due one game-frame startup cost, preserved in report. HUD bar probe matches but clock-face probe doesn't; full HUD equality unverified. No normal-play option, no HD compositor integration, no proven scratch reservation, no walking/battle/transition acceptance. **WORLD_ZOOM_ENABLED stays False.**
+
+Latest comparison `/home/drdark/dev/DW1-coop-data/fixed-framing-clamped-2/`: `native-matched-clock.png`, `fixed90.png`, `report.json`. Prior baseline/failed candidates preserved outside Git. Tests cover render-only hooks, strict state fields, restoration/guards and independently checked actual C affine helper. Next: user visual review, then scratch ownership/moving-camera/HUD safety, HD integration and transition/battle gates. Preserve all preceding P0/display/checkbox changes; no commit/push.
+
+## Display framing and 640×480 view (2026-11-05)
+
+Final full synthetic suite: **370 passed in 10.02 s**, outside sandbox for Qt audio initialization. `git diff --check` passed.
+
+User screenshot showed 16:9 blurred-side fill and requested framing/size work. Measured installed Beetle core before/after loading the copied File City inspection: reports aspect **1.2190476655960083**, despite 640×480 frame pixels. `graphics.screen_rects` previously used that ratio even for the control named 4:3, explaining the narrower centre image. This is a display policy mismatch, not evidence that the core's pixel-aspect correction is invalid.
+
+Explicit **4:3** and the inner game in **16:9 fill** now use 4:3. Added **Core aspect** to retain the emulator-reported correction; intentional **16:9 stretch** unchanged. `PlayPanel` adds **640 × 480 game view**, available while playing: selects 4:3 and resizes the game's presentation area, accounting for window chrome. Refuses single-view sizing during split screen. **No additional world scenery or camera zoom is implemented**, and no game-coordinate/projection changes. World zoom stays disabled. Restart settings to access the new controls; current screen preference isn't changed behind the user's back.
+
+New tests: non-4:3 core aspect cannot override named 4:3/fill; Core aspect preserves it; real offscreen Qt layout has exact 640×480 viewport/target and no started core/camera; split sizing guarded. Added `--view-640 --capture` to `tools/profile_player.py`. Real-core offscreen run with copied File City inspection, 2×, four seconds, reports both view and game size 640×480. Inspected capture at `/home/drdark/dev/DW1-coop-data/p0-runtime/framing-640/view-95870102968806.png`; telemetry alongside. Proprietary capture outside Git, normal saves untouched. Desktop user confirmation pending. All prior P0/checkbox/concurrent test edits preserved. No commit/push.
+
+Next camera task remains distinct: reproduce prior small-zoom misalignment on copied states, establish safe memory/consistent background, foreground and character transforms before considering any fixed wider-world framing. Do not confuse this display-only sizing with that unfinished camera work.
+
+## Fixed ×2 checkbox, zoom slider removed (2026-11-05)
+
+**Superseded:** the user asked for 4× back, so the resolution menu (Native, 2x, 4x) is restored on `play/resolution`. `saved_resolution` carries over a `play/fixed_x2` choice once, then removes the key. The zoom slider stays removed.
+
+Validation: full synthetic suite **368 passed in 10.34 s**, including two new checkbox/persistence/legacy-migration tests; `git diff --check` passes. Restart DW1-settings to see the new control; resolution applies on the next game launch. No desktop visual acceptance claimed for the new checkbox yet.
+
+`play_panel.py`: removed the World zoom slider/status/connection. Replaced the resolution dropdown with **Fixed ×2 rendering (640 × 480)**, using `play/fixed_x2`. On selects core `2x`, off selects `1x(native)`; next launch only, including DW1-play's shared launch path. Existing native preference defaults off; previous 2×/4× defaults on without overwriting the legacy resolution key. Smooth colours/PGXP remain independent. No zoom patch re-enabled, camera/framing/positions unchanged. This does **not** implement the wider scenery discussed with the user; the label/tooltip explicitly distinguish rendering from camera zoom. Existing experimental camera code retained, no new in-game camera code. Tests: `tests/test_fixed_x2.py` covers options, persistence, legacy settings and slider absence. All prior P0 changes and the concurrent save-note test edit preserved; no commit/push.
+
+## P0 runtime stability (2026-11-05, Codex, Linux)
+
+Read [P0_RUNTIME.md](P0_RUNTIME.md) first for exact evidence, baseline/current timings, private report paths, commands and pending acceptance matrix. Starting HEAD remains `f51a7c56fa0d53dd78a64c0893bb9ed2e487709d` on `python-player`; no commit, push, merge or change to `main`.
+
+Implemented bounded opt-in telemetry, same-map environment snapshot retention across battle-clobbered metadata, correct byte-width GAME_STATE reads, transition-native fallback, generation-tagged asynchronous jobs with stale-result rejection, 128 MiB picture LRU/one latest-only loader/known-layout successor preload, 64 MiB tint budget, same-call VRAM serialization reuse and bounds checking, and one low-priority avatar rendering subprocess with cancellation/cleanup. World zoom stays **off**. Core integration, gameplay/progression/battle rules and save formats are preserved.
+
+External data: `/home/drdark/dev/DW1-coop-data/p0-runtime/` contains matched native/2×/4× File City measurements, battle replay reports, final post-battle native/HD PNGs, avatar contention comparisons and real Qt smoke reports. No proprietary data was added to Git. Old scripts in `DW1-coop-data/dev-tools` have hard-coded obsolete disc/settings paths: inspect before use. Use the new tracked `tools/profile_runtime.py` and `tools/profile_player.py` with explicit arguments and temporary save stores instead.
+
+Measured: no material steady-state compositor speedup (about 7/11/13 ms medians at native/2×/4×). Isolating avatars reduced core p95 from 3.872 to 2.249 ms in the matched cold-avatar test; one sample pair, not a universal FPS guarantee. One real battle replay returned to exploration with a visible, aligned HD environment; 11 native-frame hashes match baseline. Offscreen Qt tests exercise real worker/compositor, HD toggling, cold avatar generation, disposable slot-9 save/load and clean shutdown. Desktop/vsync/audio, natural rapid zone round trips, consecutive win/defeat fights and split-screen remain pending. Do not mark P0 complete.
+
+A separate edit to `tests/test_player.py` appeared during this run (save-note test updated to shared settings instead of removed UI). Preserved, not reverted or claimed as this batch's implementation. Keep all current uncommitted changes. Final suite results are recorded in P0_RUNTIME.md/PROGRESS.md.
+
+Final validation: **366 tests passed in 10.45 s**; full suite outside sandbox for Qt audio. `git diff --check` and `compileall` passed. Original BIN SHA-256 unchanged. Both 2× and 4× offscreen real Qt smoke completed; see the detailed report for actual timing/RSS and limitations.
+
+Next task: instrument **natural** A → B → A exits on a copied store and the correct patched disc at 2×/4×, verify picture cache reuse and transition screenshot pairs; then consecutive battles, defeat/recovery and split-screen. No user originals may be overwritten. Do not re-enable zoom or publish without authorization.
+
 ## Characters, title screens and shared data (2026-11-04, Claude, Windows 11, branch `python-player`)
 
 User asked for: a playable Tai, full detail instead of a reduced model, 2 re-rendered zone bundles imported, frame rate input, title screen editing at full quality, a smaller game window, no resume on exit, and the two ways of starting the app made the same.

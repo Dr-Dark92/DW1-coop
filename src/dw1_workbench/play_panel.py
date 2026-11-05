@@ -11,12 +11,12 @@ from pathlib import Path
 from PySide6.QtCore import QLockFile, QObject, QSize, Qt, QThread, QUrl, Signal, Slot
 from PIL import Image
 from PySide6.QtGui import QDesktopServices, QIcon, QImage, QPixmap
-from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QGroupBox, QSlider, QScrollArea, QTabWidget, QCheckBox, QSpinBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QGroupBox, QScrollArea, QTabWidget, QCheckBox, QSpinBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
 from .errors import Cancelled, DiscFormatError
-from .graphics import DEFAULT_RESOLUTION, RESOLUTIONS, core_options
+from .graphics import DEFAULT_RESOLUTION, NATIVE_RESOLUTION, RESOLUTIONS, core_options
 from .inspection import InspectionStore, SpawnLog
 from .libretro import LibretroError, core_info
 from .maps import trigger_description
@@ -27,10 +27,23 @@ from .tamer_skin import load_characters
 from .tim import decode_tim
 from .title_screens import SHOWN_ROWS, TITLE_SCREENS, TitleStore, disc_titles, encode_title, shown_part
 from .graphics import SCREENS
-from .player import DEFAULT_KEYS, KEY_HELP, SPLIT_KEYS, WORLD_ZOOM_ENABLED, PlayConfig, PlayWindow
+from .player import DEFAULT_KEYS, KEY_HELP, SPLIT_KEYS, PlayConfig, PlayWindow
 from .quicksave import RESUME_SLOT, SLOT_COUNT, QuickSaveStore
 
 ASK_CHARACTER, DEFAULT_CHARACTER = "ask", "default"
+
+
+def saved_resolution(settings) -> str:
+    """The menu's choice. A checkbox (`play/fixed_x2`) replaced it for a while: honour what was ticked, once."""
+    resolution = settings.value("play/resolution", DEFAULT_RESOLUTION)
+    if settings.contains("play/fixed_x2"):
+        if not settings.value("play/fixed_x2", type=bool):
+            resolution = NATIVE_RESOLUTION
+        elif resolution == NATIVE_RESOLUTION:
+            resolution = DEFAULT_RESOLUTION
+        settings.setValue("play/resolution", resolution)
+        settings.remove("play/fixed_x2")
+    return resolution
 CHARACTER_PICTURE = 240
 TITLE_PREVIEW = 160, 120
 LIBRARY_SUFFIX = ".dll" if sys.platform == "win32" else ".dylib" if sys.platform == "darwin" else ".so"
@@ -260,10 +273,18 @@ class PlayPanel(QWidget):
         form = group("Graphics")
         picture = QHBoxLayout()
         self.resolution = QComboBox(); self.resolution.addItems(RESOLUTIONS)
-        self.resolution.setCurrentText(self.settings.value("play/resolution", DEFAULT_RESOLUTION))
-        self.resolution.setToolTip("Draws the 3D characters, HUD and menus at a higher resolution. Backgrounds are "
-                                   "pre-rendered pictures and keep their original detail. 4x can drop frames.")
+        self.resolution.setCurrentText(saved_resolution(self.settings))
+        self.resolution.setToolTip("Draws the 3D characters, HUD and menus at a higher resolution; applies next launch. "
+                                   "Keeps the original camera view and HUD proportions. Backgrounds are pre-rendered "
+                                   "pictures and keep their original detail. 4x can drop frames.")
         self.resolution.currentTextChanged.connect(lambda value: self.settings.setValue("play/resolution", value))
+        self.double_frame = QCheckBox("×2 camera frame (experimental)")
+        self.double_frame.setToolTip("Shows twice the world across and down while walking around, with smaller characters; "
+                                     "the resolution menu sets how sharp it is. Battles, map changes and maps too small "
+                                     "to fill the frame use the normal camera. Needs the 8 MB "
+                                     "core. Applies next launch. Save often: this is still being tested.")
+        self.double_frame.setChecked(self.settings.value("play/double_frame", False, type=bool))
+        self.double_frame.toggled.connect(lambda value: self.settings.setValue("play/double_frame", value))
         self.smooth_colours = QCheckBox("Smooth colours (no dithering)")
         self.smooth_colours.setToolTip("Turns off the PlayStation's dithering, the fine grain pattern on shading.")
         self.smooth_colours.setChecked(self.settings.value("play/smooth_colours", True, type=bool))
@@ -282,7 +303,7 @@ class PlayPanel(QWidget):
                                   "next time a game starts.")
         self.framerate.valueChanged.connect(lambda value: self.settings.setValue("play/framerate", value))
         form.addRow("Frame rate", self.framerate)
-        for widget in (self.resolution, self.smooth_colours, self.steady_3d):
+        for widget in (self.resolution, self.double_frame, self.smooth_colours, self.steady_3d):
             picture.addWidget(widget)
         picture.addStretch(1)
         form.addRow("Picture", picture)
@@ -491,30 +512,29 @@ class PlayPanel(QWidget):
         self.hud = check("Map and HP/MP", "Show the map and your partner's HP and MP on the game screen, with the game's own status bars",
                          "play/hud", "_set_hud")
         self.screen = QComboBox(); self.screen.addItems(SCREENS)
-        self.screen.setToolTip("4:3: the original shape. 16:9 fill: the original shape in a 16:9 screen, with a blurred copy "
-                               "of the picture at the sides. 16:9 stretch: the picture stretched to 16:9 (wider characters).")
+        self.screen.setToolTip("4:3: explicit 4:3 framing. 16:9 fill: a 4:3 game with blurred side panels (no extra scenery). "
+                               "16:9 stretch: stretches the entire picture. Core aspect: use the emulator's reported "
+                               "pixel-aspect correction, which may be narrower than 4:3.")
         self.screen.setCurrentText(self.settings.value("play/screen", SCREENS[0]))
         self.screen.currentTextChanged.connect(lambda value: self._game_setting("play/screen", value, "_set_screen"))
         form.addRow("Screen", self.screen)
-        zoom = QHBoxLayout()
-        self.camera_zoom = QSlider(Qt.Orientation.Horizontal); self.camera_zoom.setRange(50, 100); self.camera_zoom.setValue(100)
-        self.camera_zoom.setFixedWidth(160); self.camera_zoom.setEnabled(WORLD_ZOOM_ENABLED)
-        self.camera_zoom.setToolTip("World zoom (USA): shows more of the map around the screen centre. The HUD stays native; past "
-                                    "a map's edge the view is black." if WORLD_ZOOM_ENABLED else
-                                    "World zoom is switched off for now: it crashed the game and misplaced characters.")
-        self.camera_zoom.valueChanged.connect(self._set_camera_zoom)
-        self.camera_zoom_status = QLabel("100%")
-        zoom.addWidget(self.camera_zoom); zoom.addWidget(self.camera_zoom_status); zoom.addStretch(1)
-        form.addRow("World zoom", zoom)
+        self.game_view_size = QPushButton("640 × 480 game view")
+        self.game_view_size.setToolTip("Resize the running game's display area and select 4:3. Does not zoom the camera "
+                                      "or change game positions. Stop split screen first.")
+        self.game_view_size.clicked.connect(self._size_game_view)
+        form.addRow("View size", self.game_view_size)
+
+    def _size_game_view(self):
+        if self.window is not None and self.window.set_game_view_size():
+            self.screen.setCurrentText("4:3")
 
     def _game_setting(self, key, value, setter):
         self.settings.setValue(key, value)
         if self.window is not None:
             getattr(self.window, setter)(value)
 
-    def _set_camera_zoom(self, value):
-        if self.window is not None:
-            self.window.worker.set_camera_scale(value * 256 // 100)
+    def _picture_options(self):
+        return core_options(self.resolution.currentText(), self.smooth_colours.isChecked(), self.steady_3d.isChecked())
 
     def _add_quick_saves(self, form):
         """Which slot the game window's Save and Load use. F6 and F7 in the game change it too."""
@@ -561,6 +581,7 @@ class PlayPanel(QWidget):
         window = self.window
         self.game_pause.setEnabled(window is not None)
         self.game_reset.setEnabled(window is not None)
+        self.game_view_size.setEnabled(window is not None)
         self.game_dex.setEnabled(window is not None and window.dex_action.isEnabled())
         if window is None:
             self.game_pause.setChecked(False)
@@ -684,8 +705,7 @@ class PlayPanel(QWidget):
                             keep_tamer=not self.characters,
                             coop_species=self.coop_species.currentData() if self.coop.isChecked() else None,
                             coop_level=self.coop_level.value(),
-                            options=core_options(self.resolution.currentText(), self.smooth_colours.isChecked(),
-                                                 self.steady_3d.isChecked()))
+                            double_frame=self.double_frame.isChecked(), options=self._picture_options())
         start = (f" from slot {slot}" if slot is not None else
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
         self._write_log(f"Launching {config.disc_path.name}{start}"
@@ -705,7 +725,6 @@ class PlayPanel(QWidget):
         window.inspections_changed.connect(self.refresh_inspections)
         window.closed.connect(self._window_closed)
         window.quick_save_changed.connect(self._sync_quick_save)
-        window.zoom_reported.connect(self.camera_zoom_status.setText)
         window.pause.toggled.connect(self.game_pause.setChecked)
         self.window = window
         self._update_game_controls()

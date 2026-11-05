@@ -1,5 +1,7 @@
 # DW1 rework roadmap and repository review
 
+Current state and next steps: [HANDOVER.md](HANDOVER.md). The ×2 camera frame: [FIXED_FRAMING.md](FIXED_FRAMING.md).
+
 Updated: 2026-11-03 (Asia/Muscat).
 Historical baseline: reviewed main at `d028ce2c7477d29c53ef8f06f2189ff659094bac` — "WIP add static Agumon model preview".
 

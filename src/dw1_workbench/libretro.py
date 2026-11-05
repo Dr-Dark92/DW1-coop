@@ -14,6 +14,8 @@ from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_double, c
 from dataclasses import dataclass
 from pathlib import Path
 
+from .telemetry import Telemetry
+
 API_VERSION = 1
 
 # retro_pixel_format
@@ -173,7 +175,8 @@ class LibretroCore:
     """One running core and game. Every method must be called from the thread that called start()."""
 
     def __init__(self, core_path: Path, system_dir: Path, save_dir: Path,
-                 options: dict[str, str] | None = None, log=None):
+                 options: dict[str, str] | None = None, log=None, telemetry=None):
+        self.telemetry = telemetry or Telemetry()
         self.core_path, self.system_dir, self.save_dir = Path(core_path), Path(system_dir), Path(save_dir)
         self._log = log or (lambda message: None)
         self._overrides = dict(options or {})
@@ -269,14 +272,19 @@ class LibretroCore:
 
     def run_frame(self) -> tuple[Frame | None, bytes]:
         """Run one frame; returns the new frame (None when the core repeated the last one) and its audio."""
-        self._frame, self._audio = None, bytearray()
-        self._lib.retro_run()
-        return self._frame, bytes(self._audio)
+        with self.telemetry.measure("core.run_frame"):
+            self._frame, self._audio = None, bytearray()
+            self._lib.retro_run()
+            return self._frame, bytes(self._audio)
 
     def reset(self):
         self._lib.retro_reset()
 
     def serialize(self) -> bytes:
+        with self.telemetry.measure("core.serialize"):
+            return self._serialize()
+
+    def _serialize(self) -> bytes:
         size = self._lib.retro_serialize_size()
         if not size:
             raise LibretroError("This core does not support quick saves.")
@@ -309,6 +317,12 @@ class LibretroCore:
         return self._lib.retro_get_memory_size(MEMORY_SYSTEM_RAM)
 
     def read_memory(self, offset: int, size: int, kind: int = MEMORY_SYSTEM_RAM) -> bytes:
+        if self.telemetry.enabled:
+            with self.telemetry.measure("core.read_memory"):
+                return self._read_memory(offset, size, kind)
+        return self._read_memory(offset, size, kind)
+
+    def _read_memory(self, offset: int, size: int, kind: int = MEMORY_SYSTEM_RAM) -> bytes:
         """A copy of `size` bytes of the core's memory region (main RAM by default)."""
         pointer, total = self._lib.retro_get_memory_data(kind), self._lib.retro_get_memory_size(kind)
         if not pointer or offset < 0 or size < 0 or offset + size > total:

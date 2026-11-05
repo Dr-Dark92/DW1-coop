@@ -1,5 +1,9 @@
 # Format support and evidence
 
+×2 camera frame (2026-11-05): [FIXED_FRAMING.md](FIXED_FRAMING.md) has its hooks, addresses and evidence.
+
+Status screen (USA): `UI_BOX_DATA` `0x8013D390`, 36 bytes each, frame at +16, state at +18, render function at +32; box 1 with `renderDigimonMenu` `0x800B93D4`, frame 5, state 1 is the open Digimon menu. `MENU_STATE` `0x80134D34` is 1 once drawn, `DIGIMON_MENU_STATE` `0x80134D36` is 0 on the Status tab. The game's digits are 8 × 12 cells of 4-bit texels at VRAM (704, 496), 0 to 9 side by side. The labels AGE and WEIGHT are baked into the menu art.
+
 Support labels mean:
 
 - **Confirmed**: implemented with structural validation and synthetic tests.
@@ -284,6 +288,8 @@ Reading rejects duplicates, more than 180 packages, members other than `bundle.j
 Real USA disc (2026-11-03): Rookie bundle 28 packaged and 11 skipped (1.2 MB, 1.3 s); all stages 144 packaged and 24 skipped (6.4 MB, 6.5 s); both re-imported with no changes. An In-Training bundle with Koromon's member replaced by the in-game-verified inverted palette imported only that change, and the resulting `ALLTIM.TIM` equals the one played in game.
 
 ### HD background layer (USA, in the player)
+
+Runtime safeguards added 2026-11-05: USA `GAME_STATE` is an **int8** at `0x80134F0A` (`tamer.c:startBattle`, `btl.c:loadBattleData`: states 1/3/2); `SCRIPT_MAP_CHANGE_STATE` is int16 at `0x80134DDE` (`map.c:scriptTickChangeMap`). These are evidenced runtime fields, not new asset formats. The layer retains an established same-map environment across battle initialization, falls back to native during flagged transitions/unknown scenes, and rejects asynchronous results from superseded generations. Pictures/tints/load queues are bounded and avatar rendering isolated; details, measurements and unverified scenarios are in [P0_RUNTIME.md](P0_RUNTIME.md). Historical timings below are not a new P0 acceptance claim.
 
 Why not 16-bit in the game: a 16-bit tile keeps the same 128×128 detail, its 4×3 ring needs 512×384 of VRAM where 256×384 plus a 64×256 gap are free, a 35-tile map needs 1.12 MB of the 2 MB of RAM, and a TFS twice the size no longer fits its sectors. `hd_background.py` works on finished frames instead and patches nothing.
 

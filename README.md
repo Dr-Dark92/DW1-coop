@@ -4,7 +4,7 @@ A read-only desktop workbench for importing a user-owned Digimon World 1 disc im
 
 This is an asset-analysis foundation with a Play tab that runs your own disc through a libretro PlayStation core you install yourself. It is **not** co-op gameplay, a native port, or a universal asset decoder. No game image, BIOS, emulator core, or proprietary game data is included or downloaded.
 
-Camera zoom status: **switched off.** The USA World zoom worked in offscreen tests, but in desktop play it crashed the game and misplaced the player and NPCs, so the slider is disabled (`WORLD_ZOOM_ENABLED` in `player.py`) and nothing patches the running game. The tile engine and notes are kept for later work (see docs/FORMATS.md).
+Camera: an experimental [×2 camera frame](docs/FIXED_FRAMING.md), off by default, shows twice the world while walking. It's separate from the resolution menu, which sets quality. The older adjustable World zoom crashed the game on the desktop and stays off.
 
 ## Current scope
 
@@ -23,7 +23,7 @@ Camera zoom status: **switched off.** The USA World zoom worked in offscreen tes
 - Maps and Zones browser: the USA map table (244 named maps grouped into 65 area-name zones), TFS background preview with every palette and PNG + provenance export, and decoded scene data — camera, lights, spawn points, outbound and inbound warps (followable between maps, with exit direction), Digimon placements with stats, sprite objects, and the 100×100 tile-trigger grid — plus a zone relation map laid out by exit direction. All 241 file-backed maps match an independent converter; script-driven transitions are not decoded.
 - Thread-safe import cancellation and streamed hashing/file export; partial exports are removed.
 - Animations tab: every Digimon with a model, searchable and filterable by evolution stage (from the game's own level byte) and partner range, with a per-clip table (clip names from the game code's own use of each animation ID, technique names for attack clips) and a player using the game's own frame-by-frame stepping (loops, root motion, texture copies); all 4,843 clips of the 178 USA models match an independent converter. Models with unsupported geometry list their clips without a preview.
-- Play tab: runs the imported disc through a user-supplied libretro PlayStation core (Beetle PSX recommended) loaded in-process from Python, on Linux and Windows. Video, audio, keyboard input, pause, reset, fast-forward, full screen, nine quick-save slots with screenshots and notes (F5/F8), an automatic Resume slot on close, launch straight into a slot, a persistent memory card, and a launch log. The World zoom control is present but disabled (it crashed the game in desktop play). For the USA release it reads the current map, player, partner and NPC positions and the live tile grid from console RAM, shows them in the status bar and a live map, and records zone inspections (F9) with screenshot, position and save state. The disc is only read; saves live in `~/.dw1-coop`.
+- Play tab: runs the imported disc through a user-supplied libretro PlayStation core (Beetle PSX recommended) loaded in-process from Python, on Linux and Windows. Video, audio, keyboard input, pause/reset/full screen, quick saves, persistent memory card and launch log. The World zoom slider is removed and its patch remains disabled; the fixed ×2 checkbox selects rendering resolution only. For the USA release it reads live map/entity positions and records zone inspections (F9). The disc is only read; saves live in `~/.dw1-coop`.
 - Zone pathing and export: a Pathing view per map (walkable areas by the game's collision rule, routes from each arrival point to each exit and toilet, a route planner across maps over walk-through exits), **Export zone or bundle…**, which writes one zone or a bundle of zones as a `.dw1zone` package (original MAP/TFS files with hashes, decoded scene data, rendered backgrounds and grids, pathing, map-to-map routes, links in and out; no play-time observations), and **Import zone or bundle…**, which checks a package against this disc and stores changed MAP/TFS files as project overrides. To change a background, edit `background-palette0.png` in the package (any size with the same shape): import scales it to the PS1's resolution, fits it to 256 colours, re-tints the other time-of-day palettes and repaints the foreground layer (bushes and branches drawn in front of characters) from the same picture where those pieces are cut-outs of the background; animated pieces, light and mist effects, snow particles and separate foreground art keep their original look, and the import notes list what was kept. Hand-edited MAP/TFS files need no manifest update. **Play with imported resources** in the Play tab builds a patched copy of the disc (with regenerated sector error-correction codes) and plays it; the original image is never modified, and files must fit their original sectors.
 - Honest unsupported states for GLB/glTF export, sound playback, general archives, map scripts, and 3D map geometry.
 
@@ -85,6 +85,8 @@ A character is a folder in your project's `overrides/characters`, holding a mode
 
 ## The game window
 
+For explicit **640×480 display framing**, start the game, then choose **Settings > Game screen > 640 × 480 game view**. This selects 4:3 and sizes the game area, not the surrounding toolbar/status bar. It does not expose more scenery or change character positions. **Core aspect** preserves the emulator's reported pixel-aspect correction (about 1.219 on the tested Beetle core); named **4:3** uses 4:3, and **16:9 fill** places that 4:3 view between blurred side panels. Stop split screen before selecting a single-game size.
+
 The game's window has **Save**, **Load** and **Full screen**. Everything else is in the Play tab's **Settings**: **Game screen** (Smooth, HD backgrounds, Map and HP/MP, Screen shape), **Quick saves** (the slot Save and Load use, and a note for the next save) and **During a game** (Pause, Reset, Digi-Dex). Changes reach an open game straight away. In the game's window, P pauses, Ctrl+R resets, F4 opens the Digi-Dex and F6/F7 change the slot; F1 lists every key.
 
 ## Frame rate
@@ -103,13 +105,30 @@ The emulator draws on one processor core, however many you have, so resolution s
 
 ## HD backgrounds (full-size zone pictures)
 
+Runtime stability diagnostics: set `DW1_COOP_TELEMETRY` to an external report directory to collect bounded timings and counters, written on clean shutdown. Reports contain no game memory or pictures. HD composition rejects stale scene jobs; background pictures use a bounded cache, and Digi-Dex avatar rendering runs in an isolated process. See [P0 runtime evidence and test limits](docs/P0_RUNTIME.md) for exact diagnostic commands, measurements and outstanding gameplay checks. These changes do not establish that every reported FPS drop or graphical glitch is fixed; world zoom remains disabled.
+
 In **Maps and Zones**, select a map and choose **Set HD picture…**, then pick your upscaled or repainted picture (the whole map, lined up with its background). Importing a zone package with an edited `background-palette0.png` also keeps that picture at full size. Play as usual: the game window's **HD backgrounds** box turns the layer on and off while playing, and maps without a picture look as they always did.
 
 The player compares every finished frame with the game's own background and replaces only the pixels that are background, so characters, the HUD and menus stay the game's, while shadows, fades and the time of day carry over to your picture. The picture isn't converted to 8-bit, shrunk or written to the disc, and it applies only in this player. Animated foreground pieces, effects, art that isn't part of the background, and semi-transparent menu boxes stay at the game's resolution. See `docs/FORMATS.md` for details and measurements.
 
+## ×2 camera frame (experimental)
+
+Tick **×2 camera frame (experimental)** under Play > Settings > Graphics, then start the game. It needs the [8 MB core](docs/FORMATS.md) and the USA game. While you walk around you see twice the world across and down, and characters are half the size. Quality is separate, so 4× with ×2 gives you more world and a sharp picture.
+
+- Fights use the normal camera, and only Digimon that view can show join in. ×2 returns a frame after.
+- Maps too small to fill the frame use the normal camera, and say so in the log.
+- A map's HD picture still works. A map without one is drawn from the game's own full-size tiles, while **HD backgrounds** is on.
+- Save often, and leave it off for split screen, which is untested. Saves made with it still load with it off.
+
+[FIXED_FRAMING.md](docs/FIXED_FRAMING.md) has how it works, what's been tested and the known issues.
+
 ## Map and HP/MP on the game screen
 
 While you play, the top right of the game screen shows the map: the walkable floor, exits in gold, you in white, your partner in cyan, and other Digimon in red (they chase you), yellow (they watch you) or orange (they ignore you). Your partner's HP and MP sit directly above the game's happiness and discipline bars, in the same bar style with current/maximum values. They slide in and out with the game's own status bars, so they hide in battles, menus and text scenes. The **Map and HP/MP** box under **Settings > Game screen** turns them off. F10 still opens the larger Live map panel beside the game for inspection work; it starts closed.
+
+## Runtime diagnostics
+
+Set `DW1_COOP_TELEMETRY` to a folder outside the checkout and the game writes a timing report there when it closes. It holds timings and counters, and no RAM, images or save data. [P0_RUNTIME.md](docs/P0_RUNTIME.md) has the details and the profiling tools.
 
 ## Co-op battle test (prototype)
 
@@ -120,6 +139,8 @@ In the Play tab, tick **Co-op battle test**, choose player 2's Digimon and start
 **Split screen** is option 10 in the game menu (S). Player 2 chooses a save, which can't be the one player 1 is playing from, and their game starts beside yours. Player 2's keys: **I/J/K/L** D-pad, **U** Cross, **O** Circle, **Y** Square, **H** Triangle, **N** Start, **M** Select, **7/8** L/R. The same option stops it. Player 2 plays a copy of that save in the `player2` folder inside the save folder, so your saves aren't changed. When both games are on the same map, each shows the other player's Tamer and Digimon walking there. It's hidden during your own scripts and battles. The console's 2 MB is nearly full, so on the standard core a Digimon that doesn't fit on a map won't appear: you get a message and the game carries on. An Agumon fits on the maps tried, but a Greymon doesn't. The extended core below fixes this. When either player meets an enemy on a shared map, that game runs the fight with the other player's real Digimon as the ally. The other game pauses and both halves of the screen show the fight. The player whose game runs it uses their own controls; the other moves along the ally's commands with their Left and Right, confirms with Cross, and fires the finisher with Square (player 1: arrow keys, Z, A; player 2: J, L, U, Y). Both get the EXP and Bits, and the enemy goes in both Digi-Dexes. While split screen is on, the **Co-op battle test** setting isn't used. On a shared map the enemies are shared too: one beaten in either game is gone from both, and player 2's enemies stand where player 1's do. Player 2's game takes player 1's clock. Story progress and inventory are still separate, and player 2's game is silent, so a fight player 2 starts has no sound. Option 11, **LAN Co-op**, is a placeholder.
 
 ## Game rules (levels, EXP, no aging or death)
+
+The game's Status screen shows **LVL** and **NEXT**, the EXP left to the next level, beside Weight, in the screen's own style (`status_panel.py`).
 
 In the Play tab, tick **Game rules (P6)** (USA release only) before **Play**. Your partner then:
 
@@ -174,7 +195,7 @@ The evolution Tree now follows the original chart layout: focused Digimon portra
 
 **Digi-Dex avatars:** unlocked entries show each Digimon’s textured model, rendered like the Characters and Digimon tab, in the in-game Dex list, on its pages and in the F4 window. Locked entries show **?**. Avatars are rendered in the background from the disc being played (discovered Digimon first) and cached as PNGs in the player store’s `avatars` folder; the first run takes about a minute, later runs load the cache. 29 of 179 models use geometry the model parser does not yet support and show no avatar.
 
-**Graphics:** the Play tab's **Graphics** row sets the picture before **Play**: resolution (Native, **2x** recommended, 4x leaves little spare time per frame), **Smooth colours** (turns off the PlayStation's dithering grain, on by default) and **Steady 3D** (PGXP: less wobbly polygons and warped textures, off by default). Higher resolution sharpens the 3D characters, HUD and menus; the backgrounds are pre-rendered pictures and keep their original detail. Under **Game screen**, **Screen** picks 4:3, **16:9 fill** (the original shape with a blurred copy of the picture at the sides) or **16:9 stretch**, and **Smooth** blends pixels when the picture is enlarged; both apply at once and are remembered. True 16:9 needs wider backgrounds: the core's widescreen hack only widens the 3D, so it stretches the backgrounds and misplaces characters, and is not offered. Frame pacing now uses a high-resolution timer, which removed the uneven 31 ms / 2 ms frames behind the occasional stutter.
+**Graphics:** the Play tab's **Graphics** row sets the picture before **Play**: the resolution (**Native**, **2x**, the default, or **4x**, which may stutter), **×2 camera frame** (experimental, off by default), **Smooth colours** (dithering off) and **Steady 3D** (PGXP, off by default). These apply next launch. The resolution sets how sharp the picture is; the ×2 frame shows twice the world across and down while walking, with smaller characters. It needs the 8 MB core, and battles, map changes and maps too small to fill the frame use the normal camera. While it's on, a map's HD picture is used as usual, and a map without one is drawn from the game's full-size tiles, as video memory only holds them at half size. Turning **HD backgrounds** off shows those half-size tiles. With game rules on, the game's Status screen also shows **LVL** and **NEXT** (EXP to the next level) beside Weight. Under **Game screen**, **Screen** picks 4:3, **16:9 fill** (the original shape with blurred side panels) or **16:9 stretch**; **Smooth** blends enlarged pixels. These display controls apply immediately. The older adjustable World zoom prototype stays disabled.
 
 **Regeneration and training EXP (P6):** out of battle your partner regains 1% of its max HP and MP every second of game time (about 100 s from empty to full); it does not run in battle or revive a fainted partner. Each finished gym training session gives +5 EXP on top of its normal stat gains (a status message shows it).
 

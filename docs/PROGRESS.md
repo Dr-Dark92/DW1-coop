@@ -1,5 +1,21 @@
 # Milestone progress
 
+2026-11-05 ×2 camera frame: **experimental player option, off by default.** Twice the world while walking, with battles, map changes and saves on the game's own camera, HD pictures or the game's full-size tiles for the background, and the battle's Digimon limited to the native view. Played on the desktop for over an hour without a crash. Two marks are open. Details and limits: [FIXED_FRAMING.md](FIXED_FRAMING.md). LVL and NEXT added to the Status screen. 412 tests pass.
+
+2026-11-05 fixed camera, before the ×2 option above: **isolated standing proof only**, at 230/256 scale and 640×480. Old misplacement reproduced; new render-only projection hook, GTE-origin compensation and shared edge clamp produce a visually aligned Native Forest candidate. 37 shared complete game-clock ticks retain identical world positions. Full HUD masks, HD matching, safe scratch ownership and playable walking/battle/transition tests remain gates; normal zoom stays disabled. See [FIXED_FRAMING.md](FIXED_FRAMING.md). This is not a released gameplay toggle.
+
+2026-11-05 framing: named 4:3/fill now use actual 4:3 instead of Beetle's reported ~1.219 ratio; added Core aspect alternative and a 640×480 game-view sizing button. Exact viewport verified with Qt and a copied-state real-core capture (external `p0-runtime/framing-640/`). Display-only: no extra scenery, world-coordinate changes or camera patch. Desktop confirmation and true wider-world framing remain pending.
+
+2026-11-05 UI follow-up: removed World zoom slider. A fixed ×2 checkbox briefly replaced the resolution menu; the menu (Native, 2x, 4x) is back at the user's request. Original framing remains unchanged and zoom patch disabled; no wider-camera claim. Checkbox persistence/options/legacy defaults and slider removal are regression-tested.
+
+## P0 runtime stability — 2026-11-05 (partial)
+
+Implemented bounded telemetry, battle environment retention/byte-width state fix, explicit scene generations and stale compositor rejection, transition-native fallback, bounded picture/tint caches with one loader and known-layout successor preloading, one-serialization VRAM recovery, and isolated low-priority avatar rendering. World zoom remains disabled; gameplay/save formats unchanged. See [P0_RUNTIME.md](P0_RUNTIME.md) for per-stage p50/p95/p99, exact commands and evidence.
+
+Final automated suite: **366 passed** (18 new stability regression cases), plus `git diff --check` and compilation checks. Real Qt smoke at 2× and 4× completed with cold avatars, HD off/on, disposable save/load and clean shutdown. Source BIN SHA-256 still matches the recorded original. No commit/push.
+
+Real-core native/2×/4× standing comparisons show no material steady-state compositor speedup. Cold-avatar core p95 improved from 3.872 ms (previous mitigated thread) to 2.249 ms (process) in one matched pair. One battle replay returns to exploration with a visually inspected HD background; baseline/current native-frame hash samples match. Real offscreen Qt checks cover HD toggles, cold avatars, disposable quick-save/load and shutdown. The natural transition/consecutive battles/defeat/split-screen acceptance matrix is **not complete**; no claim that every reported glitch is resolved. All diagnostics and game-derived outputs stay outside Git in `DW1-coop-data/p0-runtime/`.
+
 ## Complete
 
 - PySide6 first-launch import/open-project experience.

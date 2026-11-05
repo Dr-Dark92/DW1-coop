@@ -6,10 +6,10 @@ through queued signals only; the GUI talks back through thread-safe attributes a
 from __future__ import annotations
 
 import hashlib
+import os
 import queue
 import struct
 import sys
-import struct
 import threading
 import time
 import traceback
@@ -27,16 +27,19 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QVBoxLayout, QWidget)
 
 from .camera import CameraZoom
+from .fixed_framing import FrameController
+from .status_panel import LevelBoxes, draw_level_boxes, read_digits, status_screen_open
 from .controls import load_controls, system_pads
 from .graphics import SCREENS, screen_rects
 from .inspection import CATEGORIES, InspectionError, InspectionStore, SpawnLog
 from .libretro import (BUTTON, PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888, Frame, LibretroCore,
                        LibretroError)
-from .live import LiveNpc, LiveState, RAM_SIZE, grid_differences, ram_offset, read_live_state, set_ram_size
+from .live import CURRENT_SCREEN, LiveNpc, LiveState, RAM_SIZE, grid_differences, ram_offset, read_live_state, set_ram_size
 from .maps import follow_kind, has_tracking_box, trigger_description, trigger_grid_image, tracking_box
 from .coop import CONFIRM, LEFT, MONEY, RIGHT, SQUARE, CoopBattle, LinkedPlayer, PlayerTwo
-from .hd_background import BackgroundLayer, Compositor, HdPictures
+from .hd_background import BackgroundLayer, Compositor, HdPictures, GAME_STATE, SCRIPT_MAP_CHANGE_STATE
 from .shared_data import app_settings
+from .telemetry import Telemetry
 from .title_hd import TitleLayer
 from .title_screens import TitleStore
 from .split_screen import SplitGame, choosable_saves, copy_save
@@ -45,7 +48,7 @@ from .extra_memory import extend_heap
 from .visitor import PARTNER, TAMER, Visitor, match_world, on_the_field, read_partner_stats, read_record, read_world
 from .hud_view import HudPainter, HudState, command_icons, draw_ally_panel, read_hud
 from .progression import BattleResult, GameRules, Progress
-from .avatars import load_avatars
+from .avatars import load_avatars_isolated
 from .evolution import EvolutionController, EvolutionHistory
 from .game_menu_view import evolution_menu_image, native_icons, native_portraits
 from .menu_audio import MenuAudio, tone_pcm
@@ -60,9 +63,10 @@ WORLD_ZOOM_ENABLED = False
 FAST_FORWARD = 4  # speed while fast-forward is held
 MOST_REPEATS = 15  # a still picture is still redrawn this often, for the map and bars over it
 EXTEND_HEAP_FRAMES = 30
+EXTENDED_RAM = 8 * 1024 * 1024
 MEMORY_CARD_FLUSH_FRAMES = 600  # write a changed memory card about every 10 s
-AVATAR_SWITCH_INTERVAL = 0.0002  # seconds; see EmulatorWorker._start_avatars
 PAD_POLL_MS = 8  # controllers, read on the GUI thread
+VIEW_SIZE_TRIES, VIEW_SIZE_RETRY_MS = 20, 50  # the 640 × 480 view button keeps trying for about a second
 LIVE_FRAMES = 10  # read the live map, positions and grid about six times a second
 IMAGE_FORMATS = {PIXEL_XRGB8888: QImage.Format.Format_RGB32, PIXEL_RGB565: QImage.Format.Format_RGB16,
                  PIXEL_0RGB1555: QImage.Format.Format_RGB555}
@@ -105,6 +109,7 @@ class PlayConfig:
     options: dict[str, str] = field(default_factory=dict)
     forms: dict[int, dict] = field(default_factory=dict)  # on the patched disc: imported Digimon, see EvolutionController
     offer_forms: bool = False  # the bank's egg list offers them
+    double_frame: bool = False  # experimental: the camera shows twice the world while walking; 8 MB core, live_ram
     character: Path | None = None  # the folder of who to play as (tamer_skin.py)
     keep_tamer: bool = True  # False: put the disc's own Tamer back if a save was made as someone else
     framerate: float = 0.0  # frames per second to run at; 0 is the core's own. The game's speed follows it.
@@ -178,6 +183,8 @@ class EmulatorWorker(QObject):
 
     def __init__(self, config: PlayConfig):
         super().__init__()
+        self._telemetry_dir = os.environ.get("DW1_COOP_TELEMETRY")
+        self.telemetry = Telemetry(bool(self._telemetry_dir))
         self.config = config
         self.store = QuickSaveStore(config.store_dir)
         self.hd_enabled = True
@@ -219,6 +226,9 @@ class EmulatorWorker(QObject):
         self.core: LibretroCore | None = None
         self._camera: CameraZoom | None = None
         self._camera_scale = 256
+        self._frame: FrameController | None = None
+        self._level_boxes: LevelBoxes | None = None
+        self._status_digits = None
         self._camera_notice_sent = False
         self._reported_zoom = None
         self.rules: GameRules | None = None
@@ -272,7 +282,7 @@ class EmulatorWorker(QObject):
         try:
             config.store_dir.mkdir(parents=True, exist_ok=True)
             self.core = LibretroCore(config.core_path, config.bios_dir, config.store_dir, config.options,
-                                     log=self.message.emit)
+                                     log=self.message.emit, telemetry=self.telemetry)
             self.core.start(config.disc_path)
         except (LibretroError, OSError) as exc:
             self.failed.emit(str(exc)); self.finished.emit()
@@ -306,12 +316,18 @@ class EmulatorWorker(QObject):
                     self.message.emit(f"Evolution history unavailable ({exc}); the chart shows every linked form")
             if config.live_ram and config.hd_pictures is not None:
                 self.hd_layer = BackgroundLayer(core.read_memory, core.serialize, HdPictures(config.hd_pictures).path,
-                                                on_error=self.message.emit)
-                self._compositor = Compositor(self.hd_layer, self._publish_composed, self._hd_failed)
+                                                on_error=self.message.emit, telemetry=self.telemetry)
+                self._compositor = Compositor(self.hd_layer, self._store_image, self._hd_failed, self.telemetry,
+                                              paint=self._paint_composed)
                 self._prepare_titles(core)
             set_ram_size(core.ram_size)
             if config.live_ram and core.ram_size > RAM_SIZE:
                 self.message.emit(f"Extended core: the game has {core.ram_size // (1024 * 1024)} MB of RAM")
+            if config.double_frame:
+                if config.live_ram and core.ram_size == EXTENDED_RAM:
+                    self._frame = FrameController(core, self.message.emit)
+                else:
+                    self.message.emit("The ×2 camera frame needs the 8 MB core and USA game: using the normal camera")
             if config.coop_species is not None and config.live_ram:
                 path = config.store_dir / "coop_player2.json"
                 self.coop = CoopBattle(core.read_memory, core.write_memory,
@@ -358,6 +374,7 @@ class EmulatorWorker(QObject):
         frames = 0
         deadline = time.perf_counter()
         while not self._stop.is_set() and not core.shutdown_requested:
+            frame_started = time.monotonic_ns()
             self._run_commands(core)
             if self.paused:
                 self._stop.wait(0.02); deadline = time.perf_counter()
@@ -378,6 +395,18 @@ class EmulatorWorker(QObject):
                     self.evolution = None
                     self.message.emit(f"Manual evolution turned off: {exc}")
             frame, audio = core.run_frame()
+            if self.telemetry.enabled and self.config.live_ram:
+                self.telemetry.observe_scene(core.read_memory(ram_offset(CURRENT_SCREEN), 1)[0],
+                                             core.read_memory(ram_offset(GAME_STATE), 1)[0],
+                                             struct.unpack("<h", core.read_memory(ram_offset(SCRIPT_MAP_CHANGE_STATE), 2))[0])
+            hd_layer = self.hd_layer  # one read: the compositor thread clears it when HD fails
+            if hd_layer is not None:
+                hd_layer.observe_scene()
+            presentation = (self.hd_enabled, self.hud_enabled, hd_layer.generation if hd_layer is not None else None)
+            if presentation != getattr(self, "_presentation_key", None):
+                self._invalidate_compositors()
+                self._previous_picture = None
+                self._presentation_key = presentation
             self._has_run_frame = True
             if self.tamer_skin is not None:
                 self.tamer_skin.tick()
@@ -388,6 +417,11 @@ class EmulatorWorker(QObject):
                 self._apply_visitors(core)
             if self.rules is not None:
                 self._apply_rules()
+            if self._frame is not None:
+                self._frame.tick()
+                hd_layer = self.hd_layer
+                if hd_layer is not None:
+                    hd_layer.wide = self._frame.active
             self._ensure_camera()
             if self._camera is not None:
                 self._camera.tick()
@@ -399,8 +433,10 @@ class EmulatorWorker(QObject):
             if self.config.live_ram and core.ram_size > RAM_SIZE and frames % EXTEND_HEAP_FRAMES == 0:
                 extend_heap(core.read_memory, core.write_memory, core.ram_size)
             if frame is not None and self._is_repeat(frame):
+                self.telemetry.count("frame.repeated")
                 frame = None  # the game draws about 20 pictures a second: the same picture needs no work again
             if frame is not None:
+                qt_started = time.monotonic_ns()
                 image = battle_result_image(frame_image(frame), self.rules.battle_result if self.rules else None)
                 menu = self.evolution.menu if self.evolution else None
                 if menu is not None and menu.layout == "grid" and not self._icons_attempted:
@@ -411,9 +447,11 @@ class EmulatorWorker(QObject):
                     self._portraits_attempted = True
                 image = evolution_menu_image(image, menu, self._menu_icons, self._portraits, self.avatars)
                 self._read_hud(core, menu)
+                self._read_level_boxes(core)
                 if not self._submit_hd(image):
                     self._publish(image)
                 self._last_image = image
+                self.telemetry.duration("qt.frame_preparation", time.monotonic_ns() - qt_started)
             fast = self.fast_forward
             own_rate = core.fps
             rate = self.config.framerate or own_rate
@@ -423,6 +461,12 @@ class EmulatorWorker(QObject):
                 self._flush_memory_card(core)
             if self.config.live_ram and frames % LIVE_FRAMES == 0:
                 self._read_live(core)
+            if frames % 120 == 0:
+                self.telemetry.memory()
+            elapsed = time.monotonic_ns() - frame_started
+            self.telemetry.duration("frame.work", elapsed)
+            if elapsed > 1e9 / rate:
+                self.telemetry.count("frame.over_budget")
             # core.fps is read every frame: cores may change timing (Beetle PSX settles on 59.826 fps after boot).
             deadline += 1.0 / (rate * (FAST_FORWARD if fast else 1))
             delay = deadline - time.perf_counter()
@@ -617,7 +661,8 @@ class EmulatorWorker(QObject):
         except (OSError, ValueError, DiscFormatError) as exc:
             self.message.emit(f"HD title screens not available: {exc}")
         if self.title_layer is not None:
-            self._title_compositor = Compositor(self.title_layer, self._publish_composed, self._titles_failed)
+            self._title_compositor = Compositor(self.title_layer, self._store_image, self._titles_failed, self.telemetry,
+                                                paint=self._paint_composed)
 
     def _titles_failed(self, text: str):
         self.title_layer = None
@@ -626,6 +671,7 @@ class EmulatorWorker(QObject):
     def _submit_hd(self, image: QImage) -> bool:
         """Send the frame to the HD compositor when it has a picture; False to show it as it is."""
         if not self.hd_enabled or (self.hd_layer is None and self.title_layer is None):
+            self._invalidate_compositors()
             return False
         if image.format() != QImage.Format.Format_RGB32:
             image = image.convertToFormat(QImage.Format.Format_RGB32)
@@ -634,39 +680,64 @@ class EmulatorWorker(QObject):
         if self.title_layer is not None:
             title = self.title_layer.prepare(pixels)
             if title is not None:
+                if self._compositor is not None:
+                    self._compositor.invalidate()
                 self._title_compositor.submit(title)
                 return True
-        if self.hd_layer is None or self._compositor is None:
+        hd_layer = self.hd_layer
+        if hd_layer is None or self._compositor is None:
+            self._invalidate_compositors()
             return False
         try:
-            job = self.hd_layer.prepare(pixels)
-        except (LibretroError, ValueError) as exc:
+            job = hd_layer.prepare(pixels)
+        except (LibretroError, OSError, ValueError) as exc:
             self.message.emit(f"HD backgrounds turned off: {exc}")
+            self._invalidate_compositors()
             self.hd_layer = None
             return False
         if job is None:
+            self._invalidate_compositors()
             return False
+        if self._title_compositor is not None:
+            self._title_compositor.invalidate()
         self._compositor.submit(job)
         return True
+
+    def _invalidate_compositors(self):
+        for compositor in (self._compositor, self._title_compositor):
+            if compositor is not None:
+                compositor.invalidate()
 
     def _hd_failed(self, text: str):
         """From the compositor thread: show plain frames from now on rather than a frozen picture."""
         self.hd_layer = None
         self.message.emit(text)
 
-    def _publish_composed(self, composed):
+    def _paint_composed(self, composed) -> QImage:
         pixels = composed.pixels
         image = QImage(pixels.data, pixels.shape[1], pixels.shape[0], pixels.shape[1] * 4, QImage.Format.Format_RGB32)
         image.pixels = pixels  # the QImage does not own the array's memory
-        self._publish(image)
+        return self._paint_overlays(image)
 
     def _forget_hd_ram(self):
-        if self.hd_layer is not None:
-            self.hd_layer.reset()
+        self.telemetry.discontinuity("load/reset")
+        self._invalidate_compositors()
+        hd_layer = self.hd_layer
+        if hd_layer is not None:
+            hd_layer.reset()
         if self.coop is not None:
             self.coop.reset()
         for visitor in self.visitors:
             visitor.reset()
+
+    def _read_level_boxes(self, core: LibretroCore):
+        if self.rules is None or not self.config.live_ram or not status_screen_open(core.read_memory):
+            self._level_boxes = None
+            return
+        if self._status_digits is None:
+            self._status_digits = read_digits(core.serialize())
+        done, need = self.rules.progress.into_level
+        self._level_boxes = None if self._status_digits is None else LevelBoxes(self.rules.progress.level, need - done if need else None)
 
     def _read_hud(self, core: LibretroCore, menu):
         """What the on-screen map and bars show for this frame; nothing over the workbench's own game menus.
@@ -687,6 +758,9 @@ class EmulatorWorker(QObject):
             self._hud = None
 
     def _publish(self, image: QImage):
+        self._store_image(self._paint_overlays(image))
+
+    def _paint_overlays(self, image: QImage) -> QImage:
         hud = self._hud
         if hud is not None and self._hud_painter is not None:
             # Quick saves and inspections keep the plain frame: draw on a copy unless this is a composed picture.
@@ -699,7 +773,19 @@ class EmulatorWorker(QObject):
                 image = image.convertToFormat(QImage.Format.Format_RGB32).copy()
             self._coop_frames += 1
             draw_ally_panel(image, panel, self._coop_icons, self._hud_painter, self._coop_frames % 16 < 8)
+        boxes = self._level_boxes
+        if boxes is not None:
+            if not hasattr(image, "pixels") and hud is None and panel is None:
+                image = image.convertToFormat(QImage.Format.Format_RGB32).copy()
+            draw_level_boxes(image, boxes, self._status_digits)
+        return image
+
+    def _store_image(self, image: QImage):
+        self.telemetry.count("qt.frames_published")
         with self._image_lock:
+            if self._image_pending:
+                self.telemetry.count("qt.pending_replaced")
+            self._published_at = time.monotonic_ns()
             self._image, notify = image, not self._image_pending
             self._image_pending = True
         if notify:  # at most one queued notification; the GUI always takes the newest frame
@@ -771,6 +857,8 @@ class EmulatorWorker(QObject):
         info = self.store.info(slot)
         core.unserialize(self.store.load(slot, core=core.info.name))
         self._camera = None
+        if self._frame is not None:
+            self._frame.forget()
         if self.dex is not None:
             self.dex.reset_runtime()
         if self.evolution is not None:
@@ -799,6 +887,8 @@ class EmulatorWorker(QObject):
             raise InspectionError(f"That inspection was saved by {record.core}, not {self.core.info.name}.")
         self.core.unserialize(store.state(inspection_id))
         self._camera = None
+        if self._frame is not None:
+            self._frame.forget()
         if self.dex is not None:
             self.dex.reset_runtime()
         if self.evolution is not None:
@@ -824,6 +914,8 @@ class EmulatorWorker(QObject):
                 self._camera_notice_sent = True
 
     def _restore_camera(self):
+        if self._frame is not None:
+            self._frame.suspend(for_save=True)
         if self._camera is not None:
             self._camera.uninstall()
             self._camera = None
@@ -890,10 +982,17 @@ class EmulatorWorker(QObject):
         if self._avatar_thread is not None:
             self._avatar_thread.join(5)
         core.stop()
+        if self._telemetry_dir:
+            try:
+                self.telemetry.memory()
+                path = self.telemetry.write(self._telemetry_dir)
+                self.message.emit(f"Runtime telemetry: {path}")
+            except OSError as exc:
+                self.message.emit(f"Runtime telemetry could not be saved: {exc}")
         self.message.emit("Game closed")
 
     def _start_avatars(self):
-        """Render Digi-Dex avatars on their own thread: discovered Digimon first, then the rest."""
+        """Supervise an isolated renderer; discovered Digimon first. No GIL contention with rendering."""
         discovered = [int(kind) for kind in self.dex.entries]
         order = list(dict.fromkeys(discovered + list(range(1, 180))))
 
@@ -901,19 +1000,17 @@ class EmulatorWorker(QObject):
             self.avatars = {**self.avatars, kind: image}  # GUI (F4) and core threads read the reference
 
         def run():
-            # Rendering is pure Python and holds the GIL: at the default 5 ms hand-over the game fell to about 9 fps
-            # on Windows while a store's cache was built. A shorter hand-over lets the game's thread keep its pace.
-            interval = sys.getswitchinterval()
-            sys.setswitchinterval(AVATAR_SWITCH_INTERVAL)
             try:
-                load_avatars(self.config.disc_path, self.config.store_dir / "avatars", order, publish,
-                             self._stop.is_set)
+                self.telemetry.event("avatars.started")
+                with self.telemetry.measure("avatars.batch"):
+                    load_avatars_isolated(self.config.disc_path, self.config.store_dir / "avatars", order, publish,
+                                          self._stop.is_set, telemetry=self.telemetry)
             except (OSError, KeyError, DiscFormatError) as exc:
                 self.message.emit(f"Digi-Dex avatars unavailable: {exc}")
             except Exception as exc:  # never take the game down for a picture
                 self.message.emit(f"Digi-Dex avatars stopped: {exc}")
             finally:
-                sys.setswitchinterval(interval)
+                self.telemetry.event("avatars.stopped")
 
         self._avatar_thread = threading.Thread(target=run, name="dex-avatars", daemon=True)
         self._avatar_thread.start()
@@ -961,6 +1058,7 @@ class FrameView(QWidget):
         self.aspect = 4 / 3
         self.smooth = False
         self.screen = SCREENS[0]
+        self.telemetry = Telemetry()
         self.text = "Starting…"
         self._keys = key_handler
 
@@ -968,6 +1066,10 @@ class FrameView(QWidget):
         return QRectF(*screen_rects(self.width(), self.height(), self.aspect, self.screen)[1])
 
     def paintEvent(self, _event):
+        with self.telemetry.measure("qt.paint"):
+            self._paint(_event)
+
+    def _paint(self, _event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("black"))
         if self.second is not None and self.image is not None:
@@ -1165,6 +1267,7 @@ class PlayWindow(QMainWindow):
         self.thread = QThread(self)
         self._dex_snapshot = {"entries": {}, "catalog": []}
         self.worker = EmulatorWorker(config)
+        self.view.telemetry = self.worker.telemetry
         self.worker.hd_enabled = self._hd_on
         self.worker.hud_enabled = self._hud_on
         self.worker.dex_map_names = dict(self.map_names)
@@ -1510,6 +1613,27 @@ class PlayWindow(QMainWindow):
         app_settings().setValue("play/screen", screen)
         self.view.screen = screen; self.view.update(); self.view.setFocus()
 
+    def set_game_view_size(self, width=640, height=480):
+        """Resize the presentation area only; never alter projection, world coordinates or emulated RAM."""
+        if self.view.second is not None:
+            self._message("Stop split screen before choosing a single-game view size.")
+            return False
+        if self.isFullScreen() or self.isMaximized():
+            self.full.setChecked(False)
+            self.showNormal()
+        self._set_screen("4:3")
+        self._fit_view(width, height, VIEW_SIZE_TRIES)
+        return True
+
+    def _fit_view(self, width: int, height: int, tries: int):
+        """Leaving full screen finishes later on some window systems, and can restore the old size over ours."""
+        leaving = self.isFullScreen() or self.isMaximized()
+        if not leaving:
+            self.layout().activate()
+            self.resize(self.width() + width - self.view.width(), self.height() + height - self.view.height())
+        if tries and (leaving or (self.view.width(), self.view.height()) != (width, height)):
+            QTimer.singleShot(VIEW_SIZE_RETRY_MS, self, lambda: self._fit_view(width, height, tries - 1))
+
     def _show_help(self):
         QMessageBox.information(self, "Controls", KEY_HELP.replace("  •  ", "\n"))
 
@@ -1517,6 +1641,9 @@ class PlayWindow(QMainWindow):
     def _show_frame(self):
         image = self.worker.take_frame()
         if image is not None:
+            published = getattr(self.worker, "_published_at", None)
+            if published is not None:
+                self.worker.telemetry.duration("qt.delivery_latency", time.monotonic_ns() - published)
             self.view.image = image; self.view.update()
 
     @Slot(bytes)
