@@ -82,12 +82,13 @@ def ring_layout(scale: int) -> tuple[int, list[int], list[int]]:
 
     The view shows 320/s × 240/s background pixels, so up to ceil(that / 128) + 1 tiles each way. Tiles are
     stored T × T (T ≈ 128·s, the size they are drawn at) in the native ring area, 8-bit, and may not cross a
-    256-row texture page; T is the largest even size for which enough slots fit."""
+    256-row texture page. The bottom texture coordinate must also fit in a byte,
+    so a slot ending at the first page boundary would stretch a clipped tile."""
     need_columns = -(-320 * ONE // (scale * 128)) + 1
     need_rows = -(-240 * ONE // (scale * 128)) + 1
     for tile in range(min(128, 128 * scale // ONE) & ~1, 31, -2):
         columns = min(8, RING_WIDTH // (tile // 2))
-        rows = [y for y in range(0, PAGE_HEIGHT - tile + 1, tile)]
+        rows = [y for y in range(0, PAGE_HEIGHT - tile, tile)]
         rows += [y for y in range(PAGE_HEIGHT, RING_HEIGHT - tile + 1, tile)]
         if columns >= need_columns and len(rows) >= need_rows:
             return tile, [RING_X + column * (tile // 2) for column in range(columns)], rows[:8]

@@ -44,6 +44,7 @@ DRAWING_OFFSET = 0x80134EC0  # i32 x, y: where the camera has just moved the dra
 GPU_OFFSET = 0x80134EDC  # i32 x, y: the offset the GPU applies this frame, from before the camera moved
 MAP_TILE_X, MAP_TILE_Y = 0x80134DC2, 0x80134DC4  # i8: the top-left tile of the 4 × 3 ring
 GAME_STATE = 0x80134F0A  # int8: battle entry/loading/active = 1/3/2, exploration = 0 (tamer.c, btl.c)
+PARTNER_STATE = 0x80134C5B
 SCRIPT_MAP_CHANGE_STATE = 0x80134DDE  # int16, scriptTickChangeMap: 1 from fade-out until changeMap finishes
 MAP_INSTANCES = MAP_TILE_DATA + 35 * 20  # LocalMapObjectInstance[188]
 MAP_OBJECT_COUNT = 0x80134D1C  # MAP_OBJECT_INSTANCE_COUNT
@@ -776,19 +777,27 @@ class BackgroundLayer:
 
     def observe_scene(self):
         """Called even for repeated pictures, so old async results cannot cross a scene boundary."""
+        evolving = self.read(ram_offset(PARTNER_STATE), 1) == b"\x0d"
         scene = (self.read(ram_offset(CURRENT_SCREEN), 1)[0], self.read(ram_offset(GAME_STATE), 1)[0],
-                 struct.unpack("<h", self.read(ram_offset(SCRIPT_MAP_CHANGE_STATE), 2))[0])
+                 struct.unpack("<h", self.read(ram_offset(SCRIPT_MAP_CHANGE_STATE), 2))[0], evolving)
         if scene != self._scene:
+            if self._scene is not None and self._scene[3] and not evolving:
+                self._palette = None  # The cutscene replaced the map CLUTs.
+                self._cameras.clear()
             self.telemetry.event("scene", previous=self._scene, current=scene)
             self.telemetry.count("scene.changes")
             self.generation += 1
             self._scene = scene
 
+    @property
+    def native_scene(self) -> bool:
+        return self._scene is not None and (self._scene[1] != 0 or bool(self._scene[2]) or self._scene[3])
+
     def _prepare(self, frame: np.ndarray):
         """What `compose` needs for this frame, or None when this map has no picture or the frame does not fit."""
         self.observe_scene()
-        if self._scene[1] != 0 or self._scene[2]:
-            # The native renderer retains the battle backdrop while battle loading reuses map tile RAM.
+        if self.native_scene:
+            # Battles and evolution temporarily take ownership of the map's graphics.
             return None
         height, width = frame.shape
         factor = width // SCREEN_W

@@ -113,6 +113,7 @@ class PlayConfig:
     character: Path | None = None  # the folder of who to play as (tamer_skin.py)
     keep_tamer: bool = True  # False: put the disc's own Tamer back if a save was made as someone else
     framerate: float = 0.0  # frames per second to run at; 0 is the core's own. The game's speed follows it.
+    comparison_disc: Path | None = None  # original disc for the second, read-only presentation session
 
 
 def stretched_audio(audio: bytes, speed: float) -> bytes:
@@ -128,8 +129,12 @@ def stretched_audio(audio: bytes, speed: float) -> bytes:
     return mixed.astype("<i2").tobytes()
 
 
-def frame_image(frame: Frame) -> QImage:
-    return QImage(frame.data, frame.width, frame.height, frame.pitch, IMAGE_FORMATS[frame.pixel_format]).copy()
+def frame_image(frame: Frame, *, writable: bool = True) -> QImage:
+    image = QImage(frame.data, frame.width, frame.height, frame.pitch, IMAGE_FORMATS[frame.pixel_format])
+    if writable:
+        return image.copy()
+    image.frame_data = frame.data  # Keep the core's copied bytes alive through presentation.
+    return image
 
 
 def battle_result_image(image: QImage, result: BattleResult | None) -> QImage:
@@ -394,6 +399,8 @@ class EmulatorWorker(QObject):
                     self.evolution.restore()
                     self.evolution = None
                     self.message.emit(f"Manual evolution turned off: {exc}")
+            if self._frame is not None:
+                self._frame.before_frame()
             wide_before_frame = self._frame is not None and self._frame.active
             frame, audio = core.run_frame()
             if self.telemetry.enabled and self.config.live_ram:
@@ -443,8 +450,9 @@ class EmulatorWorker(QObject):
                 frame = None  # the game draws about 20 pictures a second: the same picture needs no work again
             if frame is not None:
                 qt_started = time.monotonic_ns()
-                image = battle_result_image(frame_image(frame), self.rules.battle_result if self.rules else None)
                 menu = self.evolution.menu if self.evolution else None
+                result = self.rules.battle_result if self.rules else None
+                image = battle_result_image(frame_image(frame, writable=result is not None or menu is not None), result)
                 if menu is not None and menu.layout == "grid" and not self._icons_attempted:
                     self._menu_icons = native_icons(core)
                     self._icons_attempted = True
@@ -676,21 +684,23 @@ class EmulatorWorker(QObject):
 
     def _submit_hd(self, image: QImage) -> bool:
         """Send the frame to the HD compositor when it has a picture; False to show it as it is."""
-        if not self.hd_enabled or (self.hd_layer is None and self.title_layer is None):
+        hd_layer = self.hd_layer
+        title_layer = self.title_layer
+        if (not self.hd_enabled or (hd_layer is None and title_layer is None)
+                or (hd_layer is not None and hd_layer.native_scene)):
             self._invalidate_compositors()
             return False
         if image.format() != QImage.Format.Format_RGB32:
             image = image.convertToFormat(QImage.Format.Format_RGB32)
         pixels = np.frombuffer(image.constBits(), np.uint32).reshape(image.height(), image.bytesPerLine() // 4)
         pixels = pixels[:, :image.width()] & 0xFFFFFF
-        if self.title_layer is not None:
-            title = self.title_layer.prepare(pixels)
+        if title_layer is not None:
+            title = title_layer.prepare(pixels)
             if title is not None:
                 if self._compositor is not None:
                     self._compositor.invalidate()
                 self._title_compositor.submit(title)
                 return True
-        hd_layer = self.hd_layer
         if hd_layer is None or self._compositor is None:
             self._invalidate_compositors()
             return False
@@ -1060,6 +1070,7 @@ class FrameView(QWidget):
         self.setMinimumSize(320, 240)
         self.image: QImage | None = None
         self.second: QImage | None = None  # player 2's game, in split screen
+        self.comparison = False
         self.shared = None  # in a shared fight, the player whose game is running it: both halves show that game
         self.aspect = 4 / 3
         self.smooth = False
@@ -1082,9 +1093,16 @@ class FrameView(QWidget):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.smooth)
             half = self.width() / 2
             pictures = {None: (self.image, self.second), 0: (self.image, self.image), 1: (self.second, self.second)}[self.shared]
-            for left, picture in ((0, pictures[0]), (half, pictures[1])):
+            for index, picture in enumerate(pictures):
+                left = index * half
                 x, y, w, h = screen_rects(half - 1, self.height(), self.aspect, SCREENS[0])[1]
+                if self.comparison:
+                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.smooth and index == 0)
                 painter.drawImage(QRectF(left + x, y, w, h), picture)
+                if self.comparison:
+                    painter.setPen(QColor("white"))
+                    painter.drawText(QRectF(left + 8, 4, half - 16, 22),
+                                     Qt.AlignmentFlag.AlignCenter, ("HD / Imported", "Original")[index])
             painter.fillRect(QRectF(half - 1, 0, 2, self.height()), QColor("#3080c0"))
         elif self.image is not None:
             area, game = (QRectF(*rect) for rect in screen_rects(self.width(), self.height(), self.aspect, self.screen))
@@ -1310,13 +1328,33 @@ class PlayWindow(QMainWindow):
 
     def start(self):
         self.show(); self.view.setFocus()
+        if self.config.comparison_disc is not None:
+            try:
+                self._split = SplitGame({
+                    "core": str(self.config.core_path), "bios": str(self.config.bios_dir),
+                    "disc": str(self.config.comparison_disc), "comparison": True,
+                    "slot": None, "live_ram": False, "game_rules": False,
+                    "options": {"beetle_psx_internal_resolution": "1x(native)",
+                                "beetle_psx_dither_mode": "1x(native)",
+                                "beetle_psx_pgxp_mode": "disabled"},
+                    "framerate": self.config.framerate,
+                })
+            except (OSError, ValueError) as exc:
+                self._message(f"Graphics comparison could not start: {exc}")
+            else:
+                self.view.comparison = True
+                self._split_timer.start(16)
+                self.live_dock.hide()
+                self.resize(max(self.width(), 1500), self.height())
         self.thread.start()
         self._pad_timer.start(PAD_POLL_MS)
 
     def _send_buttons(self):
         self.worker.buttons = self._held | self._pad_held[0]
         if self._split is not None:
-            self._split.set_buttons(self._split_held | self._pad_held[1])
+            buttons = (self.worker.buttons if self.config.comparison_disc is not None
+                       else self._split_held | self._pad_held[1])
+            self._split.set_buttons(buttons)
 
     def _poll_pads(self):
         """Controllers count only while a game window is in front, as the keyboard does."""
@@ -1392,7 +1430,8 @@ class PlayWindow(QMainWindow):
         self.view.smooth = settings.value("play/smooth", True, type=bool)
         self.view.screen = settings.value("play/screen", SCREENS[0])
         self._hd_on = (self.config.live_ram and self.config.hd_pictures is not None
-                       and settings.value("play/hd_backgrounds", True, type=bool))
+                       and (self.config.comparison_disc is not None
+                            or settings.value("play/hd_backgrounds", True, type=bool)))
         self._hud_on = self.config.live_ram and settings.value("play/hud", True, type=bool)
         inspect = QAction(self); inspect.setShortcut(QKeySequence("F9")); inspect.triggered.connect(self.worker_inspect)
         live_toggle = QAction(self); live_toggle.setShortcut(QKeySequence("F10"))
@@ -1436,7 +1475,7 @@ class PlayWindow(QMainWindow):
             return True
         if self._split is not None and self._split.link.host() is not None:
             return self._shared_fight_key(event, pressed)
-        if self._split is not None and event.key() in SPLIT_KEYS:
+        if self._split is not None and self.config.comparison_disc is None and event.key() in SPLIT_KEYS:
             bit = 1 << BUTTON[SPLIT_KEYS[event.key()]]
             self._split_held = self._split_held | bit if pressed else self._split_held & ~bit
             self._send_buttons()
@@ -1588,6 +1627,8 @@ class PlayWindow(QMainWindow):
 
     def _toggle_pause(self, paused: bool):
         self.worker.paused = paused
+        if self._split is not None and self.config.comparison_disc is not None:
+            self._split.set_paused(paused)
         self.view.text = "Paused" if paused else ""; self.view.update()
 
     def _reset(self):
@@ -1730,6 +1771,7 @@ class PlayWindow(QMainWindow):
 
     def _stop_split(self):
         self._split_timer.stop()
+        self.view.comparison = False
         self.worker.link = None
         if self._split is not None:
             split, self._split = self._split, None

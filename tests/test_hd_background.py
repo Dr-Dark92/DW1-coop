@@ -196,6 +196,21 @@ def test_battle_uses_native_background_and_hd_returns_in_the_field(game, tmp_pat
     assert not layer.background.from_vram
 
 
+def test_evolution_uses_native_background_until_the_partner_returns_to_exploration(game, tmp_path):
+    path = picture_file(tmp_path)
+    frame = game.frame()
+    layer = BackgroundLayer(game.read, game.serialize, lambda index: path)
+    layer.apply(frame)
+    layer._load_picture(layer._picture_key, path)
+    assert layer.apply(frame).coverage > 0.99
+    for phase in (0, 1, 2):
+        game.set(H.PARTNER_STATE, "<bb", 13, phase)
+        assert layer.apply(frame) is None
+    game.set(H.PARTNER_STATE, "<bb", 1, 0)
+    assert layer.apply(frame).coverage > 0.99
+    layer.close()
+
+
 def test_map_smaller_than_the_screen_is_padded(game, tmp_path):
     background = MapBackground(game.read)
     background.refresh()

@@ -11,6 +11,7 @@ from .camera import (CameraZoom, CALL_SITES, VIEWPORT_DISTANCE, jal, sync_instru
                      SET_POS_DATA_POLY_FT4, RENDER_MAP_LOOP, RENDER_MAP_LOOP_WORDS,
                      RENDER_MAP_AFTER_LOOP, NATIVE_UPLOADS, RA, j, jr, engine_params, ONE)
 from .camera_memory import CameraReservation, BUFFER, PARAMS, END, saved_hold
+from .evolution import PARTNER_STATE
 from . import fixed_engine_code as engine
 from .hd_background import GAME_STATE, SCRIPT_MAP_CHANGE_STATE, MAP_SIZE
 from .libretro import LibretroError
@@ -240,6 +241,11 @@ class FrameController:
     def _read(self, address, size):
         return self.core.read_memory(ram_offset(address), size)
 
+    def before_frame(self):
+        # The evolution overlay takes over the native map renderer and projection.
+        if self.proof.installed and self._read(PARTNER_STATE, 1) == b"\x0d":
+            self.suspend()
+
     def tick(self):
         if self.proof.installed:
             try:
@@ -247,7 +253,8 @@ class FrameController:
             except ValueError:
                 self.suspend()
             return
-        if any(self._read(GAME_STATE, 1)) or any(self._read(SCRIPT_MAP_CHANGE_STATE, 2)):
+        if (any(self._read(GAME_STATE, 1)) or any(self._read(SCRIPT_MAP_CHANGE_STATE, 2))
+                or self._read(PARTNER_STATE, 1) == b"\x0d"):
             self._calm = 0
             self._refused_on = None
             return

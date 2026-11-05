@@ -89,6 +89,8 @@ A character is a folder in your project's `overrides/characters`, holding a mode
 
 For explicit **640×480 display framing**, start the game, then choose **Settings > Game screen > 640 × 480 game view**. This selects 4:3 and sizes the game area, not the surrounding toolbar/status bar. It does not expose more scenery or change character positions. **Core aspect** preserves the emulator's reported pixel-aspect correction (about 1.219 on the tested Beetle core); named **4:3** uses 4:3, and **16:9 fill** places that 4:3 view between blurred side panels. Stop split screen before selecting a single-game size.
 
+For recording a graphics comparison, tick **Compare HD and original (new game)** in the Play tab, then click **Play**. The left pane uses your selected graphics and project imports. The right pane uses the original disc at native resolution with original dithering. The same controller feeds both consoles and the left pane supplies audio. The consoles can drift because each runs independently. Press **F11** for fullscreen.
+
 The game's window has **Save**, **Load** and **Full screen**. Everything else is in the Play tab's **Settings**: **Game screen** (Smooth, HD backgrounds, Map and HP/MP, Screen shape), **Quick saves** (the slot Save and Load use, and a note for the next save) and **During a game** (Pause, Reset, Digi-Dex). Changes reach an open game straight away. In the game's window, P pauses, Ctrl+R resets, F4 opens the Digi-Dex and F6/F7 change the slot; F1 lists every key.
 
 ## Frame rate

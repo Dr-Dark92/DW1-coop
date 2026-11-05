@@ -345,10 +345,12 @@ class PlayPanel(QWidget):
         slots_layout.addWidget(QLabel("Quick saves")); slots_layout.addWidget(self.slots, 1)
         buttons = QHBoxLayout(); slots_layout.addLayout(buttons)
         self.play = QPushButton("Play"); self.play.clicked.connect(lambda: self.launch(None))
+        self.compare_graphics = QCheckBox("Compare HD and original (new game)")
+        self.compare_graphics.setToolTip("Starts two consoles from the title screen with one controller. Use Play.")
         self.play_slot = QPushButton("Play from selected slot")
         self.play_slot.clicked.connect(lambda: self.launch(self._selected_slot()))
         self.delete = QPushButton("Delete slot"); self.delete.clicked.connect(self._delete_slot)
-        for button in (self.play, self.play_slot, self.delete):
+        for button in (self.play, self.compare_graphics, self.play_slot, self.delete):
             buttons.addWidget(button)
         buttons.addStretch()
 
@@ -689,12 +691,15 @@ class PlayPanel(QWidget):
             return
         if self._patch_thread is not None:
             return
+        if self.compare_graphics.isChecked() and (slot is not None or inspection_id is not None):
+            QMessageBox.information(self, "Graphics comparison", "Use Play to start both consoles from the title screen.")
+            return
         if not self._check() or not self.source_ok:
             QMessageBox.warning(self, "Cannot play yet", "Choose a working core and make sure the disc image is available.")
             return
         if disc is None and not self._choose_character():
             return
-        if disc is None and self.use_imports.isChecked() and self.imports[0]() > 0:
+        if disc is None and (self.use_imports.isChecked() or self.compare_graphics.isChecked()) and self.imports[0]() > 0:
             self._build_patched(slot, inspection_id)
             return
         config = PlayConfig(Path(self.core.text()), Path(self.bios.text() or "."), disc or self.disc, self.store.directory,
@@ -708,7 +713,8 @@ class PlayPanel(QWidget):
                             keep_tamer=not self.characters,
                             coop_species=self.coop_species.currentData() if self.coop.isChecked() else None,
                             coop_level=self.coop_level.value(),
-                            double_frame=self.double_frame.isChecked(), options=self._picture_options())
+                            double_frame=self.double_frame.isChecked(), options=self._picture_options(),
+                            comparison_disc=self.disc if self.compare_graphics.isChecked() else None)
         start = (f" from slot {slot}" if slot is not None else
                  f" from inspection {inspection_id}" if inspection_id is not None else "")
         self._write_log(f"Launching {config.disc_path.name}{start}"
