@@ -394,6 +394,7 @@ class EmulatorWorker(QObject):
                     self.evolution.restore()
                     self.evolution = None
                     self.message.emit(f"Manual evolution turned off: {exc}")
+            wide_before_frame = self._frame is not None and self._frame.active
             frame, audio = core.run_frame()
             if self.telemetry.enabled and self.config.live_ram:
                 self.telemetry.observe_scene(core.read_memory(ram_offset(CURRENT_SCREEN), 1)[0],
@@ -402,11 +403,6 @@ class EmulatorWorker(QObject):
             hd_layer = self.hd_layer  # one read: the compositor thread clears it when HD fails
             if hd_layer is not None:
                 hd_layer.observe_scene()
-            presentation = (self.hd_enabled, self.hud_enabled, hd_layer.generation if hd_layer is not None else None)
-            if presentation != getattr(self, "_presentation_key", None):
-                self._invalidate_compositors()
-                self._previous_picture = None
-                self._presentation_key = presentation
             self._has_run_frame = True
             if self.tamer_skin is not None:
                 self.tamer_skin.tick()
@@ -419,9 +415,19 @@ class EmulatorWorker(QObject):
                 self._apply_rules()
             if self._frame is not None:
                 self._frame.tick()
-                hd_layer = self.hd_layer
-                if hd_layer is not None:
-                    hd_layer.wide = self._frame.active
+            wide = self._frame is not None and self._frame.active
+            hd_layer = self.hd_layer
+            if hd_layer is not None:
+                hd_layer.wide = wide
+            presentation = (self.hd_enabled, self.hud_enabled, wide,
+                            hd_layer.generation if hd_layer is not None else None)
+            if presentation != getattr(self, "_presentation_key", None):
+                self._invalidate_compositors()
+                self._previous_picture = None
+                self._presentation_key = presentation
+            if wide != wide_before_frame:
+                # The frame was drawn before the camera and its tile ring changed.
+                frame = None
             self._ensure_camera()
             if self._camera is not None:
                 self._camera.tick()

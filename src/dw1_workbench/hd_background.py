@@ -787,8 +787,9 @@ class BackgroundLayer:
     def _prepare(self, frame: np.ndarray):
         """What `compose` needs for this frame, or None when this map has no picture or the frame does not fit."""
         self.observe_scene()
-        if self._scene[1] not in (0, 1, 2, 3) or self._scene[2]:
-            return None  # transition or an unestablished scene: native graphics only
+        if self._scene[1] != 0 or self._scene[2]:
+            # The native renderer retains the battle backdrop while battle loading reuses map tile RAM.
+            return None
         height, width = frame.shape
         factor = width // SCREEN_W
         if (not factor or width % SCREEN_W or height % SCREEN_H or factor != height // SCREEN_H

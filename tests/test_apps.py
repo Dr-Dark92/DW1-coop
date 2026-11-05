@@ -131,3 +131,12 @@ def test_direct_launch_powers_on_even_with_a_resume_slot(tmp_path):
     assert panel.launch_directly() and panel.launched == [None]
     panel = Panel(store, starts=False)
     assert not panel.launch_directly() and panel.launched == [None]
+
+
+def test_a_saved_resolution_the_menu_does_not_list_does_not_become_native(tmp_path):
+    settings = QSettings(str(tmp_path / "resolution.ini"), QSettings.Format.IniFormat)
+    for saved, shown in (("2x", "2x (recommended)"), ("4x", "4x (may stutter)"), ("nonsense", "2x (recommended)"),
+                         ("4x (may stutter)", "4x (may stutter)"), (play_panel.NATIVE_RESOLUTION, play_panel.NATIVE_RESOLUTION)):
+        settings.setValue("play/resolution", saved)
+        assert play_panel.saved_resolution(settings) == shown
+

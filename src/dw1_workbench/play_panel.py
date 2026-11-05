@@ -43,6 +43,9 @@ def saved_resolution(settings) -> str:
             resolution = DEFAULT_RESOLUTION
         settings.setValue("play/resolution", resolution)
         settings.remove("play/fixed_x2")
+    if resolution not in RESOLUTIONS:
+        # A core's own value ("2x") or anything else the menu doesn't list would otherwise leave it on its first item, Native.
+        resolution = next((label for label, value in RESOLUTIONS.items() if value == resolution), DEFAULT_RESOLUTION)
     return resolution
 CHARACTER_PICTURE = 240
 TITLE_PREVIEW = 160, 120
