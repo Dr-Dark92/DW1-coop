@@ -6,6 +6,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QImage, QLinearGr
 
 from .camera import GPURAM_FIELD
 from .live import ram_offset
+from .menu_icons import menu_icon, NAMES as ADDED_ICONS
 
 
 def native_icons(core):
@@ -48,27 +49,16 @@ def _label(painter, rect, text, size=9, color="#ffffff"):
 
 
 def _new_icon(painter, x, y, kind):
+    if kind in ADDED_ICONS:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        painter.drawImage(QRectF(x, y, 24, 24), menu_icon(kind))
+        painter.restore()
+        return
     painter.save(); painter.translate(x, y)
     painter.setPen(QPen(QColor("#f9d78a"), 1.5)); painter.setBrush(QColor("#325e8a"))
-    if kind == "Evolution":
-        painter.drawLine(12, 16, 12, 8); painter.drawLine(4, 8, 20, 8)
-        for px, py in ((9,16),(1,0),(17,0)):
-            painter.drawRoundedRect(QRectF(px,py,6,6),1,1)
-    elif kind == "Digi-Dex":
-        painter.drawRoundedRect(QRectF(1,2,22,18),2,2); painter.drawLine(12,3,12,19)
-        for py in (7,11,15):
-            painter.drawLine(4,py,9,py); painter.drawLine(15,py,20,py)
-    elif kind == "Digi-Bank":  # a storage box: lid, body, latch
-        painter.drawRoundedRect(QRectF(2,8,20,13),2,2); painter.drawRoundedRect(QRectF(1,3,22,6),2,2)
-        painter.setBrush(QColor("#f9d78a")); painter.drawRect(QRectF(10,7,4,5))
-    elif kind == "Split Screen":  # two screens side by side
-        painter.drawRoundedRect(QRectF(0,4,11,15),1,1); painter.drawRoundedRect(QRectF(13,4,11,15),1,1)
-    elif kind == "LAN Co-op":  # two linked computers
-        painter.drawRect(QRectF(1,2,9,8)); painter.drawRect(QRectF(14,14,9,8))
-        painter.drawLine(5,10,5,18); painter.drawLine(5,18,14,18)
-    else:
-        painter.drawEllipse(QRectF(3,3,18,18))
-        _label(painter,QRectF(1,2,22,22),kind[:1],12)
+    painter.drawEllipse(QRectF(3,3,18,18))
+    _label(painter,QRectF(1,2,22,22),kind[:1],12)
     painter.restore()
 
 
@@ -89,7 +79,7 @@ def _grid(painter, menu, icons):
             painter.drawImage(QRectF(x+23,y+top,24,24),icons[native])
         else:
             _new_icon(painter,x+23,y+top,name)
-        _label(painter,QRectF(x+1,y+pitch-20,68,14),name,9)
+        _label(painter,QRectF(x+1,y+pitch-17,68,14),name,9)
 
 
 def _egg(painter, rect):
@@ -299,7 +289,8 @@ def evolution_menu_image(image, menu, icons=(), portraits=None, avatars=None):
     painter.scale(image.width()/320,image.height()/240)
     relation = menu.layout == "relation"
     page_avatar = avatars.get(menu.avatar) if menu.avatar is not None else None
-    x,w = (3,314) if relation else (44,232) if menu.layout == "grid" else (20,280) if page_avatar else (58,204)
+    portrait_slot = menu.avatar is not None
+    x,w = (3,314) if relation else (44,232) if menu.layout == "grid" else (20,280) if portrait_slot else (58,204)
     if menu.layout != "list":  # the Digi-Dex (list layout) draws its own themed panel
         painter.fillRect(x,20,w,204,QColor("#0a1528"))
         painter.setPen(QColor("#d9ba70")); painter.drawRect(x+1,21,w-2,202)
@@ -311,12 +302,15 @@ def evolution_menu_image(image, menu, icons=(), portraits=None, avatars=None):
     else:
         _dex_panel(painter,x,w)
         _label(painter,QRectF(x+4,22,w-8,14),menu.title,10,"#fad990")
-        text_x, text_w = (80,212) if page_avatar else (74,176)
-        if page_avatar:
+        text_x, text_w = (86,206) if portrait_slot else (74,176)
+        if portrait_slot:
             frame = QRectF(26,44,48,48)
             painter.setPen(QPen(QColor("#d9ba70"),1)); painter.setBrush(_vertical(frame,"#24456b","#0f2038"))
             painter.drawRoundedRect(frame,3,3)
-            painter.drawImage(frame.adjusted(1,1,-1,-1),page_avatar)
+            if page_avatar:
+                painter.drawImage(frame.adjusted(1,1,-1,-1),page_avatar)
+            else:
+                _label(painter, frame, "…", 14, "#8fb0cf")
         if menu.icons:
             text_x, text_w = 92,158
         for index,row in enumerate(menu.rows):

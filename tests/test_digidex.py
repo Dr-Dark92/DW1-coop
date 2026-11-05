@@ -195,8 +195,9 @@ def test_windows_dex_hides_locked_details_and_shows_skills(encounter):
     assert "locked" in dialog.details.toPlainText()
     assert "Encountermon" not in dialog.details.toPlainText()
     dialog.list.setCurrentRow(1)
-    assert "Fireball" in dialog.details.toPlainText()
-    assert "Equipped in encountered battle" in dialog.details.toPlainText()
+    assert "Fireball" in dialog.sections["Skills"].toPlainText()
+    assert "Equipped in encountered battle" in dialog.sections["Observed encounters"].toPlainText()
+    assert "Fireball" not in dialog.sections["Overview"].toPlainText()
     dialog.search.setText("Encountermon")
     assert dialog.list.count() == 1
     dialog.search.setText("Agumon")

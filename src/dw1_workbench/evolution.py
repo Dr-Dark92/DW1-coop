@@ -14,7 +14,7 @@ from pathlib import Path
 from . import bank
 from .camera import sync_instruction_cache
 from .libretro import BUTTON
-from .digidex import entry_rows
+from .digidex import entry_rows, entry_sections
 from .live import ram_offset
 from .progression import (BANK_SLOTS, COMBAT_DATA_PTR, Progress, DIGIMON_DATA, DIGIMON_LEVEL, DIGIMON_PARA_SIZE, GAME_STATE, PARTNER_ENTITY,
                           PARTNER_STATS, UI_BOX_DATA)
@@ -427,15 +427,17 @@ class EvolutionController:
             if entry is None:
                 self._dex_detail = False
             else:
-                pages = entry_rows(entry, self.map_names)
+                grouped = entry_sections(entry, self.map_names)
+                pages = [(section, page) for section, rows in grouped.items() for page in rows]
                 if pressed & (bit("Right") | bit("Down")):
                     self._dex_page = (self._dex_page + 1) % len(pages)
                 elif pressed & (bit("Left") | bit("Up")):
                     self._dex_page = (self._dex_page - 1) % len(pages)
                 self._dex_page %= len(pages)
-                page = pages[self._dex_page]
+                section, page = pages[self._dex_page]
+                short = {"Decoded locations": "Locations", "Observed encounters": "Encounters"}.get(section, section)
                 self.menu = EvolutionMenu(entry["name"], tuple(text for _, text, _ in page), -1,
-                    f"{self._dex_page + 1}/{len(pages)}  Left/Right: pages  Circle: back", False,
+                    f"{short} {self._dex_page + 1}/{len(pages)}  Left/Right  Circle: back", False,
                     avatar=ids[self._dex_index % len(ids)], styles=tuple(style for style, _, _ in page),
                     skills=tuple(self.dex.moves.get(skill) if skill is not None else None for _, _, skill in page))
                 return

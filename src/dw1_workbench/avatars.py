@@ -18,12 +18,12 @@ from .characters import parse_character_table
 from .disc import inspect_image
 from .errors import DiscFormatError, ValidationError
 from .iso9660 import read_inventory
-from .mmd import parse_mmd_static, parse_usa_skeleton
+from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .model_view import ModelSnapshot
 from .tim import decode_tim
 
 AVATAR_SIZE = 64
-RENDER_VERSION = b"dex-avatar-v1"
+RENDER_VERSION = b"dex-avatar-v2-tmd-alpha-preview"
 EXECUTABLE = "SLUS_010.32"
 ALLTIM = "CHDAT/ALLTIM.TIM"
 
@@ -122,12 +122,19 @@ def _qimage(image) -> QImage:
 
 def render_avatar(model_data: bytes, texture_data: bytes, skeleton, size: int = AVATAR_SIZE) -> QImage:
     """Static pose, preview camera angle, transparent background."""
-    model = parse_mmd_static(model_data, skeleton)
+    model = parse_mmd_static(model_data, skeleton, translucent_preview=True)
     first = decode_tim(texture_data)
+    validate_texture_materials(model, first)
     palettes = tuple(_qimage(decode_tim(texture_data, index).image) for index in range(first.palette_count))
     snapshot = ModelSnapshot(model, palettes, first.clut_y)
     snapshot.zoom = 1.45  # fill the square; the preview leaves room to orbit
-    return snapshot.image(size)
+    image = snapshot.image(size)
+    if any(image.pixelColor(x, y).alpha() for x, y in
+           [(i, edge) for edge in (0, size - 1) for i in range(size)] +
+           [(edge, i) for edge in (0, size - 1) for i in range(size)]):
+        snapshot.zoom = 1.0  # wide weapons/poses must not be cropped by the avatar square
+        image = snapshot.image(size)
+    return image
 
 
 def render_character(disc: Path, kind: int, size: int = AVATAR_SIZE) -> QImage | None:

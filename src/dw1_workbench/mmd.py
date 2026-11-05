@@ -164,7 +164,7 @@ def _parse_initial_pose(data: bytes, animation_offset: int, bone_count: int) -> 
 
 
 def parse_mmd_static(data: bytes, skeleton: tuple[SkeletonNode, ...],
-                     cancelled: Callable[[], bool] = lambda: False) -> StaticModel:
+                     cancelled: Callable[[], bool] = lambda: False, *, translucent_preview=False) -> StaticModel:
     if len(data) > MAX_FILE_SIZE:
         raise DiscFormatError("MMD exceeds the static-preview size limit.")
     if len(data) < 20:
@@ -207,8 +207,9 @@ def parse_mmd_static(data: bytes, skeleton: tuple[SkeletonNode, ...],
             output_words, input_words, primitive_flags, mode = struct.unpack_from("4B", data, cursor)
             packet_size = (input_words + 1) * 4
             _check_range(cursor, packet_size, animation_offset, f"Object {object_index} primitive packet")
-            is_quad = mode == 0x3C
-            if mode not in {0x34, 0x3C} or primitive_flags != 0:
+            is_quad = mode in {0x3C, 0x3E}
+            accepted = {0x34, 0x3C, 0x36, 0x3E} if translucent_preview else {0x34, 0x3C}
+            if mode not in accepted or primitive_flags != 0:
                 raise DiscFormatError(f"Unsupported primitive at object {object_index}, index {primitive_index}: "
                                       f"mode=0x{mode:02x}, flags=0x{primitive_flags:02x}.")
             expected = (12, 8, 36) if is_quad else (9, 6, 28)
@@ -244,8 +245,10 @@ def parse_mmd_static(data: bytes, skeleton: tuple[SkeletonNode, ...],
         if node.object_index is not None and node.object_index >= object_count:
             raise DiscFormatError(f"Skeleton node {index} references absent object {node.object_index}.")
     pose, animation_index = _parse_initial_pose(data, animation_offset, len(skeleton))
-    return StaticModel(tuple(objects), skeleton, pose, animation_offset, animation_index,
-                       (f"The static pose is the initial transform of animation record {animation_index}.",))
+    warnings = [f"The static pose is the initial transform of animation record {animation_index}."]
+    if any(face.material.translucent for obj in objects for face in obj.triangles):
+        warnings.append("Thumbnail approximation: source texture alpha is preserved; PS1 framebuffer blend modes are not emulated.")
+    return StaticModel(tuple(objects), skeleton, pose, animation_offset, animation_index, tuple(warnings))
 
 
 def validate_texture_materials(model: StaticModel, texture: TimImage) -> tuple[int, ...]:

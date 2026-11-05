@@ -1,5 +1,7 @@
 # DW1-coop: DW1-settings and DW1-play
 
+Digi-Dex separates Overview, Skills, Decoded locations and Observed encounters, with discovered-only filtering and resource-ID search. Added menu entries use shaded pixel-art icons. Goburimon and SnowGoburimon retain separate source IDs/textures; restart after this update to regenerate versioned thumbnails. Translucent avatar blending is approximate; model export support is unchanged.
+
 A read-only desktop workbench for importing a user-owned Digimon World 1 disc image, validating one evidenced release, inventorying its ISO 9660 filesystem, and preserving resource provenance in a local SQLite catalogue.
 
 This is an asset-analysis foundation with a Play tab that runs your own disc through a libretro PlayStation core you install yourself. It is **not** co-op gameplay, a native port, or a universal asset decoder. No game image, BIOS, emulator core, or proprietary game data is included or downloaded.

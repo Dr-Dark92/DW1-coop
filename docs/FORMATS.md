@@ -1,5 +1,13 @@
 # Format support and evidence
 
+### Avatar-only translucent MMD packets (2026-11-05)
+
+Opt-in thumbnail parsing accepts textured Gouraud triangle0x36 and quad0x3E, with the same packet-length, extent, index and flag validation as opaque0x34/0x3C. Default static parser/export remains strict. Material translucency/blend flags are retained; thumbnail rasterization preserves texture alpha but does not emulate PS1 framebuffer blend modes. This is not newly verified translucent model export support.
+
+Evidence: [upstream Model.cpp](https://github.com/Operation-Decoded/DW1ModelConverter/blob/main/src/Model.cpp), Primitive constructor packet layout and isTranslucency(), MIT licensed; no upstream code copied. Actual USA executable associates80/GOBR/texture80 with Goburimon and103/SNGB/texture103 with SnowGoburimon. Read-only source renders confirm green and blue respectively;125/EGOB is another resource named Goburimon, not merged by display name. Synthetic tests cover opt-in, strict rejection, malformed packet lengths and indices. Real images visually inspected, not independently full-geometry compared this follow-up.
+
+Menu additions now use original code-authored pixel sprites, superseding the older vector-icon description below. Native icons still come from user VRAM.
+
 ×2 camera frame (2026-11-05): [FIXED_FRAMING.md](FIXED_FRAMING.md) has its hooks, addresses and evidence.
 
 Status screen (USA): `UI_BOX_DATA` `0x8013D390`, 36 bytes each, frame at +16, state at +18, render function at +32; box 1 with `renderDigimonMenu` `0x800B93D4`, frame 5, state 1 is the open Digimon menu. `MENU_STATE` `0x80134D34` is 1 once drawn, `DIGIMON_MENU_STATE` `0x80134D36` is 0 on the Status tab. The game's digits are 8 × 12 cells of 4-bit texels at VRAM (704, 496), 0 to 9 side by side. The labels AGE and WEIGHT are baked into the menu art.

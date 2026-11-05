@@ -1,5 +1,7 @@
 # Milestone progress
 
+2026-11-05 menu/Dex: shaded pixel-art additions; clear Overview, Skills, Decoded locations and Observed encounters sections. Goburimon80 and SnowGoburimon103 remain separate; real-disc green/blue avatars render via avatar-only translucent packet support. Source palettes unchanged; PS1 blending approximate, model export not broadened. **418 tests passed**. Offscreen UI/source images inspected; interactive acceptance after restart pending. See current handover.
+
 2026-11-05 ×2 camera frame: **experimental player option, off by default.** Twice the world while walking, with battles, map changes and saves on the game's own camera, HD pictures or the game's full-size tiles for the background, and the battle's Digimon limited to the native view. Played on the desktop for over an hour without a crash. Two marks are open. Details and limits: [FIXED_FRAMING.md](FIXED_FRAMING.md). LVL and NEXT added to the Status screen. 412 tests pass.
 
 2026-11-05 fixed camera, before the ×2 option above: **isolated standing proof only**, at 230/256 scale and 640×480. Old misplacement reproduced; new render-only projection hook, GTE-origin compensation and shared edge clamp produce a visually aligned Native Forest candidate. 37 shared complete game-clock ticks retain identical world positions. Full HUD masks, HD matching, safe scratch ownership and playable walking/battle/transition tests remain gates; normal zoom stays disabled. See [FIXED_FRAMING.md](FIXED_FRAMING.md). This is not a released gameplay toggle.

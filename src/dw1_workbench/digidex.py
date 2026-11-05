@@ -207,7 +207,7 @@ class DigiDex:
         return unlocked
 
 
-def entry_rows(entry, map_names=None):
+def entry_sections(entry, map_names=None):
     """Compact in-game pages of (style, text, skill id) rows. Only a persisted unlocked entry produces data.
 
     Styles: "header" (page title), "info", "stat", "skill" (third value is the technique id), "note".
@@ -223,31 +223,44 @@ def entry_rows(entry, map_names=None):
     def skill_rows(skills):
         return [("skill", skill["name"], skill["id"]) for skill in skills]
 
-    pages = [[("info", f"Rank: {STAGES[entry['stage']]}", None), ("note", "Battle stats vary by encounter.", None),
+    overview = [[("header", "Overview", None), ("info", f"Rank: {STAGES[entry['stage']]}", None),
               ("info", f"Drop: {drop['name']}", None), ("info", f"Drop chance: {drop['chance']}%", None),
-              ("header", "Skills, locations and stats:", None), ("note", "Times below are battle sightings,", None),
+              ("note", "Battle stats vary by encounter.", None), ("note", "Times are observed sightings,", None),
               ("note", "not an exclusive schedule.", None)]]
+    pages = []
     skills = entry.get("skills", [])
     if skills:
         for offset in range(0, len(skills), 6):
             pages.append([("header", "Linked skills (species)", None), *skill_rows(skills[offset:offset + 6])])
     else:
         pages.append([("header", "Linked skills: none recorded.", None)])
+    locations = []
     for placement in entry.get("placements", []):
-        pages.append([("header", placement["name"], None), ("info", "Decoded map placement", None),
+        locations.append([("header", placement["name"], None), ("info", "Evidence: Decoded placement", None),
                       ("info", "When: schedule unknown", None), *stat_rows(placement["stats"]),
                       ("note", "May depend on story/scripts.", None)])
-    for p in entry["profiles"]:
+    encounters = []
+    for number, p in enumerate(entry["profiles"], 1):
         periods = "/".join(dict.fromkeys(period(h) for h in p["hours"]))
         hours = ", ".join(f"{h:02d}" for h in p["hours"])
         location = map_names.get(p["map"], p.get("location", f"Map {p['map']}"))
-        pages.append([("header", location, None), ("info", f"Seen: {periods}", None),
+        encounters.append([("header", location, None), ("info", f"Observed battle: {number}", None), ("info", f"Seen: {periods}", None),
                       ("info", f"Hours: {hours}", None), *stat_rows(p["stats"]),
                       ("note", "Availability not yet established.", None)])
         equipped = p.get("skills", [])
-        pages.append([("header", "Equipped in encountered battle", None), *skill_rows(equipped)]
-                     if equipped else [("header", "Encounter skills: none recorded.", None)])
-    return pages
+        if equipped:
+            for offset in range(0, len(equipped), 6):
+                encounters.append([("header", "Equipped in encountered battle", None),
+                                   ("info", f"Battle {number}: {location}", None), *skill_rows(equipped[offset:offset + 6])])
+        else:
+            encounters.append([("header", "Encounter skills: none recorded.", None),
+                               ("info", f"Battle {number}: {location}", None)])
+    return {"Overview": overview, "Skills": pages, "Decoded locations": locations, "Observed encounters": encounters}
+
+
+def entry_rows(entry, map_names=None):
+    """At most nine rows per 320×240 page, grouped by evidence type; keep existing row/skill metadata API."""
+    return [page for pages in entry_sections(entry, map_names).values() for page in pages]
 
 
 def entry_pages(entry, map_names=None):

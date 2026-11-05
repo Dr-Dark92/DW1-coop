@@ -1,5 +1,15 @@
 # Handover
 
+## Uncommitted menu / Dex follow-up — 2026-11-05
+
+Menu additions use code-authored shaded pixel-art icons; native icons unchanged. Dex has Overview, Skills, Decoded locations and Observed encounters tabs, numeric-ID search, discovered-only filtering and bounded in-game pages. No progression/unlock/save changes.
+
+USA source verified read-only: ID80 GOBR = green Goburimon, ID103 SNGB = blue SnowGoburimon. ID125 EGOB is a separate source-named Goburimon resource. Missing green avatar was strict MMD rejection of 0x3E. Avatar-only opt-in accepts validated 0x36/0x3E packets with source palettes; strict model/export support unchanged. PS1 framebuffer blending remains approximate. Restart to regenerate the versioned avatar cache; do not delete saves.
+
+Full suite: **418 passed in 11.25s**, command below. Source renders80/103/125 succeeded; green/blue visually inspected. No independent complete geometry comparison this follow-up. Private outputs: `/home/drdark/dev/DW1-coop-data/goburimon-avatar-review-1/`, `goburimon-avatar-review-2/`, `menu-theme-review-2/`. Helper: `tools/preview_menu_theme.py --help` (read-only inputs, exclusive external output directory). Dex captures use existing cached portraits; new green portrait checked separately.
+
+Next: desktop acceptance after restart, including Goburimon and all Dex sections. Wide weapon poses can still cross thumbnail edges; translucent blending needs independent verification before general model export support. No commit/push. Older test counts below are historical.
+
 ## Current state (2026-11-05)
 
 Branch `python-player`. 412 tests pass:

@@ -173,7 +173,8 @@ def test_move_table_and_styled_skill_rows(application):
 
     from dw1_workbench.digidex_view import DigiDexDialog
     dialog = DigiDexDialog({"catalog": [3], "entries": {"3": entry}, "moves": moves})
-    text = dialog.details.toHtml()
-    assert "element:0" in text and "element:2" in text and "Pow 155" in text and "Stun" in text
+    text = dialog.sections["Skills"].toHtml()
+    assert "element:0" in text and "element:2" in text and "155" in text and "Stun" in text
+    assert all(label in dialog.sections["Skills"].toPlainText() for label in ("Power", "MP", "Range", "Status"))
     assert dialog.title.text() == "Agumon"
     dialog.close()
