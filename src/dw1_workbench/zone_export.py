@@ -28,7 +28,8 @@ from .maps import (FLOOR_GRID, MapEntry, MapScene, TfsFile, floor_grid_with_digi
 from .pathing import MapPathing, map_pathing, regions, routes_from
 
 PACKAGE_FORMAT = "dw1-zone-package"
-PACKAGE_VERSION = 1
+# Version 2 groups each zone in its own folder (zones/<zone>/); version 1 kept every map under maps/.
+PACKAGE_VERSION = 2
 SUFFIX = ".dw1zone"
 REGION_COLOURS = [(91, 155, 213), (237, 125, 49), (112, 173, 71), (255, 192, 0), (158, 72, 14), (68, 114, 196),
                   (165, 165, 165), (38, 68, 120)]
@@ -48,6 +49,11 @@ class MapSource:
 
 def slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower() or "zone"
+
+
+def map_folder(zone: str, index: int, name: str) -> str:
+    """A map's folder inside a version 2 package, under its zone's folder."""
+    return f"zones/{slug(zone)}/maps/{index:03d}-{name}"
 
 
 def _jsonable(value):
@@ -165,6 +171,12 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
     indices = sorted(sources)
     if not indices:
         raise ValueError("The selected zones have no decoded maps.")
+    if len({slug(zone) for zone in zones}) != len(zones):
+        raise ValueError("Two selected zones share a folder name; export them separately.")
+    outside = sorted({sources[index].entry.area_name for index in indices} - set(zones), key=str)
+    if outside:
+        raise ValueError(f"Maps from zones that were not selected: {', '.join(map(str, outside))}.")
+    folders = {index: map_folder(sources[index].entry.area_name, index, sources[index].entry.name) for index in indices}
     inbound: dict[int, list[dict]] = {index: [] for index in indices}
     for source_index, scene in all_scenes.items():
         for warp_exit in map_exits(scene):
@@ -190,7 +202,7 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                 source = sources[index]
                 entry, scene = source.entry, source.scene
                 progress(5 + 75 * done // len(indices), f"Exporting {map_names.get(index, entry.name)}")
-                folder = f"maps/{index:03d}-{entry.name}"
+                folder = folders[index]
                 pathing[index] = map_pathing(entry, scene, map_names)
                 add(f"{folder}/{entry.name}.MAP", _checked(source.map_bytes, source.map_row, entry.map_path),
                     "original MAP file")
@@ -223,12 +235,13 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                 members = [index for index in indices if sources[index].entry.area_name == zone]
                 leaving = [{"from_map": index, **warp} for index in members
                            for warp in _warps(sources[index].scene, map_names) if warp["to_map"] not in sources]
-                document = {"zone": zone, "maps": [{"index": index, "label": map_names.get(index)} for index in members],
+                document = {"zone": zone, "maps": [{"index": index, "label": map_names.get(index),
+                                                    "folder": folders[index]} for index in members],
                             "entrances_from_outside": [{"to_map": index, **link} for index in members
                                                        for link in inbound[index] if not link["inside_package"]],
                             "exits_to_outside": leaving}
                 zone_documents.append(document)
-                add(f"zones/{slug(zone)}.json", json.dumps(document, indent=1).encode(), "zone")
+                add(f"zones/{slug(zone)}/zone.json", json.dumps(document, indent=1).encode(), "zone")
             add("routes.json", json.dumps({"rules": "walk-through exits only; script-driven exits are not decoded",
                                            "routes": route_table}).encode(), "map-to-map routes")
             manifest = {
@@ -238,7 +251,8 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                 "source": {key: meta.get(key) for key in ("release", "executable", "source_sha256", "source_size")},
                 "parser_versions": meta.get("parser_versions"),
                 "background_palettes": "all" if all_palettes else "first (the original TFS holds every palette)",
-                "zones": zones, "maps": [{"index": index, "label": map_names.get(index)} for index in indices],
+                "zones": zones, "maps": [{"index": index, "label": map_names.get(index), "zone": sources[index].entry.area_name,
+                                          "folder": folders[index]} for index in indices],
                 "external_links": sum(len(document["exits_to_outside"]) + len(document["entrances_from_outside"])
                                       for document in zone_documents),
                 "limits": ["map scripts are not decoded: script-driven exits, spawn rules and item spawns are missing",

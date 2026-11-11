@@ -253,12 +253,14 @@ Walkability follows the game's collision code (`checkMapCollisionX/Z` in `src/ma
 
 ### Zone packages (`.dw1zone`)
 
-A ZIP holding one zone (`kind: zone`) or several (`kind: bundle`), format `dw1-zone-package` version 1:
+A ZIP holding one zone (`kind: zone`) or several (`kind: bundle`), format `dw1-zone-package` version 2. Each zone has its own folder, `zones/<zone>/` (the zone name lower-cased with runs of other characters turned into `-`):
 
-- `manifest.json`: tool and parser versions, source release and disc SHA-256, zones, maps, count of links leaving or entering the package, limits, and every file with its size and SHA-256.
-- `maps/<index>-<NAME>/`: the original `NAME.MAP` and `NAME.TFS` bytes (checked against the catalogue SHA-256 before writing), `map.json` (table entry with its raw bytes, setup, spawns with tiles, warps, entrances from any map, Digimon placements with behaviour, sprites, trigger counts and the floor grid as 100 hex rows), `pathing.json` (rules, walkable regions, places, routes with tile paths), `floor-grid.png`, `pathing.png`, and background PNGs (first palette, or all).
-- `zones/<zone>.json`: member maps, entrances from outside the package and exits leading out of it.
-- `routes.json`: the shortest walk-through route between every pair of maps in the package, leg by leg.
+- `manifest.json`: tool and parser versions, source release and disc SHA-256, zones, maps (each with its zone and folder), count of links leaving or entering the package, limits, and every file with its size and SHA-256.
+- `zones/<zone>/maps/<index>-<NAME>/`: the original `NAME.MAP` and `NAME.TFS` bytes (checked against the catalogue SHA-256 before writing), `map.json` (table entry with its raw bytes, setup, spawns with tiles, warps, entrances from any map, Digimon placements with behaviour, sprites, trigger counts and the floor grid as 100 hex rows), `pathing.json` (rules, walkable regions, places, routes with tile paths), `floor-grid.png`, `pathing.png`, and background PNGs (first palette, or all).
+- `zones/<zone>/zone.json`: member maps with their folders, entrances from outside the package and exits leading out of it.
+- `routes.json`: the shortest walk-through route between every pair of maps in the package, leg by leg (kept at the top because routes cross zones).
+
+Export refuses maps from zones that were not selected, and zones whose folder names would collide (none do among the 65 USA zones). Version 1 packages (every map under a flat `maps/<index>-<NAME>/`, zones as `zones/<zone>.json`) still import; the manifest's version says which layout to read. Checked on 2026-11-11: Native Forest + Green Gym (8 maps) exported into `zones/native-forest/` and `zones/green-gym/` and re-imported with no changes, and the user's earlier version 1 Native Forest package still imports with its repainted `MAYO00`.
 
 A Native Forest package (7 maps) is about 18 MB; Native Forest + Green Gym + File City (48 maps) exported with all 96 MAP/TFS files equal to their catalogue hashes. Play-time observations (inspections, item spawns) are never included. Packages contain the user's game data and must stay out of Git.
 

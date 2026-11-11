@@ -55,7 +55,7 @@ def test_changed_map_is_stored_replaced_and_removed(tmp_path, monkeypatch):
     entries, package, originals, room = exported(tmp_path)
     # stand-in MAP bytes are not a real MAP, so let parsing accept whatever the package holds
     monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
-    edited = rewrite(package, tmp_path / "edited.dw1zone", "maps/000-TEST01/TEST01.MAP", b"EDITED")
+    edited = rewrite(package, tmp_path / "edited.dw1zone", "zones/test-woods/maps/000-TEST01/TEST01.MAP", b"EDITED")
     report = check_package(edited, META, entries, originals, room)
     assert report.ok and [(item.name, item.changed) for item in report.changed_maps] == [("TEST01", ["MAP"])]
     store = OverrideStore(tmp_path / "project")
@@ -69,7 +69,7 @@ def test_changed_map_is_stored_replaced_and_removed(tmp_path, monkeypatch):
 def test_problems_block_the_import(tmp_path, monkeypatch):
     entries, package, originals, room = exported(tmp_path)
     monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
-    too_big = rewrite(package, tmp_path / "big.dw1zone", "maps/000-TEST01/TEST01.MAP", bytes(4096))
+    too_big = rewrite(package, tmp_path / "big.dw1zone", "zones/test-woods/maps/000-TEST01/TEST01.MAP", bytes(4096))
     report = check_package(too_big, META, entries, originals, room)
     assert not report.ok and "holds 2,048" in report.maps[0].problems[0]
     other = check_package(package, {"executable": "SLUS_010.32", "source_sha256": "other"}, entries, originals, room)
@@ -79,8 +79,8 @@ def test_problems_block_the_import(tmp_path, monkeypatch):
 def test_hand_edited_files_without_a_manifest_update_are_imported(tmp_path, monkeypatch):
     entries, package, originals, room = exported(tmp_path)
     monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
-    edited = rewrite(package, tmp_path / "edited.dw1zone", "maps/000-TEST01/TEST01.MAP", b"HEXEDIT", fix_manifest=False)
-    edited = rewrite(edited, tmp_path / "edited2.dw1zone", "maps/000-TEST01/pathing.png", b"scribbles", fix_manifest=False)
+    edited = rewrite(package, tmp_path / "edited.dw1zone", "zones/test-woods/maps/000-TEST01/TEST01.MAP", b"HEXEDIT", fix_manifest=False)
+    edited = rewrite(edited, tmp_path / "edited2.dw1zone", "zones/test-woods/maps/000-TEST01/pathing.png", b"scribbles", fix_manifest=False)
     report = check_package(edited, META, entries, originals, room)
     assert report.ok and report.maps[0].changed == ["MAP"]
     assert "TEST01.MAP edited in the package" in report.maps[0].notes
@@ -95,13 +95,13 @@ def test_edited_background_picture_becomes_the_tfs(tmp_path, monkeypatch):
     scene = two_maps()[1]
     monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: scene)
     with zipfile.ZipFile(package) as archive:
-        picture = Image.open(io.BytesIO(archive.read("maps/000-TEST01/background-palette0.png"))).convert("RGBA")
+        picture = Image.open(io.BytesIO(archive.read("zones/test-woods/maps/000-TEST01/background-palette0.png"))).convert("RGBA")
     picture = picture.resize((picture.width * 2, picture.height * 2))  # a repaint at a larger size
     for x in range(40, 80):
         for y in range(40, 80):
             picture.putpixel((x, y), (0, 0, 255, 255))
     buffer = io.BytesIO(); picture.save(buffer, "PNG")
-    edited = rewrite(package, tmp_path / "painted.dw1zone", "maps/000-TEST01/background-palette0.png", buffer.getvalue(),
+    edited = rewrite(package, tmp_path / "painted.dw1zone", "zones/test-woods/maps/000-TEST01/background-palette0.png", buffer.getvalue(),
                      fix_manifest=False)
     report = check_package(edited, META, entries, originals, room)
     item = report.maps[0]
@@ -122,13 +122,13 @@ def painted_picture(package):
     import io
     from PIL import Image
     with zipfile.ZipFile(package) as archive:
-        picture = Image.open(io.BytesIO(archive.read("maps/000-TEST01/background-palette0.png"))).convert("RGBA")
+        picture = Image.open(io.BytesIO(archive.read("zones/test-woods/maps/000-TEST01/background-palette0.png"))).convert("RGBA")
     picture = picture.resize((picture.width * 2, picture.height * 2))
     buffer = io.BytesIO(); picture.save(buffer, "PNG")
     return buffer.getvalue()
 
 
-PICTURE = "maps/000-TEST01/background-palette0.png"
+PICTURE = "zones/test-woods/maps/000-TEST01/background-palette0.png"
 
 
 def test_repaint_is_found_when_the_manifest_was_updated_too(tmp_path, monkeypatch):
@@ -147,10 +147,10 @@ def test_damaged_picture_skips_its_map_only_and_keeps_the_earlier_import(tmp_pat
     entries, package, originals, room = exported(tmp_path)
     monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
     store = OverrideStore(tmp_path / "project")
-    store.apply(check_package(rewrite(package, tmp_path / "first.dw1zone", "maps/000-TEST01/TEST01.MAP", b"EARLIER"), META, entries, originals, room))
+    store.apply(check_package(rewrite(package, tmp_path / "first.dw1zone", "zones/test-woods/maps/000-TEST01/TEST01.MAP", b"EARLIER"), META, entries, originals, room))
     data = painted_picture(package)
     damaged = rewrite(package, tmp_path / "cut.dw1zone", PICTURE, data[:len(data) // 2], fix_manifest=True)
-    damaged = rewrite(damaged, tmp_path / "cut2.dw1zone", "maps/001-TEST02/TEST02.MAP", b"NEW")
+    damaged = rewrite(damaged, tmp_path / "cut2.dw1zone", "zones/test-town/maps/001-TEST02/TEST02.MAP", b"NEW")
     report = check_package(damaged, META, entries, originals, room)
     first, second = report.maps
     assert report.ok and first.skipped and not first.changed and second.changed == ["MAP"]
@@ -163,9 +163,9 @@ def test_hand_edited_tfs_wins_over_its_untouched_picture(tmp_path, monkeypatch):
     entries, package, originals, room = exported(tmp_path)
     monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
     with zipfile.ZipFile(package) as archive:
-        tfs = bytearray(archive.read("maps/000-TEST01/TEST01.TFS"))
+        tfs = bytearray(archive.read("zones/test-woods/maps/000-TEST01/TEST01.TFS"))
     tfs[-1] ^= 1
-    edited = rewrite(package, tmp_path / "hex.dw1zone", "maps/000-TEST01/TEST01.TFS", bytes(tfs), fix_manifest=False)
+    edited = rewrite(package, tmp_path / "hex.dw1zone", "zones/test-woods/maps/000-TEST01/TEST01.TFS", bytes(tfs), fix_manifest=False)
     report = check_package(edited, META, entries, originals, room)
     item = report.maps[0]
     assert report.ok and item.changed == ["TFS"] and item.files["TFS"] == bytes(tfs) and item.picture is None, item.problems
@@ -213,3 +213,28 @@ def test_foreground_pieces_are_repainted_or_kept():
     _, counts, reasons, _ = _repaint_foreground(data, scene, 1, old_words, new_words, lambda x, y: 42,
                                                 lambda x, y: (0, 0, 255), lambda x, y: (0, 255, 0))
     assert reasons["separate art"] == 1 and counts["own palette"] == 0  # art not found in the background is kept
+
+
+def test_version_1_package_with_flat_maps_folder_still_imports(tmp_path, monkeypatch):
+    entries, package, originals, room = exported(tmp_path)
+    monkeypatch.setattr("dw1_workbench.zone_import.parse_map", lambda data, entry: two_maps()[1])
+    legacy = tmp_path / "legacy.dw1zone"
+    with zipfile.ZipFile(package) as zin, zipfile.ZipFile(legacy, "w") as zout:
+        manifest = json.loads(zin.read("manifest.json"))
+        renamed = {}
+        for item in manifest["maps"]:
+            renamed[item.pop("folder")] = f"maps/{item['index']:03d}-TEST0{item['index'] + 1}"
+            item.pop("zone")
+        manifest["version"] = 1
+        for entry in manifest["files"]:
+            for new, old in renamed.items():
+                entry["path"] = entry["path"].replace(new, old)
+        for info in zin.infolist():
+            if info.filename != "manifest.json":
+                name = info.filename
+                for new, old in renamed.items():
+                    name = name.replace(new, old)
+                zout.writestr(name, zin.read(info.filename))
+        zout.writestr("manifest.json", json.dumps(manifest))
+    report = check_package(legacy, META, entries, originals, room)
+    assert report.ok and [item.status for item in report.maps] == [{"MAP": "unchanged", "TFS": "unchanged"}] * 2

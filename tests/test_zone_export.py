@@ -36,13 +36,13 @@ def test_bundle_package_contents(tmp_path):
     path = tmp_path / "bundle.dw1zone"
     with zipfile.ZipFile(path) as package:
         names_in = set(package.namelist())
-        assert {"manifest.json", "routes.json", "zones/test-woods.json", "zones/test-town.json",
-                "maps/000-TEST01/TEST01.MAP", "maps/000-TEST01/TEST01.TFS", "maps/000-TEST01/map.json",
-                "maps/000-TEST01/pathing.json", "maps/000-TEST01/pathing.png", "maps/000-TEST01/floor-grid.png",
-                "maps/000-TEST01/background-palette0.png"} <= names_in
+        assert {"manifest.json", "routes.json", "zones/test-woods/zone.json", "zones/test-town/zone.json",
+                "zones/test-woods/maps/000-TEST01/TEST01.MAP", "zones/test-woods/maps/000-TEST01/TEST01.TFS", "zones/test-woods/maps/000-TEST01/map.json",
+                "zones/test-woods/maps/000-TEST01/pathing.json", "zones/test-woods/maps/000-TEST01/pathing.png", "zones/test-woods/maps/000-TEST01/floor-grid.png",
+                "zones/test-woods/maps/000-TEST01/background-palette0.png"} <= names_in
         assert not any(name.startswith("observations/") for name in names_in)
-        assert package.read("maps/001-TEST02/TEST02.MAP") == b"MAP1"
-        document = json.loads(package.read("maps/000-TEST01/map.json"))
+        assert package.read("zones/test-town/maps/001-TEST02/TEST02.MAP") == b"MAP1"
+        document = json.loads(package.read("zones/test-woods/maps/000-TEST01/map.json"))
         assert document["files"]["map"]["sha256"] == hashlib.sha256(b"MAP0").hexdigest()
         assert document["digimon_placements"][0]["name"] == "Agumon"
         assert document["entrances"] == [{"from_map": 1, "from_label": "Test Town · TEST02", "slot": 0, "to_spawn": 0,
@@ -60,7 +60,7 @@ def test_single_zone_lists_links_to_outside(tmp_path):
     manifest = export_package(tmp_path / "zone.dw1zone", ["Test Woods"], {0: every[0]}, {0: first, 1: second}, entries,
                               {}, {}, {})
     with zipfile.ZipFile(tmp_path / "zone.dw1zone") as package:
-        zone = json.loads(package.read("zones/test-woods.json"))
+        zone = json.loads(package.read("zones/test-woods/zone.json"))
     assert manifest["kind"] == "zone" and manifest["external_links"] == 2
     assert zone["exits_to_outside"][0]["to_map"] == 1 and zone["entrances_from_outside"][0]["from_map"] == 1
 
@@ -71,6 +71,29 @@ def test_changed_source_and_cancel_leave_no_package(tmp_path):
         export_package(tmp_path / "bad", ["Test Woods", "Test Town"], sources(entries, first, second, tamper=True),
                        {}, entries, {}, {}, {})
     with pytest.raises(Cancelled):
-        export_package(tmp_path / "bad", ["Test Woods"], sources(entries, first, second), {}, entries, {}, {}, {},
-                       cancelled=lambda: True)
+        export_package(tmp_path / "bad", ["Test Woods"], {0: sources(entries, first, second)[0]}, {}, entries, {}, {},
+                       {}, cancelled=lambda: True)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_each_zone_has_its_own_folder(tmp_path):
+    entries, first, second = two_maps()
+    manifest = export_package(tmp_path / "bundle", ["Test Woods", "Test Town"], sources(entries, first, second),
+                              {0: first, 1: second}, entries, {}, {}, {})
+    with zipfile.ZipFile(tmp_path / "bundle.dw1zone") as package:
+        names = package.namelist()
+        woods = json.loads(package.read("zones/test-woods/zone.json"))
+    assert manifest["version"] == 2
+    assert {item["index"]: item["folder"] for item in manifest["maps"]} == {
+        0: "zones/test-woods/maps/000-TEST01", 1: "zones/test-town/maps/001-TEST02"}
+    assert woods["maps"] == [{"index": 0, "label": None, "folder": "zones/test-woods/maps/000-TEST01"}]
+    assert not any(name.startswith("maps/") for name in names)
+    assert all(name in ("manifest.json", "routes.json") or name.startswith(("zones/test-woods/", "zones/test-town/"))
+               for name in names)
+
+
+def test_maps_outside_the_selected_zones_are_refused(tmp_path):
+    entries, first, second = two_maps()
+    with pytest.raises(ValueError, match="not selected: Test Town"):
+        export_package(tmp_path / "zone", ["Test Woods"], sources(entries, first, second), {}, entries, {}, {}, {})
     assert list(tmp_path.iterdir()) == []

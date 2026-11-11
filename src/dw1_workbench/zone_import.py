@@ -129,7 +129,12 @@ def check_package(path: Path, meta: dict, entries: list[MapEntry], originals: di
         if not isinstance(index, int) or not 0 <= index < min(len(entries), MAP_COUNT) or not entries[index].name:
             problems.append(f"Map {index!r} is not in this disc's map table"); continue
         entry = entries[index]
+        # Version 2 packages name each map's folder (zones/<zone>/maps/...); version 1 kept them all under maps/.
         folder = f"maps/{index:03d}-{entry.name}"
+        if manifest.get("version", 1) >= 2:
+            folder = listed.get("folder") or ""
+            if not folder.endswith(f"/{index:03d}-{entry.name}"):
+                problems.append(f"Map {index} has no folder for {entry.name} in the manifest"); continue
         item = MapImport(index, entry.name, listed.get("label") or entry.name,
                          {kind: files[f"{folder}/{entry.name}.{kind}"] for kind in ("MAP", "TFS")
                           if f"{folder}/{entry.name}.{kind}" in files})
