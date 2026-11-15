@@ -1,5 +1,29 @@
 # Format support and evidence
 
+## Animated WebP player backgrounds — 2026-11-15 (experimental)
+
+WebP animation is an external player replacement, NOT a DW1 disc format. RIFF/ANIM loop count and ANMF24-bit durations parsed with chunk/file bounds, frame-count limits and padding checks; Pillow/libwebp handles pixel decoding, delta blend and disposal. References: [Google WebP container specification](https://developers.google.com/speed/webp/docs/riff_container), [Pillow WebP decoder source](https://pillow.readthedocs.io/en/stable/_modules/PIL/WebPImagePlugin.html). No decoder source copied. File bytes retained unchanged;64MiB compressed,8MP canvas,600frames maximum. Full-canvas opaque VP8 frames can be independently decoded; ALPH/VP8L frames cannot assume independence. Finite loops hold last frame; zero/tiny delays clamp10ms. Source alpha blends only over confirmed background pixels; native entities/UI remain protected. On-demand byte-bounded caching avoids decoding/retaining entire clips.
+
+Known limitation: full-resolution delta dependencies are expensive. Supplied File City2048×1706/180frame/3s clip rendered correctly in real-core standing test, but only7 distinct animation frames displayed over10s; smooth playback is **unverified and currently poor**, not format-complete performance support. See current HANDOVER measurements. Titles, avatars, animated TFS encoding and scene reconstruction are not newly supported.
+
+## Title / starter adapter — 2026-11-15
+
+`front_menu.py` gates on exact native world-object IDs/instances/callbacks, not generic script-state values. Title actions0–3 delegate to native MenuCursor; fifth Settings is host-rendered. New-game states6/10 wait at1 while seven hidden-mapping choices are shown, then resume0x11 (native naming/story). Two signature-checked starter initializer argument instructions are temporarily patched/restored with Beetle I-cache synchronization; partner models/sounds/care use native initialization. Sources/addresses in current HANDOVER, from MIT dw_decomp aaf69a4 `main.c`, `main_menu.c`, `new_game.c`, `shop/script_menu.c`, `partner_impl.c`, `script.h`, `world_object.h`; no upstream code copied.
+
+Partner IDs17/31/46/3/45/57/32 verified from USA executable for Gabumon/Patamon/Palmon/Agumon/Biyomon/Penguinmon/Kunemon. Kunemon uses native partner32, not NPC duplicate152. Tentomon111 deliberately excluded; user replaced it with Kunemon. New starters select the first source-linked regular technique and corresponding learned-bit(s); this is a workbench starting-move policy, not a claimed original starter mapping. All7 completed native initialization in an isolated real core with positive HP/MP, life360 and expected IDs; Patamon/Kunemon visual captures inspected. Full attack/evolution gameplay still needs acceptance. Source game images remain read-only; no asset format support changed.
+
+## Roaming care readings / lifespan experiment — 2026-11-15
+
+USA PartnerPara0x80138460: i16 remainingLifetime+72 (hours), energyLevel+60, poopLevel+24 (native countdown ticks), tiredness+34 (0–100). RaiseData0x801225BC[66],28bytes: u8 energyCap+8, i16 default poopTimer+12. Source: local dw_decomp aaf69a4 `include/dw/params.h`, `include/dw/partner.h`, `src/main/partner_impl.c`, `src/main/clock.c`. No upstream code copied. Food is energy fullness, not an invented hunger percentage. Toilet default can be exceeded by game effects (real inspection35 vs default24); values are retained, only bar fill clamps. Lifespan360 is a reference, not an inferred species maximum. Existing HUD visibility gate hides overlays with native status bars/menus.
+
+`lifespan.py` is frame-local normal-hour countdown compensation, not executable patching. Controlled real-core inspection replay: native12:59→13:01 life5→4 vs paused5→5, lives unchanged; actual HUD frame inspected. It does not handle multi-hour scripted sleep/training and is not verified against native live death transitions. Explicit lifespan selections bypass legacy P6 immortality; legacy default unchanged. Starter dialogue source identified in shop overlay state machine, but no starter patch or new decoder is enabled.
+
+## USA item icons — 2026-11-15
+
+Read-only original CUE extraction found `ETCDAT/ITEM.TIM` (LBA7470,17184bytes), 4bpp256×128 at VRAM320,0;24 palettes at224,488. USA executable `ITEM_CLUT_DATA` address0x80127BDC supplies128 palette indices. `utils2.c:setItemTexture` selects UV `(id%16*16,id//16*16)` and palette row488+index. `inventory.c:renderInventoryTop` uses `renderItemSprite`; `item.c:renderOverworldItem` uses the same texture setup and scales a camera-facing quad by depth. No separate floor model is implied. Native last-column UV span is15, and large ground sprites use15×15 spans; exporter retains full16×16 source cells and records this distinction. Battle-menu call-chain not yet verified; no claim of three separate icon sets.
+
+Source: local MIT [dw_decomp](https://github.com/jype0/dw_decomp) revision aaf69a4, `src/main/utils2.c`, `src/main/item.c`, `src/main/inventory.c`, `config/us/symbols.txt`. No upstream code copied. `tools/export_item_icons.py` exports PNGs, contact sheet and source hashes/extent/palette provenance to an exclusive external directory. TIM zero/STP alpha approximation unchanged. Real128-cell contact sheet visually inspected, not live three-context capture comparison. Synthetic palette/truncation tests added.
+
 ### Avatar-only translucent MMD packets (2026-11-05)
 
 Opt-in thumbnail parsing accepts textured Gouraud triangle0x36 and quad0x3E, with the same packet-length, extent, index and flag validation as opaque0x34/0x3C. Default static parser/export remains strict. Material translucency/blend flags are retained; thumbnail rasterization preserves texture alpha but does not emulate PS1 framebuffer blend modes. This is not newly verified translucent model export support.

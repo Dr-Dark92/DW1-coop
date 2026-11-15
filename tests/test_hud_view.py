@@ -60,6 +60,18 @@ def test_shown_only_with_the_games_status_bars():
     assert U.read_hud(ram.read, None) is None
 
 
+def test_care_readings_use_native_units_and_species_limits():
+    from dw1_workbench.progression import PARTNER_PARA
+    ram = Ram()
+    for offset, value in ((72, 180), (60, 28), (24, 35), (34, 40)):
+        ram.put(PARTNER_PARA + offset, "<h", value)
+    ram.put(0x801225BC + 3 * 28 + 8, "B", 40)
+    ram.put(0x801225BC + 3 * 28 + 12, "<h", 24)
+    state = U.read_hud(ram.read, None)
+    assert state.care == (180, 28, 35, 40)  # above-default toilet countdown is NOT truncated
+    assert state.care_limits == (40, 24)
+
+
 def test_map_shows_only_the_part_of_the_grid_in_use(application):
     image, (left, top, side) = U.map_tiles(grid((40, 50), (41, 50), (45, 52), exits=[(42, 50)]))
     assert side == 8 and left <= 40 and left + side > 45 and top <= 50 and top + side > 52

@@ -36,6 +36,7 @@ from PIL import Image
 from .live import CURRENT_SCREEN, ram_offset, ram_end
 from .quicksave import _atomic_write
 from .telemetry import Telemetry
+from .background_animation import AnimatedFrame, BackgroundDecoder, MAX_FILE_BYTES, webp_animation
 
 MAP_TILE_DATA = 0x8014F084  # MapTileData tiles[35] (20 bytes each), then ...
 CAMERA = MAP_TILE_DATA + 0x1BB4  # i16 cameraX, cameraY
@@ -88,11 +89,15 @@ class PictureCache:
 
     def __init__(self, telemetry, on_error, limit=PICTURE_BYTES, loader=None):
         self.telemetry, self.on_error, self.limit = telemetry, on_error, limit
-        self.loader = loader or load_picture
+        self._decoder = BackgroundDecoder(lambda: self._closed, limit) if loader is None else None
+        self._decode_index = 0
+        self.loader = loader or self._load_frame
         self._items = OrderedDict()
         self._condition = threading.Condition()
         self._pending = self._active = None
         self._failed = deque(maxlen=16)
+        self._failed_sources = deque(maxlen=16)
+        self._completed = OrderedDict()
         self._closed = False
         self._thread = None
 
@@ -101,8 +106,10 @@ class PictureCache:
         with self._condition:
             return sum(item.nbytes for item in self._items.values())
 
-    def request(self, key, path, width, height, scale):
+    def request(self, key, path, width, height, scale, frame_index=0, epoch=0):
         with self._condition:
+            if self.source_key(key) in self._failed_sources:
+                return None
             cached = self._items.get(key)
             if cached is not None:
                 self._items.move_to_end(key)
@@ -110,13 +117,13 @@ class PictureCache:
                 return cached
             if self._closed or key in self._failed:
                 return None
-            if width * height * TILE * TILE * scale * scale * 4 > self.limit:
+            if width * height * TILE * TILE * scale * scale * 4 > self.limit and Path(path).suffix.lower() != ".webp":
                 self._failed.append(key)
                 self.on_error("HD picture exceeds the decoded background cache limit; using native graphics.")
                 return None
             if self._active != key and (self._pending is None or self._pending[0] != key):
                 self.telemetry.count("picture.cache_miss")
-                self._pending = key, path, width, height, scale
+                self._pending = key, path, width, height, scale, frame_index, epoch
                 if self._thread is None:
                     self._thread = threading.Thread(target=self._run, name="hd-picture-loader", daemon=True)
                     self._thread.start()
@@ -124,36 +131,72 @@ class PictureCache:
             return None
 
     def _run(self):
+        try:
+            self._run_jobs()
+        finally:
+            if self._decoder is not None: self._decoder.close()
+
+    def _load_frame(self, path, width, height, scale):
+        return self._decoder.load(path, width, height, scale, self._decode_index)
+
+    def _run_jobs(self):
         while True:
             with self._condition:
                 while self._pending is None and not self._closed:
                     self._condition.wait()
                 if self._closed:
                     return
-                key, path, width, height, scale = self._pending
+                key, path, width, height, scale, frame_index, epoch = self._pending
                 self._pending, self._active = None, key
             try:
                 with self.telemetry.measure("picture.load_resample"):
+                    self._decode_index = frame_index
                     picture = self.loader(path, width, height, scale)
                 with self._condition:
                     if not self._closed:
                         self._items[key] = picture
+                        if isinstance(picture, AnimatedFrame):
+                            source = self.source_key(key)
+                            self._completed[source] = (key, epoch)
+                            self._completed.move_to_end(source)
+                            while len(self._completed) > 64: self._completed.popitem(last=False)
                         while sum(item.nbytes for item in self._items.values()) > self.limit:
                             self._items.popitem(last=False)
                             self.telemetry.count("picture.cache_eviction")
             except Exception as exc:  # whatever a picture does, the only loader must survive for the next map
+                if self._decoder is not None: self._decoder.close()
                 with self._condition:
                     self._failed.append(key)
-                self.on_error(f"HD picture {Path(path).name} could not be loaded: {exc}")
+                    source = self.source_key(key)
+                    self._failed_sources.append(source)
+                if not self._closed:
+                    self.on_error(f"HD picture {Path(path).name} could not be loaded: {exc}")
             finally:
                 with self._condition:
                     self._active = None
+
+    def latest(self, source_key, epoch=None):
+        """Last completed animation frame, even when the requested deadline advanced during decoding."""
+        with self._condition:
+            completed = self._completed.get(source_key)
+            if completed is not None and (epoch is None or completed[1] == epoch):
+                return self._items.get(completed[0])
+        return None
+
+    @staticmethod
+    def source_key(key):
+        return key[0] if isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], tuple) else key
+
+    def failed(self, source_key):
+        with self._condition:
+            return source_key in self._failed_sources
 
     def close(self):
         with self._condition:
             self._closed = True
             self._pending = None
             self._items.clear()
+            self._completed.clear()
             self._condition.notify()
         if self._thread is not None:
             self._thread.join(2)  # an in-progress Pillow call cannot be forcibly terminated
@@ -355,6 +398,14 @@ def compose(frame: np.ndarray, palette: np.ndarray, layers: MapLayers, view: Scr
     if per_frame > 1:
         output = np.repeat(np.repeat(output, per_frame, axis=0), per_frame, axis=1)
         mask = np.repeat(np.repeat(mask, per_frame, axis=0), per_frame, axis=1)
+    alpha = (layer >> 24) & 255
+    if np.any(alpha != 255):
+        # Transparent animation pixels reveal the native environment, never erase characters/HUD.
+        blended = np.full_like(output, 0xFF000000)
+        for shift in (16, 8, 0):
+            channel = ((((layer >> shift) & 255) * alpha + ((output >> shift) & 255) * (255 - alpha) + 127) // 255)
+            blended |= channel << shift
+        layer = blended
     return Composed(np.where(mask, layer, output), coverage)
 
 
@@ -364,7 +415,7 @@ def _shifted(tables: np.ndarray | None, shift: np.ndarray) -> np.ndarray:
 
 
 def _tint(layer: np.ndarray, tables: np.ndarray) -> np.ndarray:
-    return (0xFF000000 | tables[0][(layer >> 16) & 255].astype(np.uint32) << 16
+    return ((layer & 0xFF000000) | tables[0][(layer >> 16) & 255].astype(np.uint32) << 16
             | tables[1][(layer >> 8) & 255].astype(np.uint32) << 8 | tables[2][layer & 255])
 
 
@@ -383,7 +434,7 @@ def _shade(layer: np.ndarray, rows, columns, relative, repeat: int) -> np.ndarra
     red = np.clip(((pixels >> 16) & 255) + add[:, 0], 0, 255)
     green = np.clip(((pixels >> 8) & 255) + add[:, 1], 0, 255)
     blue = np.clip((pixels & 255) + add[:, 2], 0, 255)
-    layer[rows, columns] = (0xFF000000 | red << 16 | green << 8 | blue).astype(np.uint32)
+    layer[rows, columns] = ((pixels & 0xFF000000) | red << 16 | green << 8 | blue).astype(np.uint32)
     return layer
 
 
@@ -607,13 +658,17 @@ def picture_window(picture: np.ndarray, camera_x: int, camera_y: int, scale: int
 class BackgroundLayer:
     """Prepared on the emulator thread (it reads RAM), composed anywhere. `pictures(map_index)` gives a path or None."""
 
-    def __init__(self, read, serialize, pictures, scale: int = OUTPUT_SCALE, on_error=None, telemetry=None):
+    def __init__(self, read, serialize, pictures, scale: int = OUTPUT_SCALE, on_error=None, telemetry=None, clock=time.monotonic):
         self.telemetry = telemetry or Telemetry()
         def timed_read(offset, size):
             with self.telemetry.measure("background.ram_read"):
                 return read(offset, size)
         self.read, self.serialize, self.pictures, self.scale = timed_read, serialize, pictures, scale
         self.on_error = on_error or (lambda text: None)
+        self.clock = clock
+        self._animation = None
+        self._animation_start = None
+        self._animation_epoch = self._animation_index = 0
         self.picture_cache = PictureCache(self.telemetry, self.on_error)
         self.background = MapBackground(self.read)
         self._picture = None
@@ -652,9 +707,19 @@ class BackgroundLayer:
         self._foreground_key = None
         self._cameras = []
         self._wide_cameras = []
+        if self._animation is not None:
+            self._picture_key = None
+            self._picture = None
+        self._animation = self._animation_start = None
+        self._tinted = {}
+        self._last_look = None
 
     def close(self):
         self.picture_cache.close()
+
+    @property
+    def animated(self):
+        return self._animation is not None
 
     def _ready_picture(self, index: int) -> bool:
         """True once this map's picture is loaded; resampling runs in the background so the game never waits."""
@@ -670,6 +735,8 @@ class BackgroundLayer:
                     self._next_maps.popitem(last=False)
             self._picture_key = key
             self._picture = None
+            self._animation = self._animation_start = None
+            self._animation_epoch = self._animation_index = 0
             self._tinted = {}
             self._last_look = None
             path = self.pictures(index)
@@ -689,12 +756,40 @@ class BackgroundLayer:
                     self._known_pictures.popitem(last=False)
         if self.wide and self._picture_path is None:
             self._picture = self._tiles_as_picture()
-        if self._picture is None and self._picture_path is not None:
-            self._picture = self.picture_cache.request(self._cache_key, self._picture_path, key[1], key[2], scale)
+        if self._picture_path is not None:
+            if self.picture_cache.failed(self._cache_key):
+                self._picture = None
+                return False  # a corrupt later animation frame must not leave a misleading frozen replacement
+            if self._animation is not None:
+                elapsed = max(0, (self.clock() - self._animation_start) * 1000)
+                index = self._animation.frame_at(elapsed)
+                epoch = int(elapsed // self._animation.ends[-1])
+                if self._animation.loops: epoch = min(epoch, self._animation.loops - 1)
+                if epoch != self._animation_epoch:
+                    self._animation_index = -1
+                    self._animation_epoch = epoch
+                ready = self.picture_cache.request((self._cache_key, index), self._picture_path, key[1], key[2], scale, index, epoch)
+                ready = ready if ready is not None else self.picture_cache.latest(self._cache_key, epoch)
+                if isinstance(ready, AnimatedFrame) and ready.index < self._animation_index:
+                    ready = None  # a late decode must not run an animation backwards within the same loop
+            elif self._picture is None:
+                ready = self.picture_cache.request(self._cache_key, self._picture_path, key[1], key[2], scale)
+            else:
+                ready = None
+            if isinstance(ready, AnimatedFrame):
+                if self._animation_start is None: self._animation_start = self.clock()
+                self._animation = ready.animation
+                self._animation_index = ready.index
+                if self._picture is not ready:
+                    self._tinted = {}  # frame identity changes; never keep a whole-map tint per animation frame
+                    self._last_look = None
+                    self._picture = ready
+            elif ready is not None:
+                self._picture = ready
         if self._picture is not None:
             # Only revisit predictions with dimensions actually read from the game; a demand miss always wins.
             following = self._known_pictures.get(self._next_maps.get(index))
-            if following is not None:
+            if following is not None and self._animation is None:
                 self.picture_cache.request(*following)
         return self._picture is not None
 
@@ -891,6 +986,8 @@ class BackgroundLayer:
         frame, palette, layers, view, (picture, tables, camera_x, camera_y) = job.payload
 
         def screen_picture(shift):
+            if isinstance(picture, AnimatedFrame):
+                return _tint(picture.window(camera_x, camera_y, self.scale), _shifted(tables, shift))
             look = self._look(picture, tables, shift)
             if look is None:
                 return _tint(picture_window(picture, camera_x, camera_y, self.scale), _shifted(tables, shift))
@@ -975,26 +1072,42 @@ class HdPictures:
         self.directory = Path(directory)
 
     def path(self, index: int) -> Path | None:
-        found = sorted(self.directory.glob(f"{index:03d}-*")) if self.directory.is_dir() else []
+        found = sorted(p for p in self.directory.glob(f"{index:03d}-*") if p.is_file() and
+                       p.suffix.lower() in {".png", ".webp", ".jpg", ".jpeg", ".bmp"}) if self.directory.is_dir() else []
         return found[0] if found else None
 
     def maps(self) -> list[int]:
         if not self.directory.is_dir():
             return []
-        return sorted({int(path.name[:3]) for path in self.directory.iterdir() if re.match(r"\d{3}-", path.name)})
+        return sorted({int(path.name[:3]) for path in self.directory.iterdir() if re.match(r"\d{3}-", path.name)
+                       and path.is_file() and path.suffix.lower() in {".png", ".webp", ".jpg", ".jpeg", ".bmp"}})
 
-    def store(self, index: int, name: str, data: bytes) -> Path:
-        """Keep a checked PNG of the picture, bytes unchanged when it already is one."""
+    def store(self, index: int, name: str, data: bytes, cancelled=lambda: False) -> Path:
+        """Preserve WebP including animation; other still pictures retain the existing PNG path."""
         from io import BytesIO
+        if len(data) > MAX_FILE_BYTES: raise ValueError("Background exceeds the 64 MiB file limit")
+        animation = webp_animation(data)
         with Image.open(BytesIO(data)) as opened:
+            if opened.width * opened.height > (8 if animation else 32) * 1024 * 1024:
+                raise ValueError("Background dimensions exceed limit (animated: 8 megapixels)")
+            if getattr(opened, "n_frames", 1) > 1 and opened.format != "WEBP":
+                raise ValueError("Animated backgrounds currently require WebP")
+            if animation and opened.n_frames != len(animation.durations):
+                raise ValueError("WebP frame metadata disagrees with decoder")
             opened.load()
-            if opened.format != "PNG":
+            suffix = ".webp" if opened.format == "WEBP" else ".png"
+            if opened.format not in {"PNG", "WEBP"}:
                 buffer = BytesIO()
                 opened.convert("RGB").save(buffer, "PNG")
                 data = buffer.getvalue()
-        self.remove(index)
-        target = self.directory / f"{index:03d}-{re.sub(r'[^A-Za-z0-9_]', '_', name)}.png"
+        if cancelled():
+            from .errors import Cancelled
+            raise Cancelled("Background import cancelled; previous replacement unchanged")
+        target = self.directory / f"{index:03d}-{re.sub(r'[^A-Za-z0-9_]', '_', name)}{suffix}"
+        previous = [path for path in self.directory.glob(f"{index:03d}-*") if path.is_file() and path != target and path.suffix.lower()
+                    in {".png", ".webp", ".jpg", ".jpeg", ".bmp"}]
         _atomic_write(target, data)
+        for path in previous: path.unlink()  # only remove the old image after replacement was written successfully
         return target
 
     def remove(self, index: int):

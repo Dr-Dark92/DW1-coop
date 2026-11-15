@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QGroupBox, QScrollArea, 
                                QVBoxLayout, QWidget)
 
 from .errors import Cancelled, DiscFormatError
+from .gameplay_options import RoamingOptions
 from .graphics import DEFAULT_RESOLUTION, NATIVE_RESOLUTION, RESOLUTIONS, core_options
 from .inspection import InspectionStore, SpawnLog
 from .libretro import LibretroError, core_info
@@ -237,17 +238,54 @@ class PlayPanel(QWidget):
         self.use_imports.toggled.connect(lambda value: self.settings.setValue("play/use_imports", value))
         form.addRow("", self.use_imports)
         form = group("Gameplay")
-        self.game_rules = QCheckBox("Game rules (P6): partner levels and EXP from battles, no aging or death")
+        self.game_rules = QCheckBox("EXP-based progression and level-based evolution")
         self.game_rules.setToolTip(
             "Applied to the running game's memory (USA release only). Your partner starts at level 20 with at least "
             "the stats of its level: +100 max HP and MP and +10 Offense, Defense, Speed and Brains per level. "
             "Won battles give EXP: Rookie 10, Champion 30, Ultimate 90 per enemy, ×1.5 for 2 enemies, ×2 for 3, "
             "×3 for 4. EXP to the next level: (L + 1)(L + 20) / 2. Level and EXP are kept with the player's saves; "
-            "lifetime and lives are held full, so the partner does not age or die.")
+            "lifespan is configured separately below. Legacy mode retains the old no-aging/no-death behavior.")
         self.game_rules.setEnabled(self.live_ram)
         self.game_rules.setChecked(self.live_ram and self.settings.value("play/game_rules", False, type=bool))
         self.game_rules.toggled.connect(lambda value: self.settings.setValue("play/game_rules", value))
         form.addRow("", self.game_rules)
+        self.gameplay_style = QComboBox()
+        self.gameplay_style.addItem("Classic — native progression and evolution", False)
+        self.gameplay_style.addItem("EXP-based — levels and manual level-based evolution", True)
+        self.gameplay_style.setCurrentIndex(1 if self.game_rules.isChecked() else 0)
+        self.gameplay_style.setEnabled(self.live_ram)
+        self.gameplay_style.setToolTip("Applies at the next launch. Existing EXP records are retained, never deleted.")
+        self.gameplay_style.currentIndexChanged.connect(
+            lambda _: self.game_rules.setChecked(bool(self.gameplay_style.currentData())))
+        self.game_rules.toggled.connect(lambda enabled: self.gameplay_style.setCurrentIndex(1 if enabled else 0))
+        self.gameplay_style.setToolTip(self.game_rules.toolTip() +
+                                      " Changes apply next launch. Classic does not undo previously awarded EXP stat gains.")
+        self.game_rules.hide()  # compatibility with existing launch/tests; combo is the visible control
+        form.addRow("Gameplay style", self.gameplay_style)
+        self.lifespan = QComboBox()
+        self.lifespan.addItem("Keep existing behavior (legacy EXP: no aging or death)", None)
+        self.lifespan.addItem("Enabled — native lifespan and consequences", True)
+        self.lifespan.addItem("Disabled — pause normal hourly lifespan loss (experimental)", False)
+        life_value = self.settings.value("play/lifespan", "legacy")
+        self.lifespan.setCurrentIndex({"legacy": 0, "enabled": 1, "disabled": 2}.get(life_value, 0))
+        self.lifespan.setEnabled(self.live_ram)
+        self.lifespan.currentIndexChanged.connect(lambda index: self.settings.setValue(
+            "play/lifespan", ("legacy", "enabled", "disabled")[index]))
+        self.lifespan.setToolTip("Next launch only. Disabled pauses normal one-hour loss; it does not restore lives, "
+                                "stop sickness or battle defeat, freeze age, or guarantee immortality. "
+                                "Sleep/training time jumps still need real-game validation.")
+        form.addRow("Lifespan", self.lifespan)
+        self.roaming_boxes = {}
+        roaming = RoamingOptions.load(self.settings)
+        for key, label in (("hp_mp", "Show roaming HP / MP"), ("lifespan", "Show lifespan bar (hours; 360-hour reference)"),
+                           ("hunger", "Show hunger / food energy"), ("poop", "Show toilet countdown (native ticks)"),
+                           ("fatigue", "Show fatigue bar")):
+            box = QCheckBox(label); box.setChecked(getattr(roaming, key)); box.setEnabled(self.live_ram)
+            box.toggled.connect(lambda value, key=key: self.settings.setValue(f"play/roaming/{key}", value))
+            self.roaming_boxes[key] = box; form.addRow("", box)
+        care_note = QLabel("HUD visibility does not change care needs. Style/lifespan apply on next launch.\n"
+                          "Settings are shared launch defaults, not permanent per-save rules.")
+        care_note.setWordWrap(True); form.addRow("", care_note)
         coop_row = QHBoxLayout()
         self.coop = QCheckBox("Co-op battle test: player 2's Digimon joins your fights")
         self.coop.setToolTip("A prototype in one game window. Player 2 has your battle controls on J and L (commands), K "
@@ -698,6 +736,8 @@ class PlayPanel(QWidget):
                             launch_slot=slot, launch_inspection=inspection_id,
                             resume_on_close=self.resume.isChecked(), live_ram=self.live_ram,
                             game_rules=self.game_rules.isChecked(), hd_pictures=self.hd_pictures,
+                            lifespan_enabled=self.lifespan.currentData(),
+                            roaming=RoamingOptions.load(self.settings),
                             framerate=0.0 if self.framerate.value() <= FRAMERATE_OWN else self.framerate.value(),
                             forms=self.imports[2]() if disc is not None and len(self.imports) > 2 else {},
                             offer_forms=self.offer_forms.isChecked(),
@@ -725,11 +765,19 @@ class PlayPanel(QWidget):
         window.inspections_changed.connect(self.refresh_inspections)
         window.closed.connect(self._window_closed)
         window.quick_save_changed.connect(self._sync_quick_save)
+        window.gameplay_changed.connect(self._sync_gameplay)
         window.pause.toggled.connect(self.game_pause.setChecked)
         self.window = window
         self._update_game_controls()
         self._update_buttons()
         window.start()
+
+    def _sync_gameplay(self):
+        self.game_rules.setChecked(self.settings.value("play/game_rules", False, type=bool))
+        self.lifespan.setCurrentIndex({"legacy": 0, "enabled": 1, "disabled": 2}.get(self.settings.value("play/lifespan", "legacy"), 0))
+        options = RoamingOptions.load(self.settings)
+        for key, box in self.roaming_boxes.items():
+            box.setChecked(getattr(options, key))
 
     def _build_patched(self, slot, inspection_id):
         dialog = QProgressDialog("Building the patched disc", "Cancel", 0, 100, self)

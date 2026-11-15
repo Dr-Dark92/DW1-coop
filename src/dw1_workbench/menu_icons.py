@@ -7,7 +7,7 @@ from functools import lru_cache
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 
-NAMES = ("Evolution", "Digi-Dex", "Digi-Bank", "Split Screen", "LAN Co-op")
+NAMES = ("Evolution", "Digi-Dex", "Digi-Bank", "Split Screen", "LAN Co-op", "Settings")
 PALETTE = {
     "ink": "#101820", "shadow": "#303840", "metal": "#687878", "light": "#b8c8c0", "white": "#e8e8d0",
     "red": "#b84028", "red_light": "#f08048", "red_dark": "#682820",
@@ -16,7 +16,7 @@ PALETTE = {
 }
 
 
-@lru_cache(maxsize=5)
+@lru_cache(maxsize=6)
 def menu_icon(name):
     if name not in NAMES:
         raise ValueError(f"No sprite for {name}")
@@ -34,7 +34,12 @@ def menu_icon(name):
         r(x + 2, y + 2, 2, 1, "white"); r(x + 3, y + 8, 3, 2, "shadow")
         r(x + 1, y + 10, 7, 1, "ink"); r(x + 2, y + 9, 5, 1, "metal")
 
-    if name == "Digi-Dex":
+    if name == "Settings":
+        r(7, 1, 6, 18, "ink"); r(1, 7, 18, 6, "ink"); r(4, 4, 12, 12, "ink")
+        r(8, 2, 4, 16, "metal"); r(2, 8, 16, 4, "metal"); r(5, 5, 10, 10, "metal")
+        r(6, 5, 8, 2, "light"); r(5, 7, 2, 7, "light")
+        r(7, 7, 6, 6, "ink"); r(8, 8, 4, 4, "blue"); r(8, 8, 3, 1, "blue_light")
+    elif name == "Digi-Dex":
         # Bound red reference book: stepped page edges, dark spine, cream paper and a clasp.
         r(4, 1, 12, 1, "ink"); r(2, 2, 15, 15, "ink"); r(4, 17, 12, 2, "ink")
         r(3, 3, 3, 13, "red_dark"); r(4, 3, 1, 12, "red_light")

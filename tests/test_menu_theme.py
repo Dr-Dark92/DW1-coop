@@ -32,7 +32,7 @@ def test_added_sprites_are_small_shaded_pixel_art_not_antialiased_glyphs():
         assert all((c >> 24) in (0, 255) for c in colors)
         assert QColor(PALETTE["ink"]).rgba() in opaque
         images.append(bytes(image.constBits()))
-    assert len(set(images)) == 5
+    assert len(set(images)) == len(NAMES)
 
 
 def test_native_six_still_use_the_supplied_game_sprites():

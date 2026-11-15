@@ -130,7 +130,7 @@ def test_game_window_keeps_three_buttons_and_settings_reach_it(application, fake
     wait(application, lambda: panel.window is not None and panel.window.view.image is not None)
     window = panel.window
     bar = window.findChild(QToolBar)
-    assert [item.text() for item in bar.actions()] == ["Save", "Load", "Full screen"]
+    assert [item.text() for item in bar.actions()] == ["Save", "Load", "Full screen", "HUD settings"]
     assert bar.findChildren(player.QCheckBox) == [] and bar.findChildren(player.QComboBox) == []
     # What was chosen before the game opened is what it opens with, and changes reach it while it runs.
     assert window.current_slot == 3 and window.view.smooth is False

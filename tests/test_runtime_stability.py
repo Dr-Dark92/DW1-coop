@@ -329,6 +329,8 @@ def test_a_b_a_picture_revisit_preloads_only_known_successor_dimensions(tmp_path
     calls = []
 
     class Cache:
+        def failed(self, key): return False
+
         def request(self, *args):
             calls.append(args)
             return np.zeros((240, 320), np.uint32)

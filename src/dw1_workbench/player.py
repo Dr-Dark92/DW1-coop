@@ -48,6 +48,9 @@ from .extra_memory import extend_heap
 from .visitor import PARTNER, TAMER, Visitor, match_world, on_the_field, read_partner_stats, read_record, read_world
 from .hud_view import HudPainter, HudState, command_icons, draw_ally_panel, read_hud
 from .progression import BattleResult, GameRules, Progress
+from .lifespan import LifespanPause
+from .gameplay_options import RoamingOptions, RoamingDialog
+from .front_menu import FrontMenu, SettingsMenu
 from .avatars import load_avatars_isolated
 from .evolution import EvolutionController, EvolutionHistory
 from .game_menu_view import evolution_menu_image, native_icons, native_portraits
@@ -106,6 +109,8 @@ class PlayConfig:
     coop_species: int | None = None  # player 2's Digimon for the co-op battle prototype (coop.py); needs live_ram
     coop_level: int = 20  # player 2's starting level
     game_rules: bool = False  # P6 rules (progression.py): levels/EXP, no aging or death; needs live_ram
+    lifespan_enabled: bool | None = None  # None preserves legacy P6 saves/settings; explicit choices separate aging
+    roaming: RoamingOptions = field(default_factory=RoamingOptions)
     options: dict[str, str] = field(default_factory=dict)
     forms: dict[int, dict] = field(default_factory=dict)  # on the patched disc: imported Digimon, see EvolutionController
     offer_forms: bool = False  # the bank's egg list offers them
@@ -179,10 +184,16 @@ class EmulatorWorker(QObject):
     dex_changed = Signal(object)  # immutable snapshot from the core thread
     progress_changed = Signal(str)  # level/EXP summary while the game rules are on
     split_requested = Signal(object)  # a save slot for player 2, or "stop"
+    gameplay_changed = Signal(object)
     finished = Signal()
 
     def __init__(self, config: PlayConfig):
         super().__init__()
+        self.roaming = config.roaming
+        self.lifespan_enabled = config.lifespan_enabled
+        self.next_exp = config.game_rules
+        self.front_menu = None
+        self._visual_time = 0.0  # game-active seconds: pause freezes animated replacements, fast-forward accelerates them
         self._telemetry_dir = os.environ.get("DW1_COOP_TELEMETRY")
         self.telemetry = Telemetry(bool(self._telemetry_dir))
         self.config = config
@@ -316,7 +327,8 @@ class EmulatorWorker(QObject):
                     self.message.emit(f"Evolution history unavailable ({exc}); the chart shows every linked form")
             if config.live_ram and config.hd_pictures is not None:
                 self.hd_layer = BackgroundLayer(core.read_memory, core.serialize, HdPictures(config.hd_pictures).path,
-                                                on_error=self.message.emit, telemetry=self.telemetry)
+                                                on_error=self.message.emit, telemetry=self.telemetry,
+                                                clock=lambda: self._visual_time)
                 self._compositor = Compositor(self.hd_layer, self._store_image, self._hd_failed, self.telemetry,
                                               paint=self._paint_composed)
                 self._prepare_titles(core)
@@ -334,9 +346,14 @@ class EmulatorWorker(QObject):
                                        PlayerTwo.load(path, config.coop_species, config.coop_level), path)
                 self.message.emit(f"Co-op test: player 2 starts at {self.coop.player.summary()}")
             if config.game_rules and config.live_ram:
-                self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path))
-                self.evolution = EvolutionController(core, self.rules.progress, self.dex, self.dex_map_names,
-                                                     self.history, forms=config.forms, offer_forms=config.offer_forms)
+                self.rules = GameRules(core.read_memory, core.write_memory, Progress.load(self._progress_path),
+                                       legacy_immortality=config.lifespan_enabled is None)
+            if config.live_ram:
+                settings_menu = SettingsMenu(lambda: (self.roaming, self.lifespan_enabled, self.next_exp), self._change_gameplay)
+                self.front_menu = FrontMenu(core, settings_menu)
+                self.evolution = EvolutionController(core, self.rules.progress if self.rules else Progress(), self.dex, self.dex_map_names,
+                                                     self.history, forms=config.forms, offer_forms=config.offer_forms,
+                                                     manual_evolution=config.game_rules, settings_menu=settings_menu)
                 self.evolution.split_saves = lambda: choosable_saves(self.store.slots(), self.save_slot)
                 self.evolution.split_running = lambda: self.split_slot is not None
             try:
@@ -383,10 +400,18 @@ class EmulatorWorker(QObject):
                 self._stop.wait(0.005); deadline = time.perf_counter()
                 continue
             core.buttons = self.buttons
-            if self.evolution is not None:
+            if self.front_menu is not None:
                 try:
-                    self.evolution.progress = self.rules.progress
-                    core.buttons = self.evolution.before_frame(self.buttons)
+                    core.buttons = self.front_menu.before_frame(core.buttons)
+                except ValueError as exc:
+                    self.front_menu.restore()
+                    self.front_menu = None
+                    self.message.emit(f"Title menu integration disabled: {exc}")
+            if self.evolution is not None and not (self.front_menu and self.front_menu.menu):
+                try:
+                    if self.rules is not None:
+                        self.evolution.progress = self.rules.progress
+                    core.buttons = self.evolution.before_frame(core.buttons)
                     for event in self.evolution.sound_events:
                         self._menu_audio.trigger(event)
                     self._bank_events()
@@ -394,7 +419,13 @@ class EmulatorWorker(QObject):
                     self.evolution.restore()
                     self.evolution = None
                     self.message.emit(f"Manual evolution turned off: {exc}")
+            life_pause = (LifespanPause(core.read_memory, core.write_memory)
+                          if self.config.live_ram and self.lifespan_enabled is False else None)
+            life_snapshot = life_pause.before_frame() if life_pause is not None else None
             frame, audio = core.run_frame()
+            self._visual_time += 1.0 / core.fps
+            if life_pause is not None:
+                life_pause.after_frame(life_snapshot)
             if self.telemetry.enabled and self.config.live_ram:
                 self.telemetry.observe_scene(core.read_memory(ram_offset(CURRENT_SCREEN), 1)[0],
                                              core.read_memory(ram_offset(GAME_STATE), 1)[0],
@@ -438,7 +469,8 @@ class EmulatorWorker(QObject):
             if frame is not None:
                 qt_started = time.monotonic_ns()
                 image = battle_result_image(frame_image(frame), self.rules.battle_result if self.rules else None)
-                menu = self.evolution.menu if self.evolution else None
+                menu = (self.front_menu.menu if self.front_menu and self.front_menu.menu else
+                        self.evolution.menu if self.evolution else None)
                 if menu is not None and menu.layout == "grid" and not self._icons_attempted:
                     self._menu_icons = native_icons(core)
                     self._icons_attempted = True
@@ -480,7 +512,9 @@ class EmulatorWorker(QObject):
     def _is_repeat(self, frame: Frame) -> bool:
         """The same picture as last time, with nothing of ours drawn over it that could have changed."""
         repeat = (frame.data == self._previous_picture and self._repeats < MOST_REPEATS
-                  and not (self.evolution is not None and self.evolution.menu is not None) and not self.visitors)
+                  and not (self.evolution is not None and self.evolution.menu is not None)
+                  and not (getattr(self, "front_menu", None) and self.front_menu.menu)
+                  and not (self.hd_enabled and self.hd_layer is not None and self.hd_layer.animated) and not self.visitors)
         self._repeats = self._repeats + 1 if repeat else 0
         self._previous_picture = frame.data
         return repeat
@@ -633,6 +667,23 @@ class EmulatorWorker(QObject):
             self._write_progress()
             self.progress_changed.emit(self.rules.progress.summary())
 
+    def _change_gameplay(self, roaming, lifespan, exp):
+        from dataclasses import asdict
+        self.roaming, self.lifespan_enabled, self.next_exp = roaming, lifespan, exp
+        if self.rules is not None:
+            self.rules.legacy_immortality = lifespan is None
+        if self.front_menu is not None and self.front_menu.at_title and exp != (self.rules is not None):
+            # No playthrough is running at the title. Reconfigure native/manual selectors before New Game/Load.
+            if self.evolution is not None:
+                self.evolution.restore()
+            self.rules = (GameRules(self.core.read_memory, self.core.write_memory, Progress.load(self._progress_path),
+                                    legacy_immortality=lifespan is None) if exp else None)
+            if self.evolution is not None:
+                self.evolution.manual_evolution = exp
+                self.evolution.progress = self.rules.progress if self.rules else Progress()
+                self.evolution.reset()
+        self.gameplay_changed.emit({"roaming": asdict(roaming), "lifespan": lifespan, "game_rules": exp})
+
     def _bank_events(self):
         """Digi-Bank changes (a hatch, a swap starting or finishing): keep the record, and let the rules re-read
         the partner so its own age and battle count are not mistaken for the previous partner's."""
@@ -644,9 +695,10 @@ class EmulatorWorker(QObject):
             self.evolution.split_request = None
         if self.evolution.events:
             self.evolution.events.clear()
-            self.rules.reset()
-            self._write_progress()
-            self.progress_changed.emit(self.rules.progress.summary())
+            if self.rules is not None:
+                self.rules.reset()
+                self._write_progress()
+                self.progress_changed.emit(self.rules.progress.summary())
 
     def _write_progress(self):
         try:
@@ -766,7 +818,7 @@ class EmulatorWorker(QObject):
             # Quick saves and inspections keep the plain frame: draw on a copy unless this is a composed picture.
             if not hasattr(image, "pixels"):
                 image = image.convertToFormat(QImage.Format.Format_RGB32).copy()
-            self._hud_painter.draw(image, hud)
+            self._hud_painter.draw(image, hud, getattr(self, "roaming", self.config.roaming))
         panel = self.coop.panel if self.coop is not None else None
         if panel is not None:
             if not hasattr(image, "pixels") and hud is None:
@@ -804,6 +856,8 @@ class EmulatorWorker(QObject):
                     self._load(command[1]); self.slot_loaded.emit(command[1])
                 elif command[0] == "reset":
                     self._restore_camera()
+                    if self.front_menu is not None:
+                        self.front_menu.reset()
                     core.reset(); self.message.emit("Console reset")
                     if self.dex is not None:
                         self.dex.reset_runtime()
@@ -832,6 +886,8 @@ class EmulatorWorker(QObject):
 
     def _serialize_native(self):
         # No live evolution-selector patch may escape into a slot or inspection.
+        if self.front_menu and (self.front_menu.question or self.front_menu.starting is not None):
+            raise QuickSaveError("Finish new-game starter initialization before saving or inspecting.")
         if self.evolution is not None:
             self.evolution.restore()
         for visitor in self.visitors:
@@ -839,6 +895,8 @@ class EmulatorWorker(QObject):
         return self.core.serialize()
 
     def _save(self, slot: int, note: str = ""):
+        if self.front_menu and (self.front_menu.question or self.front_menu.starting is not None):
+            raise QuickSaveError("Finish new-game starter selection and initialization before saving.")
         if slot != RESUME_SLOT:
             self.save_slot = slot
         core = self.core
@@ -855,6 +913,8 @@ class EmulatorWorker(QObject):
         self.save_slot = slot
         core = self.core
         info = self.store.info(slot)
+        if self.front_menu is not None:
+            self.front_menu.reset()
         core.unserialize(self.store.load(slot, core=core.info.name))
         self._camera = None
         if self._frame is not None:
@@ -881,6 +941,8 @@ class EmulatorWorker(QObject):
         self.message.emit(f"{info.label if info else f'Slot {slot}'} loaded")
 
     def _load_inspection(self, inspection_id: str):
+        if self.front_menu is not None:
+            self.front_menu.reset()
         store = InspectionStore(self.config.store_dir / "inspections")
         record = store.get(inspection_id)
         if record is not None and record.core != self.core.info.name:
@@ -979,6 +1041,8 @@ class EmulatorWorker(QObject):
         except OSError as exc:
             self.message.emit(f"Memory card could not be written: {exc}")
         self._stop.set()  # also ends avatar rendering when the game itself quit
+        if self.front_menu is not None:
+            self.front_menu.restore()
         if self._avatar_thread is not None:
             self._avatar_thread.join(5)
         core.stop()
@@ -1214,6 +1278,7 @@ class PlayWindow(QMainWindow):
     slots_changed = Signal()
     inspections_changed = Signal()
     quick_save_changed = Signal()  # the slot or note, in the settings the Play tab shows them from
+    gameplay_changed = Signal()
     zoom_reported = Signal(str)
     log = Signal(str)
     closed = Signal()
@@ -1267,6 +1332,7 @@ class PlayWindow(QMainWindow):
         self.thread = QThread(self)
         self._dex_snapshot = {"entries": {}, "catalog": []}
         self.worker = EmulatorWorker(config)
+        self.worker.gameplay_changed.connect(self._persist_gameplay)
         self.view.telemetry = self.worker.telemetry
         self.worker.hd_enabled = self._hd_on
         self.worker.hud_enabled = self._hud_on
@@ -1361,7 +1427,7 @@ class PlayWindow(QMainWindow):
             self.view.setFocus()
 
     def _build_toolbar(self):
-        """The game screen keeps Save, Load and Full screen. The rest is in the Play tab's Settings; keys still work here."""
+        """Quick saves, full screen and live HUD visibility; gameplay rules remain pre-launch settings."""
         bar = QToolBar("Quick saves"); bar.setMovable(False); self.addToolBar(bar)
 
         def action(text, shortcut, handler, checkable=False, on_bar=True):
@@ -1379,6 +1445,7 @@ class PlayWindow(QMainWindow):
         following = QAction(self); following.setShortcut(QKeySequence("F7")); following.triggered.connect(lambda: self._step_slot(1))
         self.addAction(previous); self.addAction(following)
         self.full = action("Full screen", "F11", self._toggle_full_screen, checkable=True)
+        action("HUD settings", "", self._roaming_settings)
         self.pause = action("Pause", "P", self._toggle_pause, checkable=True, on_bar=False)
         action("Reset", "Ctrl+R", self._reset, on_bar=False)
         self.dex_action = action("Digi-Dex", "F4", self._show_digidex, on_bar=False)
@@ -1596,6 +1663,26 @@ class PlayWindow(QMainWindow):
     def _set_smooth(self, smooth: bool):
         app_settings().setValue("play/smooth", smooth)
         self.view.smooth = smooth; self.view.update(); self.view.setFocus()
+
+    def _persist_gameplay(self, record):
+        settings = app_settings()
+        RoamingOptions(**record["roaming"]).save(settings)
+        settings.setValue("play/lifespan", "legacy" if record["lifespan"] is None else "enabled" if record["lifespan"] else "disabled")
+        settings.setValue("play/game_rules", record["game_rules"])
+        self.gameplay_changed.emit()
+
+    def _roaming_settings(self):
+        options = getattr(self.worker, "roaming", self.config.roaming)
+        dialog = RoamingDialog(options, self)
+        was_paused = self.worker.paused
+        self.worker.paused = True
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.worker.roaming = dialog.options()  # immutable snapshot, no queued busy-worker slot
+                self.worker.roaming.save(app_settings())
+        finally:
+            self.worker.paused = was_paused
+            self.view.setFocus()
 
     def _set_hud(self, enabled: bool):
         app_settings().setValue("play/hud", enabled)

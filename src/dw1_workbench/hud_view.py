@@ -14,7 +14,8 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter
 
 from .live import LiveState, ram_offset, ram_end
 from .maps import follow_kind, trigger_kind
-from .progression import CURRENT_HP, CURRENT_MP, PARTNER_ENTITY, PARTNER_STATS, STAT_FIELDS
+from .progression import CURRENT_HP, CURRENT_MP, PARTNER_ENTITY, PARTNER_STATS, STAT_FIELDS, PARTNER_PARA
+from .gameplay_options import RoamingOptions
 
 STATUS_UI_OFFSET_X = 0x80134C50  # i16: 75 while the status bars show, up to 240 while they are off screen
 OFFSET_SHOWN, OFFSET_HIDDEN = 75, 240
@@ -58,6 +59,8 @@ class HudState:
     live: LiveState | None
     tamer: tuple[float, float] | None
     partner: tuple[float, float] | None
+    care: tuple[int, int, int, int] | None = None  # lifetime hours, food energy, toilet ticks, fatigue
+    care_limits: tuple[int, int] | None = None  # species energy cap, default toilet countdown
 
 
 # The battle command icons in VRAM, on the 4-bit page at (960, 256) with the CLUT at (272, 496) (BTL_renderCommandMenu).
@@ -172,8 +175,15 @@ def read_hud(read, live: LiveState | None) -> HudState | None:
     hp, mp = struct.unpack_from("<h", block, CURRENT_HP)[0], struct.unpack_from("<h", block, CURRENT_MP)[0]
     if max_hp <= 0 or max_mp < 0:
         return None
+    care = read(ram_offset(PARTNER_PARA), 76)
+    values = tuple(struct.unpack_from("<h", care, at)[0] for at in (72, 60, 24, 34))
+    # RaiseData[66],28 bytes: energyCap at8, poopTimer i16 at12 (partner.h).
+    limits = None
+    if kind < 66:
+        raising = read(ram_offset(0x801225BC + kind * 28), 14)
+        limits = (raising[8], struct.unpack_from("<h", raising, 12)[0])
     return HudState(offset, max(hp, 0), max_hp, max(mp, 0), max_mp, live, _floor_position(read, TAMER_POSITION),
-                    _floor_position(read, PARTNER_ENTITY))
+                    _floor_position(read, PARTNER_ENTITY), values, limits)
 
 
 def native_bar(state: bytes) -> QImage | None:
@@ -248,14 +258,33 @@ class HudPainter:
         """Read the game's bar art on the emulator thread (the core may only be used there)."""
         self._frame()
 
-    def draw(self, image: QImage, state: HudState) -> None:
+    def draw(self, image: QImage, state: HudState, options: RoamingOptions = RoamingOptions()) -> None:
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         scale = image.width() / 320
         painter.scale(scale, image.height() / 240)
         x = state.offset + 160
-        self._bar_row(painter, x, FIRST_BAR_Y, "hp", HEART, state.hp, state.max_hp)
-        self._bar_row(painter, x, FIRST_BAR_Y + BAR_STEP, "mp", ORB, state.mp, state.max_mp)
+        if options.hp_mp:
+            self._bar_row(painter, x, FIRST_BAR_Y, "hp", HEART, state.hp, state.max_hp)
+            self._bar_row(painter, x, FIRST_BAR_Y + BAR_STEP, "mp", ORB, state.mp, state.max_mp)
+        if state.care is not None:
+            lifetime, energy, toilet, fatigue = state.care
+            rows = []
+            if options.lifespan: rows.append(("LIFE", f"{max(0, lifetime)} h", lifetime, 360))
+            energy_cap, toilet_max = state.care_limits or (0, 0)
+            if options.hunger: rows.append(("FOOD", f"Energy {energy}", energy if energy_cap > 0 else None, energy_cap))
+            if options.poop: rows.append(("TOILET", f"{max(0, toilet)} ticks", toilet if toilet_max > 0 else None, toilet_max))
+            if options.fatigue: rows.append(("TIRED", f"{fatigue}/100", fatigue, 100))
+            font = QFont("Arial"); font.setPixelSize(7); painter.setFont(font)
+            for index, (label, text, value, maximum) in enumerate(rows):
+                left, top = 4 + state.offset - OFFSET_SHOWN, 171 + index * 14
+                painter.fillRect(QRectF(left, top, 112, 13), QColor("#091526"))
+                painter.setPen(QColor("#fad990")); painter.drawRect(QRectF(left, top, 112, 13))
+                painter.drawText(QPointF(left + 3, top + 8), label)
+                painter.setPen(QColor("#eeeeee")); painter.drawText(QPointF(left + 36, top + 8), text)
+                if value is not None:
+                    fraction = max(0, min(1, value / maximum))
+                    painter.fillRect(QRectF(left + 36, top + 10, 72 * fraction, 2), QColor("#70b8d8"))
         if state.live is not None:
             self._map(painter, state, state.offset - OFFSET_SHOWN)
         painter.end()

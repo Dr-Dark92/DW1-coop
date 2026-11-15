@@ -64,8 +64,9 @@ def _new_icon(painter, x, y, kind):
 
 def _grid(painter, menu, icons):
     pitch = 50 if len(menu.rows) <= 9 else 41  # a fourth row (with Fishing) still clears the footer
-    for index, name in enumerate(menu.rows):
-        col, row = index % 3, index // 3
+    start = max(0, menu.selected // 12) * 12
+    for index, name in enumerate(menu.rows[start:start + 12], start):
+        col, row = (index - start) % 3, (index - start) // 3
         x,y = 48 + col * 75, 42 + row * pitch
         if index == menu.selected:
             painter.setPen(QPen(QColor("#ffe1a2"), 1))
@@ -290,7 +291,7 @@ def evolution_menu_image(image, menu, icons=(), portraits=None, avatars=None):
     relation = menu.layout == "relation"
     page_avatar = avatars.get(menu.avatar) if menu.avatar is not None else None
     portrait_slot = menu.avatar is not None
-    x,w = (3,314) if relation else (44,232) if menu.layout == "grid" else (20,280) if portrait_slot else (58,204)
+    x,w = (3,314) if relation else (44,232) if menu.layout == "grid" else (20,280) if portrait_slot or menu.layout == "dialogue" else (58,204)
     if menu.layout != "list":  # the Digi-Dex (list layout) draws its own themed panel
         painter.fillRect(x,20,w,204,QColor("#0a1528"))
         painter.setPen(QColor("#d9ba70")); painter.drawRect(x+1,21,w-2,202)

@@ -2,7 +2,8 @@
 
 The game has no levels or EXP. These rules add them outside the game: the partner gets a level (0-99) that
 grows from EXP won in battle, and each level is worth +100 max HP, +100 max MP and +10 Offense, Defense, Speed
-and Brains. Aging and death are turned off. Nothing on the disc or memory card changes; level and EXP are kept
+and Brains. Legacy mode turns aging and death off; explicit lifespan settings disable that legacy guard.
+Nothing on the disc or memory card changes; level and EXP are kept
 by the player (progression.json, and with each quick save), together with the Digi-Bank (bank.py): up to
 BANK_SLOTS stored partners, each with its own EXP.
 
@@ -182,8 +183,9 @@ class GameRules:
 
     """Applied once per frame by the emulator worker. `read(offset, size)` / `write(offset, data)` use main RAM."""
 
-    def __init__(self, read, write, progress: Progress | None = None):
+    def __init__(self, read, write, progress: Progress | None = None, *, legacy_immortality=True):
         self.read, self.write = read, write
+        self.legacy_immortality = legacy_immortality
         self.progress = progress or Progress()
         self.reset()
 
@@ -219,7 +221,8 @@ class GameRules:
             return []
         messages = []
         in_battle = self._s16(GAME_STATE) != 0
-        self._hold_life()
+        if self.legacy_immortality:
+            self._hold_life()
         if in_battle:
             enemies = self._battle_enemies()
             if enemies:

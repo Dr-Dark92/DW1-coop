@@ -112,12 +112,15 @@ class EvolutionHistory:
 
 class EvolutionController:
     def __init__(self, core, progress, dex=None, map_names=None, history: EvolutionHistory | None = None,
-                 forms: dict[int, dict] | None = None, offer_forms: bool = True):
+                 forms: dict[int, dict] | None = None, offer_forms: bool = True,
+                 manual_evolution: bool = True, settings_menu=None):
         """`forms`: Digimon imported over a native one, offered by the bank's egg list: ID -> {"name", and optionally
         "sounds_from" (a native ID), "special" (its three element types), "moves" (its 16 technique IDs),
         "skeleton_objects" (node -> extra model object), "finisher" ({"move", "name", "power"}, shown and used
         while it is the partner) and "effect_species" (technique -> a species its effect file allows, and "default")}."""
         self.core, self.progress = core, progress
+        self.manual_evolution = manual_evolution
+        self.settings_menu = settings_menu
         self.forms = forms or {}
         self.offer_forms = offer_forms  # off: the egg list leaves them out; one already hatched still works
         self._native_moves = {}  # move -> its (name pointer, power) from the running game
@@ -155,6 +158,7 @@ class EvolutionController:
         self._bank_view = "list"  # list, status, eggs
         self._bank_index = self._bank_page = self._egg_index = 0
         self._bank_confirm = False
+        self._settings_open = False
 
     def read(self, address, size):
         return self.core.read_memory(ram_offset(address), size)
@@ -166,6 +170,8 @@ class EvolutionController:
         return struct.unpack(fmt, self.read(address, struct.calcsize(fmt)))[0]
 
     def install(self):
+        if not self.manual_evolution:
+            return True  # Classic menu access must never install evolution-blocking patches
         observed = {address: self.read(address, 8) for address in PATCHES}
         if self.installed and all(data == PATCHES[address][1] for address, data in observed.items()):
             return True
@@ -192,6 +198,8 @@ class EvolutionController:
         return [address + offset for address in PATCHES for offset in (0, 4)]
 
     def restore(self):
+        if not self.manual_evolution:
+            return
         changed = False
         for address, (original, patched) in PATCHES.items():
             if self.read(address, 8) == patched:
@@ -613,7 +621,7 @@ class EvolutionController:
         if not self.main_menu_open():
             self._menu_open = False
             self.choosing = self.confirming = self._handoff = False
-            self._dex_open = self._dex_detail = self._bank_open = self._split_open = self._lan_open = False
+            self._dex_open = self._dex_detail = self._bank_open = self._split_open = self._lan_open = self._settings_open = False
             return buttons
         if self._handoff:
             if buttons:
@@ -622,6 +630,12 @@ class EvolutionController:
         if not self._menu_open:
             self.selection = max(0, min(5, self.number(MENU_OPTIONS + 4) - 1))
             self._menu_open = True
+        if self._settings_open:
+            self.menu = self.settings_menu.frame(pressed)
+            if self.menu is not None:
+                return 0
+            self._settings_open = False
+            pressed = 0
         if self._dex_open:
             self._dex_frame(pressed)
             if self._dex_open:
@@ -648,9 +662,11 @@ class EvolutionController:
         choices = self.choices()
         required = self.required_level()
         ready = required is not None and self.progress.level >= required and bool(choices)
-        options = ("Items", "Digimon", "Player", "Praise", "Scold", "Sleep", "Evolution")
+        options = ("Items", "Digimon", "Player", "Praise", "Scold", "Sleep")
+        options += ("Evolution",) if self.manual_evolution else ()
         options += ("Digi-Dex",) if self.dex is not None else ()
-        options += ("Digi-Bank",)
+        options += ("Digi-Bank",) if self.manual_evolution else ()
+        options += ("Settings",) if self.settings_menu is not None else ()
         options += ("Split Screen", "LAN Co-op") if self.split_saves is not None else ()
         options += ("Fishing",) if self.number(HAS_FISHING_ROD, "<i") else ()
         count = len(options)
@@ -704,7 +720,12 @@ class EvolutionController:
                 delta = -1 if pressed & bit("Up") else 1
                 self.selection = column[(column.index(self.selection) + delta) % len(column)]
             elif pressed & bit("B"):
-                if options[self.selection] == "Evolution":
+                if options[self.selection] == "Settings":
+                    self._settings_open = True
+                    self.settings_menu.open()
+                    self.menu = self.settings_menu.frame(0)
+                    return 0
+                elif options[self.selection] == "Evolution":
                     self.choosing = True
                     self.choice_index = 0
                     self._relation_focus = self.number(PARTNER_ENTITY, "<i")
@@ -745,6 +766,9 @@ class EvolutionController:
         if self.choosing:
             self._relation_menu(choices, ready)
         else:
-            self.menu = EvolutionMenu("Menu", options, self.selection, "Cross: select   Circle/Triangle: close",
+            footer = "Cross: select   Circle/Triangle: close"
+            if len(options) > 12:
+                footer += f"   Page {self.selection // 12 + 1}/{(len(options) + 11) // 12}"
+            self.menu = EvolutionMenu("Menu", options, self.selection, footer,
                                       layout="grid")
         return 0  # consume only while this in-game menu is controlled by P6

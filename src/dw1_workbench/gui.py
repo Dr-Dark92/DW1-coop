@@ -65,6 +65,37 @@ def workbench_settings() -> QSettings:
     return app_settings()
 
 
+class HdPictureWorker(QObject):
+    succeeded = Signal(str)
+    failed = Signal(str)
+    cancelled = Signal(str)
+    finished = Signal()
+
+    def __init__(self, store, index, name, source):
+        super().__init__()
+        self.store, self.index, self.name, self.source = store, index, name, Path(source)
+        self.event = threading.Event()
+
+    def request_cancel(self):
+        self.event.set()
+
+    @Slot()
+    def run(self):
+        try:
+            from .background_animation import MAX_FILE_BYTES
+            with self.source.open("rb") as source:
+                data = source.read(MAX_FILE_BYTES + 1)
+            if self.event.is_set(): raise Cancelled("Background import cancelled")
+            path = self.store.store(self.index, self.name, data, self.event.is_set)
+            self.succeeded.emit(str(path))
+        except Cancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class ImportWorker(QObject):
     progress = Signal(int, str)
     succeeded = Signal(object)
@@ -552,6 +583,7 @@ class Workspace(QWidget):
         self.zone_thread: QThread | None = None
         self.zone_worker: ZoneWorker | None = None
         self.zone_progress: QProgressDialog | None = None
+        self.hd_thread = self.hd_worker = self.hd_progress = None
         self._all_pathing = None
         self._map_pathing = None
         self.tabs = QTabWidget()
@@ -1687,6 +1719,8 @@ class Workspace(QWidget):
 
     def _set_hd_picture(self):
         try:
+            if self.hd_thread is not None:
+                raise ValueError("A background import is already running")
             row = self._selected_map()
             if self._map_scene is None:
                 raise ValueError("This map has no decoded background.")
@@ -1695,9 +1729,10 @@ class Workspace(QWidget):
                                                   "Images (*.png *.jpg *.jpeg *.webp)")
             if not path:
                 return
-            data = Path(path).read_bytes()
-            with Image.open(io.BytesIO(data)) as picture:
-                picture.verify()
+            from .background_animation import MAX_FILE_BYTES
+            if Path(path).stat().st_size > MAX_FILE_BYTES:
+                raise ValueError("Background exceeds the 64 MiB file limit")
+            with Image.open(path) as picture:  # header only; pixel decoding/validation happens in the worker
                 size = picture.size
             shape, map_shape = size[0] / size[1], setup.grid_width / setup.grid_height
             if abs(shape / map_shape - 1) > 0.02 and QMessageBox.question(
@@ -1705,11 +1740,46 @@ class Workspace(QWidget):
                     f"{setup.grid_height} tiles, so it will be stretched and may not line up. Use it anyway?"
                     ) != QMessageBox.StandardButton.Yes:
                 return
-            self.hd_pictures.store(entry.index, entry.name, data)
-            QMessageBox.information(self, "HD picture set", f"{entry.name} now shows {Path(path).name} ({size[0]}×"
-                                    f"{size[1]}) in the player. It applies the next time the map loads.")
+            if self.hd_pictures.path(entry.index) is not None and QMessageBox.question(
+                    self, "Replace background?", "Replace this map's current HD background? The previous file is kept if import fails."
+                    ) != QMessageBox.StandardButton.Yes:
+                return
+            thread = QThread(self)
+            worker = HdPictureWorker(self.hd_pictures, entry.index, entry.name, path)
+            dialog = QProgressDialog("Validating background (WebP animation is preserved)", "Cancel", 0, 0, self)
+            dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.show()
+            worker.moveToThread(thread); thread.started.connect(worker.run)
+            dialog.canceled.connect(lambda: worker.request_cancel())
+            worker.succeeded.connect(self._hd_picture_ready)
+            worker.failed.connect(self._hd_picture_failed)
+            worker.cancelled.connect(self._hd_picture_cancelled)
+            worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+            worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater); thread.finished.connect(self._hd_picture_finished)
+            self.hd_thread, self.hd_worker, self.hd_progress = thread, worker, dialog
+            thread.start()
         except Exception as exc:
             QMessageBox.critical(self, "Cannot set the HD picture", str(exc))
+
+    @Slot(str)
+    def _hd_picture_ready(self, path):
+        self._export_message("Background set", f"Saved {Path(path).name}. Applies next time the map loads. "
+                             "Animated WebP is preserved for the player; disc imports remain static. "
+                             "Large high-FPS delta animations may stutter; re-export at 15–20 FPS for lighter playback.")
+
+    @Slot(str)
+    def _hd_picture_failed(self, message):
+        self._export_message("Background import failed", message, critical=True)
+
+    @Slot(str)
+    def _hd_picture_cancelled(self, message):
+        self._export_message("Background import cancelled", message)
+
+    @Slot()
+    def _hd_picture_finished(self):
+        if self.hd_progress: self.hd_progress.close()
+        self.hd_thread = self.hd_worker = self.hd_progress = None
+        self.background_finished.emit()
 
     def _remove_hd_picture(self):
         try:
@@ -1904,6 +1974,8 @@ class Workspace(QWidget):
         self.background_finished.emit()
 
     def cancel_background(self):
+        if self.hd_worker:
+            self.hd_worker.request_cancel()
         self._closing, self._pending_model = True, None
         self.play_panel.close_player()
         if self.zone_worker:
@@ -1918,7 +1990,7 @@ class Workspace(QWidget):
             self.digimon_worker.request_cancel()
 
     def has_background_work(self):
-        return bool(self.digimon_thread is not None or (self.export_thread and self.export_thread.isRunning()) or
+        return bool(self.hd_thread is not None or self.digimon_thread is not None or (self.export_thread and self.export_thread.isRunning()) or
                     (self.model_thread and self.model_thread.isRunning()) or
                     (self.relation_thread and self.relation_thread.isRunning()) or
                     (self.zone_thread and self.zone_thread.isRunning()))

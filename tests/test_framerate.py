@@ -29,7 +29,7 @@ def test_framerate_defaults_to_the_game_s_own():
 
 def repeat_state(menu=None, visitors=()):
     from types import SimpleNamespace
-    return SimpleNamespace(_previous_picture=None, _repeats=0, visitors=list(visitors),
+    return SimpleNamespace(_previous_picture=None, _repeats=0, visitors=list(visitors), hd_enabled=False, hd_layer=None,
                            evolution=SimpleNamespace(menu=menu) if menu is not None else None)
 
 
@@ -49,3 +49,13 @@ def test_a_menu_or_a_visitor_over_the_picture_always_counts():
     frame = SimpleNamespace(data=b"picture")
     for state in (repeat_state(menu=object()), repeat_state(visitors=[object()])):
         assert [EmulatorWorker._is_repeat(state, frame) for _ in range(3)] == [False, False, False]
+
+
+def test_active_animation_is_redrawn_even_when_native_frame_is_identical():
+    from types import SimpleNamespace
+    from dw1_workbench.player import EmulatorWorker
+    state = repeat_state()
+    state.hd_enabled = True
+    state.hd_layer = SimpleNamespace(animated=True)
+    frame = SimpleNamespace(data=b"picture")
+    assert [EmulatorWorker._is_repeat(state, frame) for _ in range(4)] == [False] * 4
