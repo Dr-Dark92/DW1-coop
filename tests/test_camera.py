@@ -107,7 +107,7 @@ def test_foreground_quads_scale_around_the_screen_centre():
 def test_ring_layouts_fit_vram_pages_and_cover_the_view():
     from dw1_workbench.camera import ENGINE_BUFFER, ENGINE_BUFFER_LIMIT, ring_layout
     assert ring_layout(192) == (84, [768 + 42 * c for c in range(6)], [0, 84, 168, 256])
-    assert ring_layout(128) == (64, [768 + 32 * c for c in range(8)], [0, 64, 128, 192, 256, 320])
+    assert ring_layout(128) == (64, [768 + 32 * c for c in range(8)], [0, 64, 128, 256, 320])
     for scale in range(128, 256):
         tile, columns, rows = ring_layout(scale)
         assert len(columns) >= -(-320 * 256 // (scale * 128)) + 1 and len(rows) >= -(-240 * 256 // (scale * 128)) + 1

@@ -98,10 +98,9 @@ def test_in_flight_result_is_rejected_after_invalidating_scene(invalidate):
             assert not stopper.is_alive()
 
 
-def test_first_battle_prepare_serializes_once_not_twice(tmp_path):
+def test_a_battle_is_left_native_and_costs_no_serialization(tmp_path):
     game, count = Game(), []
     frame = game.frame()
-    game.set(H.GAME_STATE, "<h", 1)
 
     def serialize():
         count.append(1)
@@ -109,13 +108,10 @@ def test_first_battle_prepare_serializes_once_not_twice(tmp_path):
 
     layer = H.BackgroundLayer(game.read, serialize, lambda index: picture_file(tmp_path))
     try:
-        layer.prepare(frame)
-        layer._load_picture(layer._picture_key, layer._picture_path)
-        layer.reset()
-        count.clear()
-        # Reopen a battle with no tile snapshot; palette and tile VRAM use the same serialization.
-        layer.prepare(frame)
-        assert len(count) == 1
+        for phase in (1, 3, 2):
+            game.set(H.GAME_STATE, "<h", phase)
+            assert layer.prepare(frame) is None
+        assert count == []
     finally:
         layer.close()
 

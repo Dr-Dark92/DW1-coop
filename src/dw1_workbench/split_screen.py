@@ -16,6 +16,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from multiprocessing import shared_memory
@@ -23,7 +24,7 @@ from pathlib import Path
 
 from .visitor import NpcState, WorldRecord, WorldState
 
-HEADER = struct.Struct("<IIIII")  # frame sequence, width, height, buttons, quit
+HEADER = struct.Struct("<IIIIII")  # frame sequence, width, height, buttons, quit, paused
 MAX_WIDTH, MAX_HEIGHT = 1280, 960
 RECORD = struct.Struct("<IiiihHBBB")  # sequence, x, y, z, rotation, species, map, animation, visible
 RECORDS = HEADER.size + MAX_WIDTH * MAX_HEIGHT * 4  # after the frame: one per player for each actor
@@ -238,7 +239,7 @@ class SplitGame:
 
     def __init__(self, config: dict):
         self.memory = shared_memory.SharedMemory(create=True, size=SIZE)
-        HEADER.pack_into(self.memory.buf, 0, 0, 0, 0, 0, 0)
+        HEADER.pack_into(self.memory.buf, 0, 0, 0, 0, 0, 0, 0)
         environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
         self.process = subprocess.Popen([sys.executable, "-m", "dw1_workbench.split_screen", self.memory.name,
                                          json.dumps({**config, "parent": os.getpid()})], env=environment)
@@ -247,6 +248,9 @@ class SplitGame:
 
     def set_buttons(self, buttons: int):
         struct.pack_into("<I", self.memory.buf, 12, buttons)
+
+    def set_paused(self, paused: bool):
+        struct.pack_into("<I", self.memory.buf, 20, paused)
 
     def newest_frame(self):
         """(width, height, bytes) when there is a new frame, else None."""
@@ -318,8 +322,11 @@ def _child(memory_name: str, raw: str) -> int:
 
     application = QApplication([])
     settings = json.loads(raw)
-    config = PlayConfig(Path(settings["core"]), Path(settings["bios"]), Path(settings["disc"]), Path(settings["store"]),
-                        launch_slot=settings["slot"], resume_on_close=True, live_ram=settings["live_ram"],
+    comparison = settings.get("comparison", False)
+    temporary = tempfile.TemporaryDirectory(prefix="dw1-original-") if comparison else None
+    store = Path(temporary.name if temporary else settings["store"])
+    config = PlayConfig(Path(settings["core"]), Path(settings["bios"]), Path(settings["disc"]), store,
+                        launch_slot=settings["slot"], resume_on_close=not comparison, live_ram=settings["live_ram"],
                         game_rules=settings["game_rules"],
                         hd_pictures=Path(settings["hd"]) if settings.get("hd") else None, options=settings["options"],
                         character=Path(settings["character"]) if settings.get("character") else None,
@@ -342,6 +349,8 @@ def _child(memory_name: str, raw: str) -> int:
 
     def poll():
         worker.buttons = struct.unpack_from("<I", memory.buf, 12)[0]
+        if comparison:
+            worker.paused = bool(struct.unpack_from("<I", memory.buf, 20)[0])
         if struct.unpack_from("<I", memory.buf, 16)[0] or not parent_running():
             worker.request_stop()
             thread.quit()
@@ -355,8 +364,10 @@ def _child(memory_name: str, raw: str) -> int:
         if image.format() != QImage.Format.Format_RGB32:
             image = image.convertToFormat(QImage.Format.Format_RGB32)
         width, height = image.width(), image.height()
-        if width > MAX_WIDTH or height > MAX_HEIGHT or image.bytesPerLine() != width * 4:
+        if width > MAX_WIDTH or height > MAX_HEIGHT:
             return
+        if image.bytesPerLine() != width * 4:
+            image = image.copy()  # The core can supply padded rows, but the shared frame is packed.
         sequence[0] += 1
         struct.pack_into("<I", memory.buf, 0, sequence[0] * 2 - 1)  # odd: being written
         struct.pack_into("<II", memory.buf, 4, width, height)

@@ -146,6 +146,7 @@ def window_for_buttons(held=None):
     window._held, window._split_held = 0, 0
     window._pad_held, window._pad_buttons = [0, 0], [set(), set()]
     window.worker = SimpleNamespace(buttons=0, coop=None)
+    window.config = SimpleNamespace(comparison_disc=None)
     window._split = None
     return window
 

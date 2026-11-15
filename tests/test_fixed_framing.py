@@ -175,6 +175,25 @@ def test_controller_is_off_for_battles_and_comes_back_with_the_memory_still_held
     assert controller.active and not notices  # back during the fade, not a second later
 
 
+def test_evolution_suspends_camera_before_the_native_sequence_runs():
+    core = ProofCore()
+    core.write_memory(ram_offset(F.MAP_SIZE), b"\5\4")
+    controller = F.FrameController(core, pytest.fail)
+    for _ in range(F.SETTLE_FRAMES):
+        controller.tick()
+    assert controller.active
+    core.write_memory(ram_offset(F.PARTNER_STATE), b"\x0d")
+    controller.before_frame()
+    assert not controller.active
+    for _ in range(F.SETTLE_FRAMES):
+        controller.tick()
+    assert not controller.active
+    core.write_memory(ram_offset(F.PARTNER_STATE), b"\1")
+    for _ in range(F.RETURN_FRAMES):
+        controller.tick()
+    assert controller.active
+
+
 def test_loading_a_save_with_the_hold_returns_at_once():
     core = ProofCore()
     core.write_memory(ram_offset(F.MAP_SIZE), b"\5\4")

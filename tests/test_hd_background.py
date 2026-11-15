@@ -169,7 +169,7 @@ def test_frames_that_are_not_the_map_pass_through(game, tmp_path):
     assert layer.apply(menu) is None
 
 
-def test_battle_keeps_cached_tiles_and_a_state_loaded_in_battle_uses_vram(game, tmp_path):
+def test_battle_uses_native_background_and_hd_returns_in_the_field(game, tmp_path):
     path = picture_file(tmp_path)
     frame = game.frame()
     layer = BackgroundLayer(game.read, game.serialize, lambda index: path)
@@ -179,12 +179,13 @@ def test_battle_keeps_cached_tiles_and_a_state_loaded_in_battle_uses_vram(game, 
         for column in range(WIDTH):
             at = ram_offset(TILE_RAM + (row * WIDTH + column) * 16384)
             game.ram[at:at + 16384] = bytes(16384)
-    assert layer.apply(frame).coverage > 0.99  # cached tiles still match
+    assert layer.apply(frame) is None
 
     layer.reset()  # a state loaded during the battle: nothing cached, RAM is useless
     game.set(H.MAP_TILE_X, "<b", 0); game.set(H.MAP_TILE_Y, "<b", 0)
-    assert layer.apply(frame).coverage > 0.99
-    assert layer.background.from_vram
+    for phase in (1, 3, 2):
+        game.set(H.GAME_STATE, "<h", phase)
+        assert layer.apply(frame) is None
 
     # After the battle the game has reloaded the tiles; they are read from RAM again.
     game.set(H.GAME_STATE, "<h", 0)
@@ -193,6 +194,21 @@ def test_battle_keeps_cached_tiles_and_a_state_loaded_in_battle_uses_vram(game, 
         game.ram[at:at + 16384] = tile.tobytes()
     assert layer.apply(frame).coverage > 0.99
     assert not layer.background.from_vram
+
+
+def test_evolution_uses_native_background_until_the_partner_returns_to_exploration(game, tmp_path):
+    path = picture_file(tmp_path)
+    frame = game.frame()
+    layer = BackgroundLayer(game.read, game.serialize, lambda index: path)
+    layer.apply(frame)
+    layer._load_picture(layer._picture_key, path)
+    assert layer.apply(frame).coverage > 0.99
+    for phase in (0, 1, 2):
+        game.set(H.PARTNER_STATE, "<bb", 13, phase)
+        assert layer.apply(frame) is None
+    game.set(H.PARTNER_STATE, "<bb", 1, 0)
+    assert layer.apply(frame).coverage > 0.99
+    layer.close()
 
 
 def test_map_smaller_than_the_screen_is_padded(game, tmp_path):

@@ -2,6 +2,8 @@
 
 This checkpoint is on `python-player`. It describes the current Python/PySide6 player running the user's USA disc through Beetle PSX. It does **not** claim changes to a separate native PC port. No disc, BIOS, emulator binary, save, extracted artwork or generated analysis/cache belongs in this repository.
 
+Publication merge: the user authorized incorporating upstream`500d21c` and`c192cb1`, preserving local zone-folder commit`da07d87` and implementation`af208f5`. The merged player retains upstream native rendering for battles/evolution, frame-boundary camera suspension, borrowed-frame optimization, and side-by-side graphics comparison. Menu selection is determined before deciding whether a wrapped frame needs writable storage, including the new title/Jijimon overlays. Lifespan snapshots and visual-clock updates coexist with the corrected camera-before-frame ordering. **Merged automated suite:468 passed in12.96s.** Earlier real-core measurements below describe the feature tests before this publication merge; no new post-merge real-game performance claim is made.
+
 ## How the pieces connect
 
 ```text

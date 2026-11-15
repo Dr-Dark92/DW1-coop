@@ -83,7 +83,7 @@ def test_shared_memory_frame_round_trip():
         game = S.SplitGame.__new__(S.SplitGame)
         game.memory = memory
         game._last = 0
-        S.HEADER.pack_into(memory.buf, 0, 0, 0, 0, 0, 0)
+        S.HEADER.pack_into(memory.buf, 0, 0, 0, 0, 0, 0, 0)
         assert game.newest_frame() is None
         S.struct.pack_into("<III", memory.buf, 0, 3, 2, 1)  # odd: still being written
         assert game.newest_frame() is None
