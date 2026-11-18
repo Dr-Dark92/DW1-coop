@@ -48,6 +48,7 @@ from .shared_data import app_settings
 from .title_screens import TitleStore
 from .zone_import import OverrideStore, check_package
 from .zone_export import SUFFIX as ZONE_SUFFIX, MapSource, export_package, pathing_image, slug as zone_slug
+from .map_scripts import Scripts
 from .mmd import parse_mmd_static, parse_usa_skeleton, validate_texture_materials
 from .project import import_project, layout_from_catalogue, source_state
 from .tim import decode_tim, export_png
@@ -398,10 +399,16 @@ class ZoneWorker(QObject):
                 self.succeeded.emit(pathing)
                 return
             options = self.export
+            scripts = None
+            if options.get("scripts"):
+                with layout_from_catalogue(self.catalogue).open() as reader:
+                    dg, maphead = (reader.read_extent_range(item.extent, item.extent_size, item.offset, item.size,
+                                                            cancelled=cancelled) for item in options["scripts"])
+                scripts = Scripts(dg, maphead)
             manifest = export_package(options["destination"], options["zones"], sources, scenes, entries,
                                       options["map_names"], options["character_names"], options["meta"],
                                       options.get("all_palettes", False), cancelled,
-                                      lambda value, text: self.progress.emit(3 + value * 97 // 100, text))
+                                      lambda value, text: self.progress.emit(3 + value * 97 // 100, text), scripts)
             self.succeeded.emit(manifest)
         except Cancelled as exc:
             self.cancelled.emit(str(exc))
@@ -1303,13 +1310,19 @@ class Workspace(QWidget):
                     dict(scene_row), dict(tfs_row) if tfs_row is not None else None)
         return self._entry(executable), maps
 
+    def _script_files(self) -> tuple[IsoEntry, IsoEntry] | None:
+        """SCN/DG.SCN and SCN/MAPHEAD.SCN, which say what each map's scripts show and hide, if the disc has them."""
+        found = {row["original_path"].upper(): row for row in self.rows if row["offset"] is None}
+        rows = [found.get(path) for path in ("SCN/DG.SCN", "SCN/MAPHEAD.SCN")]
+        return tuple(self._entry(row) for row in rows) if all(rows) else None
+
     def _start_zone_worker(self, task: str, title: str, export: dict | None, on_success):
         if self.zone_thread and self.zone_thread.isRunning():
             raise ValueError("A zone export or route planning is already running.")
         executable, maps = self._zone_maps()
         dialog = QProgressDialog(title, "Cancel", 0, 100, self)
         dialog.setWindowModality(Qt.WindowModality.WindowModal); dialog.setAutoClose(False); dialog.show()
-        export = {**(export or {}), "overrides": self._override_files()}
+        export = {**(export or {}), "overrides": self._override_files(), "scripts": self._script_files()}
         thread, worker = QThread(self), ZoneWorker(self.catalogue, executable, maps, task, export)
         worker.moveToThread(thread); thread.started.connect(worker.run)
         worker.progress.connect(self._zone_progress_changed)

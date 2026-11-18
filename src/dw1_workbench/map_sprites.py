@@ -132,16 +132,19 @@ def _blend(under: tuple[int, int, int], over: tuple[int, int, int], mode: int) -
     return tuple(min(255, a + b // 4) for a, b in zip(under, over))
 
 
-def compose(background: Image.Image, vram: Vram, scene: MapScene, with_hidden: bool) -> Image.Image:
+def compose(background: Image.Image, vram: Vram, scene: MapScene, with_hidden: bool,
+            flags: dict[int, int] | None = None) -> Image.Image:
     """The background with each instance's first frame drawn on it, in instance order, as renderMapOverlays does;
-    with_hidden also draws the instances that wait for a script."""
+    with_hidden also draws the instances that wait for a script. `flags` replaces instances' flags as the map's
+    scripts set them (map_scripts.simulate)."""
     image = background.convert("RGB")
     pixels = image.load()
-    for instance in scene.instances:
+    for number, instance in enumerate(scene.instances):
         frame = instance.frames[0][0] if instance.frames else -1
         if frame < 0 or frame >= len(scene.objects) or instance.flag & SNOWFLAKE:
             continue
-        if instance.flag == HIDDEN and not with_hidden:
+        flag = (flags or {}).get(number, instance.flag)
+        if flag == HIDDEN and not with_hidden:
             continue
         piece = scene.objects[frame]
         blended = piece.transparency != OPAQUE

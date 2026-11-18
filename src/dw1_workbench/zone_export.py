@@ -1,8 +1,9 @@
 """Zone packages: one zone or a bundle of zones exported as a single versioned .dw1zone (ZIP) file.
 
 A package keeps the original MAP and TFS bytes unchanged (with SHA-256), the decoded scene data, rendered
-backgrounds (on their own, with the sprite pieces the game shows from the start, and with every piece a script can
-show, such as File City's Whamon dock; each piece also as its own picture, map_sprites.py) and floor grids, pathing (walkable regions, spawn-to-exit routes, map-to-map routes inside the
+backgrounds (on their own; with the sprite pieces a new game shows, after the story's events as the map's scripts
+show and hide them, such as File City's Whamon dock and Geko Swamp's cleared grass, and with every piece; each piece
+also as its own picture: map_sprites.py, map_scripts.py) and floor grids, pathing (walkable regions, spawn-to-exit routes, map-to-map routes inside the
 package) and the links in and out of the package. Play-time observations are never included. Unknown
 fields are carried as raw values. The package contains game data from the user's own disc: keep it private.
 """
@@ -26,6 +27,7 @@ from .errors import Cancelled
 from .live import model_tile
 from .maps import (FLOOR_GRID, MapEntry, MapScene, TfsFile, floor_grid_with_digimon, follow_description,
                    map_exits, render_background, trigger_summary)
+from .map_scripts import Scripts, simulate
 from .map_sprites import compose, map_vram, piece_image
 from .pathing import MapPathing, map_pathing, regions, routes_from
 
@@ -165,7 +167,7 @@ def pathing_document(pathing: MapPathing) -> dict:
 def export_package(destination: Path, zones: list[str], sources: dict[int, MapSource], all_scenes: dict[int, MapScene],
                    entries: list[MapEntry], map_names: dict[int, str], character_names: dict[int, str], meta: dict,
                    all_palettes: bool = False, cancelled=lambda: False,
-                   progress=lambda value, text: None) -> dict:
+                   progress=lambda value, text: None, scripts: Scripts | None = None) -> dict:
     """Write the package for `zones` (all maps in `sources` belong to them) and return its manifest."""
     destination = Path(destination)
     if destination.suffix != SUFFIX:
@@ -211,8 +213,19 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                 if source.tfs_bytes is not None:
                     add(f"{folder}/{entry.name}.TFS", _checked(source.tfs_bytes, source.tfs_row, entry.tfs_path),
                         "original TFS file")
-                add(f"{folder}/map.json", json.dumps(map_document(source, pathing[index], map_names, character_names,
-                                                                  inbound[index]), indent=1).encode(), "decoded map")
+                document = map_document(source, pathing[index], map_names, character_names, inbound[index])
+                states = {}
+                if scripts is not None and scene.instances:
+                    try:
+                        states = {"new_game": simulate(scripts, index, False), "after_events": simulate(scripts, index, True)}
+                    except Exception:
+                        states = {}
+                if states:
+                    document["script_piece_flags"] = {
+                        "rules": "instance: flag (1 hidden, 0 shown) as the map's entry scripts set it; after_events "
+                                 "assumes every story trigger is set, new_game none",
+                        **{state: {str(k): v for k, v in sorted(flags.items())} for state, flags in states.items()}}
+                add(f"{folder}/map.json", json.dumps(document, indent=1).encode(), "decoded map")
                 add(f"{folder}/pathing.json", json.dumps(pathing_document(pathing[index])).encode(), "pathing")
                 add(f"{folder}/floor-grid.png", _png(floor_grid_with_digimon(scene)), "floor grid with Digimon")
                 add(f"{folder}/pathing.png", _png(pathing_image(scene, pathing[index])), "pathing overview")
@@ -226,11 +239,16 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                         if scene.instances:
                             try:
                                 vram = map_vram(scene, source.map_bytes, source.tfs, palette)
-                                start, every = compose(image, vram, scene, False), compose(image, vram, scene, True)
+                                start = compose(image, vram, scene, False, states.get("new_game"))
+                                every = compose(image, vram, scene, True)
+                                events = compose(image, vram, scene, False, states["after_events"]) if states else None
                             except Exception:
                                 continue  # pieces the decoder rejects are left out; the MAP file has them
                             add(f"{folder}/background-palette{palette}-objects.png", _png(start),
-                                "background with the sprite pieces shown from the start")
+                                "background with the sprite pieces a new game shows")
+                            if events is not None:
+                                add(f"{folder}/background-palette{palette}-objects-events.png", _png(events),
+                                    "background with the sprite pieces shown after the story's events")
                             add(f"{folder}/background-palette{palette}-objects-all.png", _png(every),
                                 "background with every sprite piece, including those scripts show later")
                 if scene.objects:
@@ -280,6 +298,8 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                            "3D map geometry and door models are not decoded",
                            "sprite pieces are drawn in their first frame where they start; moving ones and snowflakes "
                            "are not animated",
+                           "after-events pictures assume every story trigger is set; tests of stats, items and money "
+                           "count as false, and script walks stop at menus and SWITCH",
                            "contains game data from the user's own disc; do not share publicly"],
                 "files": files,
             }
