@@ -1,7 +1,8 @@
 """Zone packages: one zone or a bundle of zones exported as a single versioned .dw1zone (ZIP) file.
 
 A package keeps the original MAP and TFS bytes unchanged (with SHA-256), the decoded scene data, rendered
-backgrounds and floor grids, pathing (walkable regions, spawn-to-exit routes, map-to-map routes inside the
+backgrounds (on their own, with the sprite pieces the game shows from the start, and with every piece a script can
+show, such as File City's Whamon dock; each piece also as its own picture, map_sprites.py) and floor grids, pathing (walkable regions, spawn-to-exit routes, map-to-map routes inside the
 package) and the links in and out of the package. Play-time observations are never included. Unknown
 fields are carried as raw values. The package contains game data from the user's own disc: keep it private.
 """
@@ -25,6 +26,7 @@ from .errors import Cancelled
 from .live import model_tile
 from .maps import (FLOOR_GRID, MapEntry, MapScene, TfsFile, floor_grid_with_digimon, follow_description,
                    map_exits, render_background, trigger_summary)
+from .map_sprites import compose, map_vram, piece_image
 from .pathing import MapPathing, map_pathing, regions, routes_from
 
 PACKAGE_FORMAT = "dw1-zone-package"
@@ -221,6 +223,25 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                         except Exception:
                             break  # backgrounds the decoder rejects are left out; the raw TFS is included
                         add(f"{folder}/background-palette{palette}.png", _png(image), "background")
+                        if scene.instances:
+                            try:
+                                vram = map_vram(scene, source.map_bytes, source.tfs, palette)
+                                start, every = compose(image, vram, scene, False), compose(image, vram, scene, True)
+                            except Exception:
+                                continue  # pieces the decoder rejects are left out; the MAP file has them
+                            add(f"{folder}/background-palette{palette}-objects.png", _png(start),
+                                "background with the sprite pieces shown from the start")
+                            add(f"{folder}/background-palette{palette}-objects-all.png", _png(every),
+                                "background with every sprite piece, including those scripts show later")
+                if scene.objects:
+                    try:
+                        vram = map_vram(scene, source.map_bytes, source.tfs)
+                        pieces = [piece_image(vram, piece) for piece in scene.objects]
+                    except Exception:
+                        pieces = []
+                    for number, picture in enumerate(pieces):
+                        if picture.width and picture.height:  # a few pieces are empty placeholders
+                            add(f"{folder}/objects/object-{number:03d}.png", _png(picture), "sprite piece")
             progress(85, "Planning routes between maps")
             route_table = []
             for start in indices:
@@ -257,6 +278,8 @@ def export_package(destination: Path, zones: list[str], sources: dict[int, MapSo
                                       for document in zone_documents),
                 "limits": ["map scripts are not decoded: script-driven exits, spawn rules and item spawns are missing",
                            "3D map geometry and door models are not decoded",
+                           "sprite pieces are drawn in their first frame where they start; moving ones and snowflakes "
+                           "are not animated",
                            "contains game data from the user's own disc; do not share publicly"],
                 "files": files,
             }
